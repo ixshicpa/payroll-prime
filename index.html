@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Prime Laundry · DTR &amp; Payroll</title>
-<meta name="description" content="Prime Laundry DTR and payroll: attendance import, department approvals, payroll cut-offs and BIR reports.">
+<title>DTR &amp; Payroll · Prime Laundry · TSL Corporation · Prime CBL</title>
+<meta name="description" content="DTR and payroll for Prime Laundry, TSL Corporation and Prime CBL: attendance import, department approvals, payroll cut-offs and BIR reports.">
 <meta name="theme-color" content="#0f2d38">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Prime Payroll">
+<meta name="apple-mobile-web-app-title" content="DTR Payroll">
 <meta name="format-detection" content="telephone=no">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -58,6 +58,13 @@ button,input,select,textarea{font:inherit;color:inherit}
 .brand{display:flex;flex-direction:column;margin-right:auto;min-width:0}
 .brand b{font-size:17px;font-weight:800;letter-spacing:-.01em}
 .brand span{font-size:12.5px;opacity:.7}
+.brand .co-label{font-size:11.5px;opacity:.7}
+.brand .co-sel{background:transparent;color:var(--on-head);border:1px solid rgba(255,255,255,.28);border-radius:var(--radius-sm);padding:5px 28px 5px 10px;font-weight:800;font-size:16px;max-width:min(420px,80vw);appearance:none;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 15px) 55%,calc(100% - 10px) 55%;background-size:5px 5px;background-repeat:no-repeat;text-overflow:ellipsis}
+.brand .co-sel:hover{background-color:rgba(255,255,255,.08)}
+.brand .co-sel option{color:#17262e}
+.co-pick{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;margin:14px 0 0}
+.co-pick legend{font-weight:700;font-size:13px;padding:0 4px}
+.co-pick .chk{margin:4px 18px 4px 0;display:inline-flex}
 .period{display:flex;flex-direction:column;gap:2px}
 .period .plabel{font-size:11.5px;opacity:.7}
 .mp{position:relative;display:flex;align-items:stretch;border:1px solid rgba(255,255,255,.28);border-radius:var(--radius-sm)}
@@ -285,7 +292,7 @@ body.signed-out .top .period,body.signed-out .top .who,body.signed-out nav.tabs{
 <div class="offline" id="offline" role="status" hidden>You’re offline. Changes can’t be saved until the connection is back.</div>
 <header class="top">
   <div class="top-inner">
-    <div class="brand"><b>Prime Laundry</b><span>DTR &amp; Payroll</span></div>
+    <div class="brand" id="brand"><b>DTR &amp; Payroll</b><span>Prime Laundry · TSL Corporation · Prime CBL</span></div>
     <div class="period"><span class="plabel" id="pmLabel">Payroll month</span><div class="mp"><button class="mp-nav" data-act="pmStep" data-d="-1" aria-label="Previous month">‹</button><button class="mp-btn" id="pmBtn" data-act="pmOpen" aria-haspopup="dialog" aria-expanded="false" aria-labelledby="pmLabel pmBtn"></button><button class="mp-nav" data-act="pmStep" data-d="1" aria-label="Next month">›</button><div class="mp-pop" id="pmPop" role="dialog" aria-label="Choose payroll month" hidden></div></div></div>
     <div class="who" id="who"></div>
   </div>
@@ -316,6 +323,35 @@ const DEFAULTS={
   hol_rh_prem:1.0, hol_snw_prem:0.30, rd_prem:0.30,
   holidays:[], departments:DEFAULT_DEPARTMENTS.slice()
 };
+/* Companies. Each company has its own employees, attendance, payroll, advances, deadlines, settings and activity log.
+   Prime Laundry keeps the original storage locations so existing records are untouched; the others live under companies/<id>/.
+   User accounts and "Access by role" are shared, and each account lists the companies it may open. */
+const COMPANIES=[
+  {id:'prime',name:'Prime Laundry Technology and Equipment Inc',short:'Prime Laundry',file:'prime-laundry',prefix:'',
+    defaults:{company:'PRIME LAUNDRY TECHNOLOGY & EQUIPMENT',address:'#6 Narciso Street, Brgy. Canumay East, Valenzuela City'}},
+  {id:'tsl',name:'TSL Corporation',short:'TSL Corporation',file:'tsl-corporation',prefix:'companies/tsl/',
+    defaults:{company:'TSL CORPORATION',address:''}},
+  {id:'cbl',name:'Prime CBL',short:'Prime CBL',file:'prime-cbl',prefix:'companies/primecbl/',
+    defaults:{company:'PRIME CBL',address:''}}
+];
+const ALL_CO=COMPANIES.map(c=>c.id);
+const coById=id=>COMPANIES.find(c=>c.id===id);
+const curCo=()=>coById(S.company)||COMPANIES[0];
+const cp=p=>curCo().prefix+p;
+const coDefaults=()=>({...DEFAULTS,...curCo().defaults});
+/* Companies an account may open. The main admin always has all. Accounts made before companies existed:
+   Admins keep all companies, everyone else keeps Prime Laundry (the only company at the time). */
+function companiesOf(a){
+  if(!a)return[];
+  if(a.builtin||a.main||a.email===BOOT_ACCOUNT.email)return ALL_CO.slice();
+  if(Array.isArray(a.companies))return ALL_CO.filter(id=>a.companies.includes(id));
+  return a.role==='ADMIN'?ALL_CO.slice():['prime'];
+}
+const myCompanies=()=>companiesOf(S.account);
+const coNames=ids=>ids.length===ALL_CO.length?'All companies':ids.map(id=>coById(id).short).join(', ');
+const CO_KEY='pl-company';
+function pickCompany(email,cos){let last=null;try{last=localStorage.getItem(CO_KEY+':'+email)}catch(e){}return cos.includes(last)?last:cos[0]}
+function rememberCompany(email,id){try{localStorage.setItem(CO_KEY+':'+email,id)}catch(e){}}
 const CAN={
   viewEmployees:['ADMIN','HR','PAYROLL'], editEmployees:['ADMIN','HR'], importDtr:['ADMIN','HR'],
   viewDtr:['ADMIN','HR','PAYROLL','DEPT_HEAD'], editTimes:['ADMIN','HR'], approveDtr:['ADMIN','HR','DEPT_HEAD'],
@@ -507,7 +543,7 @@ let Store=Local;
 
 /* ---------------- State ---------------- */
 const S={
-  mode:'loading', ready:{employees:false,dtr:false},
+  mode:'loading', company:null, ready:{employees:false,dtr:false},
   employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
@@ -667,7 +703,7 @@ async function pbkdf2(pw,saltB64,iter){
 async function makeHash(pw){const salt=b64(crypto.getRandomValues(new Uint8Array(16)));const iter=210000;return{salt,iter,hash:await pbkdf2(pw,salt,iter)}}
 const ctEq=(a,b)=>{if(a.length!==b.length)return false;let r=0;for(let i=0;i<a.length;i++)r|=a.charCodeAt(i)^b.charCodeAt(i);return r===0};
 const acctId=email=>String(email||'').trim().toLowerCase().replace(/[^a-z0-9_\-.~:@+]/g,'_');
-const publicAccount=a=>({email:a.email,full_name:a.full_name||a.email,role:a.role,department:a.department||null,builtin:!!(a.builtin||a.main),custom:!!a.custom,perms:a.perms||null});
+const publicAccount=a=>({email:a.email,full_name:a.full_name||a.email,role:a.role,department:a.department||null,builtin:!!(a.builtin||a.main),custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null});
 async function findAccount(email){
   const id=acctId(email);
   let doc=null;try{doc=await Store.get('accounts/'+id)}catch(e){doc=null}
@@ -694,13 +730,15 @@ async function signIn(email,pw){
     throw new Error(a&&a.active===false&&ok?'This account is disabled. Ask the administrator to reactivate it.':`Incorrect email or password. ${MAX_TRIES-tries} attempt(s) left.`);
   }
   setLock({});
-  S.account=publicAccount(a);saveSession(S.account.email);
+  const acc=publicAccount(a),cos=companiesOf(acc);
+  if(!cos.length)throw new Error('This account has not been given access to any company yet. Ask the administrator.');
+  S.account=acc;S.company=pickCompany(acc.email,cos);S.settings=coDefaults();syncDepartments();saveSession(S.account.email);
   logAction('LOGIN','account',S.account.email,'Signed in');
   startData();
 }
 function signOut(reason){
   if(S.account)logAction('LOGOUT','account',S.account.email,reason||'Signed out');
-  clearSession();S.account=null;S.viewAs=null;stopData();closeDlg();
+  clearSession();S.account=null;S.viewAs=null;stopData();closeDlg();S.company=null;
   S.route='dashboard';history.replaceState(null,'','#dashboard');
   render();if(reason)toast(reason);
 }
@@ -712,7 +750,7 @@ setInterval(()=>{if(S.account&&Date.now()-lastActive>IDLE_MS)signOut('Signed out
 let auditQueue=Promise.resolve();
 function logAction(action,entity,entityId,details){
   const entry={at:nowISO(),by:actor(),action,entity,entity_id:entityId==null?null:String(entityId),details:details||''};
-  const path='audit/'+entry.at.slice(0,7);
+  const path=cp('audit/'+entry.at.slice(0,7));
   auditQueue=auditQueue.then(async()=>{
     try{const d=(await Store.get(path))||{entries:[]};const entries=(d.entries||[]).concat(entry).slice(-1500);await Store.set(path,{entries})}catch(e){console.warn('audit',e)}
   });
@@ -770,8 +808,31 @@ function scheduleRender(){
 }
 document.addEventListener('focusout',()=>{if(renderDeferred){setTimeout(()=>{const a=document.activeElement;if(!(a&&$('#view').contains(a)&&/INPUT|SELECT|TEXTAREA/.test(a.tagName))){renderDeferred=false;scheduleRender()}},150)}});
 
+let brandSig='';
+function renderBrand(){
+  const b=$('#brand');if(!b)return;
+  const cos=S.account?myCompanies():[],sig=S.account?S.company+'|'+cos.join(','):'out';
+  if(sig===brandSig)return;brandSig=sig;
+  if(!S.account){b.innerHTML='<b>DTR &amp; Payroll</b><span>Prime Laundry · TSL Corporation · Prime CBL</span>';document.title='DTR & Payroll · Prime Laundry · TSL Corporation · Prime CBL';return}
+  document.title=`${curCo().short} · DTR & Payroll`;
+  b.innerHTML=cos.length>1
+    ?`<label class="co-label" for="coSel">Company</label><select id="coSel" class="co-sel" data-change="company">${cos.map(id=>`<option value="${id}" ${id===S.company?'selected':''}>${h(coById(id).name)}</option>`).join('')}</select>`
+    :`<b>${h(curCo().name)}</b><span>DTR &amp; Payroll</span>`;
+}
+function switchCompany(id){
+  if(!S.account||id===S.company)return;
+  if(!myCompanies().includes(id)){toast('You don’t have access to that company.',true);renderBrand();return}
+  const ym=S.period&&S.period.ym;
+  S.company=id;rememberCompany(S.account.email,id);
+  S.settings=coDefaults();syncDepartments();S.viewAs=null;closeDlg();
+  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null});
+  S.auditMonth=todayISO().slice(0,7);
+  startData();
+  if(ym&&ym!==S.period.ym){S.period=monthPeriods(ym);watchPeriod()}
+  render();toast(`Now working in ${curCo().name}`);
+}
 function renderChrome(){
-  const r=role();
+  const r=role();renderBrand();
   $('#tabs').innerHTML=NAV.filter(([id,,k])=>!k||can(k)).map(([id,label])=>`<a href="#${id}" ${S.route===id?'aria-current="page"':''}>${h(label)}</a>`).join('');
   $('#pmBtn').textContent=fmtMonth(S.period.ym);
   const sub=ROLES[r]+(r==='DEPT_HEAD'&&dept()?` · ${dept()}`:'');
@@ -782,7 +843,7 @@ function render(){
   if(S.mode==='loading'){$('#view').innerHTML='<div class="loading">Loading…</div>';return}
   if(S.mode==='setup'){document.body.classList.add('signed-out');$('#view').innerHTML=pageSetup();return}
   document.body.classList.toggle('signed-out',!S.account);
-  if(!S.account){$('#view').innerHTML=pageLogin();const em=$('#loginEmail');if(em&&!em.value)em.focus();return}
+  if(!S.account){renderBrand();$('#view').innerHTML=pageLogin();const em=$('#loginEmail');if(em&&!em.value)em.focus();return}
   renderChrome();
   const r=role();
   let html='';
@@ -822,7 +883,7 @@ function pageNoAccess(){
 function pageLogin(){
   const lk=lockState(),locked=lk.until&&lk.until>Date.now();
   return `<div class="login-wrap"><div class="login-card">
-    <h1>Sign in</h1><p class="muted" style="margin:0">Prime Laundry DTR &amp; Payroll. Use the account given to you by HR.</p>
+    <h1>Sign in</h1><p class="muted" style="margin:0">DTR &amp; Payroll for Prime Laundry Technology and Equipment Inc, TSL Corporation and Prime CBL. Use the account given to you by HR. You’ll only see the companies your account is allowed to open.</p>
     <form data-form="login" autocomplete="on">
       ${S.ui.loginErr?`<div class="login-err" role="alert">${h(S.ui.loginErr)}</div>`:''}
       <label class="f">Email<input id="loginEmail" name="email" type="email" autocomplete="username" required value="${h(S.ui.loginEmail||'')}"></label>
@@ -913,11 +974,11 @@ async function saveDeadline(form){
   const fd=new FormData(form),key=form.dataset.key,date=fd.get('date'),time=fd.get('time');
   if(!date||!time){toast('Choose a date and time.',true);return}
   const at=`${date}T${time}`;
-  try{await Store.set('deadlines/'+key,{at,set_by:actor(),set_at:nowISO()});logAction('SET_DEADLINE','deadline',key,`Department head approvals due ${fmtDT(at)}`);toast('Deadline saved')}catch(e){writeError(e)}
+  try{await Store.set(cp('deadlines/')+key,{at,set_by:actor(),set_at:nowISO()});logAction('SET_DEADLINE','deadline',key,`Department head approvals due ${fmtDT(at)}`);toast('Deadline saved')}catch(e){writeError(e)}
 }
 async function clearDeadline(key){
   if(!(await confirmDlg('Remove this deadline?','Department heads will no longer see a countdown for this cut-off.','Remove',true)))return;
-  try{await Store.del('deadlines/'+key);logAction('CLEAR_DEADLINE','deadline',key,'Deadline removed');toast('Deadline removed')}catch(e){writeError(e)}
+  try{await Store.del(cp('deadlines/')+key);logAction('CLEAR_DEADLINE','deadline',key,'Deadline removed');toast('Deadline removed')}catch(e){writeError(e)}
 }
 /* Admin: today's changes */
 function dashToday(){
@@ -1096,7 +1157,7 @@ async function saveDtr(form){
     if(changes.length&&!patch.remarks&&!(r.remarks)){toast('Add a remark explaining the time correction.',true);return}
   }
   try{
-    await Store.update('dtr/'+id,patch);
+    await Store.update(cp('dtr/')+id,patch);
     S.ui.openRow=null;
     logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}`:''}${changes.length?'; '+changes.join(', '):''}`);
     toast('Review saved');scheduleRender();
@@ -1110,7 +1171,7 @@ async function bulkApprove(btn){
   try{
     for(const r of targets){
       const e=empById(r.employee_id);if(role()==='DEPT_HEAD'&&(!e||e.department!==dept()))continue;
-      await Store.update('dtr/'+r._id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()});n++;
+      await Store.update(cp('dtr/')+r._id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()});n++;
       if(n%5===0)btn.textContent=`Saving ${n}/${targets.length}…`;
     }
     logAction('BULK_APPROVE','dtr',null,`${n} records marked approved (overtime approvals unchanged)`);
@@ -1227,7 +1288,7 @@ async function doImport(){
   const rows=S.ui.importRows.filter(x=>x.match==='OK');
   S.ui.importBusy=true;S.ui.importProgress=0;scheduleRender();
   const lockCache={};
-  const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get('payroll/'+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
+  const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
   const loaded=new Map(S.dtr.map(r=>[r._id,r]));
   let saved=0,failed=0,skipped=S.ui.importRows.length-rows.length,i=0,lastErr=null;
   const src=S.ui.importTab==='paste'?'paste':'upload';
@@ -1237,9 +1298,9 @@ async function doImport(){
       if(await isLocked(x.date)){skipped++;continue}
       const id=`${x.employee_id}_${x.date}`;
       const inPeriod=x.date>=S.period.start&&x.date<=S.period.end;
-      const existing=inPeriod?loaded.get(id):await Store.get('dtr/'+id);
-      if(existing)await Store.update('dtr/'+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()});
-      else await Store.set('dtr/'+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
+      const existing=inPeriod?loaded.get(id):await Store.get(cp('dtr/')+id);
+      if(existing)await Store.update(cp('dtr/')+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()});
+      else await Store.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
         ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null});
       saved++;
     }catch(e){failed++;lastErr=e;if(errCode(e)==='invalid_argument'||errCode(e)==='quota_exceeded')break}
@@ -1253,13 +1314,13 @@ async function doImport(){
 async function saveSingle(form){
   const fd=new FormData(form);const eid=Number(fd.get('employee_id')),date=fd.get('date');
   if(!eid||!date){toast('Choose an employee and a date.',true);return}
-  const pd=await Store.get('payroll/'+cutoffFor(date).key).catch(()=>null);
+  const pd=await Store.get(cp('payroll/')+cutoffFor(date).key).catch(()=>null);
   if(pd&&pd.status==='APPROVED'){toast('That cut-off is approved and locked.',true);return}
   const id=`${eid}_${date}`, ti=fd.get('time_in')||null, to=fd.get('time_out')||null, rem=(fd.get('remarks')||'').trim();
   try{
-    const ex=await Store.get('dtr/'+id);
-    if(ex)await Store.update('dtr/'+id,{time_in:ti,time_out:to,source:'manual',imported_at:nowISO(),remarks:rem||ex.remarks||''});
-    else await Store.set('dtr/'+id,{employee_id:eid,work_date:date,time_in:ti,time_out:to,status_override:null,source:'manual',imported_at:nowISO(),ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:rem,review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null});
+    const ex=await Store.get(cp('dtr/')+id);
+    if(ex)await Store.update(cp('dtr/')+id,{time_in:ti,time_out:to,source:'manual',imported_at:nowISO(),remarks:rem||ex.remarks||''});
+    else await Store.set(cp('dtr/')+id,{employee_id:eid,work_date:date,time_in:ti,time_out:to,status_override:null,source:'manual',imported_at:nowISO(),ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:rem,review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null});
     logAction('MANUAL_ENTRY','dtr',id,`${empName(empById(eid))} ${date} ${ti||'—'}–${to||'—'}${rem?': '+rem:''}`);
     toast(ex?'Entry updated':'Entry added');form.reset();
   }catch(e){writeError(e)}
@@ -1318,7 +1379,7 @@ async function saveEmp(form){
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
   try{
-    await Store.set('employees/'+id,doc);
+    await Store.set(cp('employees/')+id,doc);
     logAction(existing?'UPDATE':'CREATE','employee',id,empName(doc)+(existing&&existing.monthly_rate!==doc.monthly_rate?` · monthly rate ${existing.monthly_rate??'—'} → ${doc.monthly_rate??'—'}`:''));
     S.ui.empForm=false;S.ui.empEdit=null;toast('Employee saved');scheduleRender();
   }catch(e){writeError(e)}
@@ -1471,7 +1532,7 @@ async function saveFile(filename,data,mime){
 }
 async function exportExcel(tabs){
   const items=computePayroll(),secs=tabs.map(t=>sectionData(t,items));
-  const base=`prime-laundry-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
+  const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
   if(typeof XLSX!=='undefined'){
     const wb=XLSX.utils.book_new();
     for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d),d.name);
@@ -1490,7 +1551,7 @@ async function setPayrollStatus(n,status){
   const doc=status==='APPROVED'
     ?{status,approved_by:actor(),approved_at:nowISO(),pay_start:c.payStart,pay_end:c.payEnd,att_start:c.start,att_end:c.end,totals:{employees:items.length,gross:r2(items.reduce((a,x)=>a+x[k].gross,0)),net:r2(items.reduce((a,x)=>a+x[k].net,0))}}
     :{status:'DRAFT',reopened_by:actor(),reopened_at:nowISO()};
-  try{await Store.set('payroll/'+c.key,doc);logAction(status==='APPROVED'?'APPROVE':'REOPEN','payroll',c.key,status==='APPROVED'?`${n===1?'1st':'2nd'} cut-off ${fmtRange(c.payStart,c.payEnd)}: net ${peso(doc.totals.net)} for ${doc.totals.employees} employees`:`${n===1?'1st':'2nd'} cut-off reopened`);toast(status==='APPROVED'?'Cut-off approved':'Cut-off reopened')}
+  try{await Store.set(cp('payroll/')+c.key,doc);logAction(status==='APPROVED'?'APPROVE':'REOPEN','payroll',c.key,status==='APPROVED'?`${n===1?'1st':'2nd'} cut-off ${fmtRange(c.payStart,c.payEnd)}: net ${peso(doc.totals.net)} for ${doc.totals.employees} employees`:`${n===1?'1st':'2nd'} cut-off reopened`);toast(status==='APPROVED'?'Cut-off approved':'Cut-off reopened')}
   catch(e){writeError(e)}
 }
 function advancesDialog(n){
@@ -1513,7 +1574,7 @@ async function saveAdvances(form){
     if(a>0)items[e.id]={amount:r2(a),note};
     const pa=prev[e.id]?prev[e.id].amount:0;if(r2(a)!==r2(pa||0))changes.push(`${empName(e)} ${amt(pa||0)} → ${amt(a)}`);
   }
-  try{await Store.set('advances/'+c.key,{items,updated_by:actor(),updated_at:nowISO()});logAction('ADVANCES','payroll',c.key,changes.join('; ')||'No changes');closeDlg();toast('Company advances saved')}
+  try{await Store.set(cp('advances/')+c.key,{items,updated_by:actor(),updated_at:nowISO()});logAction('ADVANCES','payroll',c.key,changes.join('; ')||'No changes');closeDlg();toast('Company advances saved')}
   catch(e){writeError(e)}
 }
 
@@ -1533,11 +1594,11 @@ function pageSettings(){
   const n=(k,l,step='any')=>`<label class="f">${l}<input type="number" name="${k}" step="${step}" value="${h(st[k])}" ${dis}></label>`;
   const t=(k,l)=>`<label class="f">${l}<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="${k}" value="${h(st[k])}" ${dis}></label>`;
   const hol=[...(st.holidays||[])].sort((a,b)=>a.date.localeCompare(b.date));
-  return `<h1>Settings</h1><p class="sub">Payroll rules from the payroll file. Changes apply to every unapproved cut-off immediately. Payroll is paid on the 15th (1st cut-off) and 30th/31st (2nd cut-off).</p>
+  return `<h1>Settings</h1><p class="sub">Settings for <b>${h(curCo().name)}</b> only; each company keeps its own. Payroll rules from the payroll file. Changes apply to every unapproved cut-off immediately. Payroll is paid on the 15th (1st cut-off) and 30th/31st (2nd cut-off).</p>
   ${backupPanel()}
   <div class="panel"><h2>Departments</h2><p class="muted small">New departments work everywhere the existing ones do: employees can be assigned to them, department heads can be set for them, DTR rows are matched to them, and they appear in filters, deadlines and reports.</p>
   <div class="tablewrap"><table><thead><tr><th>Department</th><th class="n">Employees</th><th class="n">Department heads</th><th></th></tr></thead><tbody>
-  ${DEPARTMENTS.map(d=>{const ne=S.employees.filter(e=>e.department===d).length,nh=S.accounts.filter(a=>a.role==='DEPT_HEAD'&&a.department===d).length;return`<tr><td><b>${h(d)}</b></td><td class="n">${ne}</td><td class="n">${nh}</td><td style="text-align:right">${edit?(ne||nh?`<span class="muted small" title="Move its employees and department heads to another department first">In use</span>`:`<button class="btn sm danger" data-act="delDept" data-name="${h(d)}">Remove</button>`):''}</td></tr>`}).join('')}
+  ${DEPARTMENTS.map(d=>{const ne=S.employees.filter(e=>e.department===d).length,nh=S.accounts.filter(a=>a.role==='DEPT_HEAD'&&a.department===d&&companiesOf(a).includes(S.company)).length;return`<tr><td><b>${h(d)}</b></td><td class="n">${ne}</td><td class="n">${nh}</td><td style="text-align:right">${edit?(ne||nh?`<span class="muted small" title="Move its employees and department heads to another department first">In use</span>`:`<button class="btn sm danger" data-act="delDept" data-name="${h(d)}">Remove</button>`):''}</td></tr>`}).join('')}
   </tbody></table></div>
   ${edit?`<form class="row" data-form="dept" style="margin-top:12px"><input name="name" required maxlength="60" placeholder="New department name, e.g. Logistics" aria-label="New department name" style="flex:1;min-width:220px"><button class="btn primary">Add department</button></form>`:''}</div>
   <div class="panel"><h2>Holidays</h2><p class="muted small">Regular holidays use the RH rates; special non-working days use the SNW rates. Holidays aren't counted as absences.</p>
@@ -1565,11 +1626,11 @@ async function saveSettings(form){
   if(next.cutoff_day<2||next.cutoff_day>28){toast('The attendance month start day must be between 2 and 28.',true);return}
   if(next.cut1_end<1||next.cut1_end>=next.cutoff_day-1){toast('The 1st cut-off end day must be before the attendance month start day.',true);return}
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=next[k];
-  try{await Store.set('settings/main',save);logAction('UPDATE','settings',null,'Payroll settings changed');toast('Settings saved')}catch(e){writeError(e)}
+  try{await Store.set(cp('settings/main'),save);logAction('UPDATE','settings',null,'Payroll settings changed');toast('Settings saved')}catch(e){writeError(e)}
 }
 async function saveDepartments(list,action,msg){
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=S.settings[k];save.departments=list;
-  try{await Store.set('settings/main',save);logAction(action,'department',null,msg);toast(msg)}catch(e){writeError(e)}
+  try{await Store.set(cp('settings/main'),save);logAction(action,'department',null,msg);toast(msg)}catch(e){writeError(e)}
 }
 async function addDepartment(form){
   if(!can('settings')){toast('You don’t have access to change settings.',true);return}
@@ -1579,14 +1640,14 @@ async function addDepartment(form){
   await saveDepartments([...DEPARTMENTS,name],'ADD_DEPARTMENT',`Department added: ${name}`);form.reset();
 }
 async function removeDepartment(name){
-  if(S.employees.some(e=>e.department===name)||S.accounts.some(a=>a.role==='DEPT_HEAD'&&a.department===name)){toast('This department still has employees or a department head. Move them first.',true);return}
+  if(S.employees.some(e=>e.department===name)||S.accounts.some(a=>a.role==='DEPT_HEAD'&&a.department===name&&companiesOf(a).includes(S.company))){toast('This department still has employees or a department head. Move them first.',true);return}
   if(DEPARTMENTS.length<=1){toast('Keep at least one department.',true);return}
   if(!(await confirmDlg('Remove this department?',`${name} will no longer be offered for employees or department heads. Past records keep their department name.`,'Remove',true)))return;
   await saveDepartments(DEPARTMENTS.filter(d=>d!==name),'REMOVE_DEPARTMENT',`Department removed: ${name}`);
 }
 async function saveHolidays(list,msg){
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=S.settings[k];save.holidays=list;
-  try{await Store.set('settings/main',save);logAction('UPDATE','holidays',null,msg);toast(msg)}catch(e){writeError(e)}
+  try{await Store.set(cp('settings/main'),save);logAction('UPDATE','holidays',null,msg);toast(msg)}catch(e){writeError(e)}
 }
 
 /* ---------- User accounts ---------- */
@@ -1597,23 +1658,32 @@ function allAccounts(){
   return list.sort((a,b)=>(a.role+a.email).localeCompare(b.role+b.email));
 }
 function pageUsers(){
-  const u=S.ui, accts=allAccounts(), ed=u.acctEdit?accts.find(a=>a.email===u.acctEdit):null;
+  const u=S.ui, all=allAccounts(), ed=u.acctEdit?all.find(a=>a.email===u.acctEdit):null;
+  const mine=myCompanies(), fco=mine.includes(u.acctCo)?u.acctCo:'';
+  // Only accounts that share a company with you are listed; the company filter narrows it further.
+  const accts=all.filter(a=>{const c=companiesOf(a);return c.some(id=>mine.includes(id))&&(!fco||c.includes(fco))});
+  const edCos=ed?companiesOf(ed):[S.company];
   const opt=(arr,cur)=>arr.map(([v,l])=>`<option value="${v}" ${String(cur||'')===v?'selected':''}>${h(l)}</option>`).join('');
-  let html=`<div class="row"><div><h1>User accounts</h1><p class="sub">Everyone signs in with their own email and password. Department heads only see their own department.</p></div><span class="spacer"></span>${!u.acctForm?'<button class="btn primary" data-act="newAcct">Add account</button>':''}</div>`;
+  let html=`<div class="row"><div><h1>User accounts</h1><p class="sub">Everyone signs in with their own email and password. Each account opens only the companies ticked for it. Department heads only see their own department.</p></div><span class="spacer"></span>${!u.acctForm?'<button class="btn primary" data-act="newAcct">Add account</button>':''}</div>`;
   if(u.acctForm)html+=`<form class="panel" data-form="acct"><h2>${ed?'Edit '+h(ed.email):'New account'}</h2><div class="grid">
     <label class="f">Email${ed?' (sign-in email)':''}<input name="email" type="email" required autocomplete="off" value="${h(ed?ed.email:'')}"></label>
     <label class="f">Full name<input name="full_name" required value="${h(ed?ed.full_name||'':'')}"></label>
     <label class="f">Role<select name="role" ${ed&&ed.builtin?'disabled':''}>${opt([['DEPT_HEAD','Department head'],['HR','HR'],['PAYROLL','Payroll'],['ADMIN','Admin']],ed?ed.role:'DEPT_HEAD')}</select></label>
-    <label class="f">Department (heads only)<select name="department">${opt([['','Not applicable'],...DEPARTMENTS.map(d=>[d,d])],ed?ed.department:'')}</select></label>
+    <label class="f">Department (heads only)<select name="department">${opt([['','Not applicable'],...[...new Set([...DEPARTMENTS,...(ed&&ed.department?[ed.department]:[])])].map(d=>[d,d])],ed?ed.department:'')}</select></label>
     <label class="f">${ed?'New password (leave blank to keep)':'Password'}<input name="password" type="password" minlength="8" autocomplete="new-password" ${ed?'':'required'}></label>
     <label class="f">Status<select name="active" ${ed&&ed.builtin?'disabled':''}>${opt([['YES','Active'],['NO','Disabled']],ed&&ed.active===false?'NO':'YES')}</select></label>
   </div>
+  <fieldset class="co-pick"><legend>Companies this account can open</legend>
+    ${COMPANIES.map(c=>{const lock=(ed&&ed.builtin)||!mine.includes(c.id);return `<label class="chk"><input type="checkbox" name="co_${c.id}" ${(ed&&ed.builtin)||edCos.includes(c.id)?'checked':''} ${lock?'disabled':''}> ${h(c.name)}</label>`}).join('')}
+    <p class="muted small" style="margin:6px 0 0">${ed&&ed.builtin?'The main admin can always open every company.':'After signing in, people with more than one company switch between them at the top of the page. Companies you can’t open yourself are shown but can’t be changed here.'}</p>
+  </fieldset>
   ${ed&&ed.builtin?'':`<div style="margin-top:14px"><label class="f" style="max-width:320px">Access<select name="access_mode" data-change="accessMode"><option value="role" ${ed&&ed.custom?'':'selected'}>Same as role (set under “Access by role”)</option><option value="custom" ${ed&&ed.custom?'selected':''}>Custom for this person</option></select></label>
     <div id="customAccess" style="margin-top:10px;${ed&&ed.custom?'':'display:none'}">${permChecklist('p_',ed&&ed.custom&&ed.perms?{...roleDefaults(ed.role),...ed.perms}:roleAccess(ed?ed.role:'DEPT_HEAD'))}</div></div>`}
   <p class="muted small">Passwords need at least 8 characters with a letter and a number. They are stored as salted hashes only.</p>
   <div class="row">${ed&&!ed.builtin&&!(S.account&&ed.email===S.account.email)?`<button type="button" class="btn danger" data-act="deleteAcct" data-id="${h(ed.email)}">Delete account</button>`:''}${ed&&ed.builtin?'<span class="muted small">The main admin account can’t be deleted.</span>':''}${ed&&!ed.builtin&&S.account&&ed.email===S.account.email?'<span class="muted small">You can’t delete the account you’re signed in with.</span>':''}<span class="spacer"></span><button type="button" class="btn" data-act="cancelAcct">Cancel</button><button class="btn primary">Save account</button></div></form>`;
-  html+=`<div class="tablewrap"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Department</th><th>Access</th><th>Status</th><th>Updated</th></tr></thead><tbody>
-  ${accts.map(a=>`<tr class="click" data-act="editAcct" data-id="${h(a.email)}"><td><b>${h(a.email)}</b>${a.builtin?' <span class="chip acc">Main admin</span>':''}${S.account&&a.email===S.account.email?' <span class="chip">You</span>':''}</td><td>${h(a.full_name||'')}</td><td>${h(ROLES[a.role]||a.role)}</td><td>${h(a.department||'')}</td><td>${a.role==='ADMIN'?'<span class="chip acc">Full</span>':(a.custom?'<span class="chip warn">Custom</span>':'<span class="muted small">Role</span>')}</td><td>${a.active===false?'<span class="chip bad">Disabled</span>':'<span class="chip ok">Active</span>'}</td><td>${h(a.updated_at?fmtStamp(a.updated_at):'—')}</td></tr>`).join('')}
+  if(mine.length>1)html+=`<div class="row" style="margin:0 0 10px"><label class="f" style="max-width:340px">Show accounts for<select data-change="acctCo"><option value="">All my companies</option>${mine.map(id=>`<option value="${id}" ${fco===id?'selected':''}>${h(coById(id).name)}</option>`).join('')}</select></label></div>`;
+  html+=`<div class="tablewrap"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Department</th><th>Companies</th><th>Access</th><th>Status</th><th>Updated</th></tr></thead><tbody>
+  ${accts.map(a=>`<tr class="click" data-act="editAcct" data-id="${h(a.email)}"><td><b>${h(a.email)}</b>${a.builtin?' <span class="chip acc">Main admin</span>':''}${S.account&&a.email===S.account.email?' <span class="chip">You</span>':''}</td><td>${h(a.full_name||'')}</td><td>${h(ROLES[a.role]||a.role)}</td><td>${h(a.department||'')}</td><td>${h(coNames(companiesOf(a)))}</td><td>${a.role==='ADMIN'?'<span class="chip acc">Full</span>':(a.custom?'<span class="chip warn">Custom</span>':'<span class="muted small">Role</span>')}</td><td>${a.active===false?'<span class="chip bad">Disabled</span>':'<span class="chip ok">Active</span>'}</td><td>${h(a.updated_at?fmtStamp(a.updated_at):'—')}</td></tr>`).join('')}
   </tbody></table></div>`;
   if(getCfg())html+=`<div class="panel" style="margin-top:16px"><h2>Connect your team</h2><p class="muted small">Send this link to HR, Payroll and department heads. Opening it connects their browser to your online database automatically; they then sign in with their own account. Keep it private.</p><div class="row"><input readonly value="${h(shareLink())}" style="flex:1;min-width:240px" onclick="this.select()"><button class="btn primary" data-act="copyLink">Copy link</button></div></div>`;
   html+=accessMatrix();
@@ -1642,10 +1712,17 @@ async function saveAcct(form){
   if(changed&&!(await confirmDlg('Change sign-in email?',`From ${oldEmail}\nTo ${email}\n\n${S.account&&oldEmail===S.account.email?'You':'This person'} will sign in with the new email from now on. The old email stops working, but its history stays in the Activity log.`,'Change email')))return;
   const roleV=ed&&ed.builtin?'ADMIN':fd.get('role'), dep=fd.get('department')||null, pw=fd.get('password')||'';
   if(roleV==='DEPT_HEAD'&&!dep){toast('Choose the department this head manages.',true);return}
+  let cos;
+  if(ed&&ed.builtin)cos=ALL_CO.slice();
+  else{
+    const mine=myCompanies(),prev=ed?companiesOf(ed):[];
+    cos=ALL_CO.filter(id=>mine.includes(id)?fd.get('co_'+id)==='on':prev.includes(id));
+    if(!cos.length){toast('Tick at least one company this account can open.',true);return}
+  }
   if(pw&&!pwOk(pw)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
   if(!ed&&!pw){toast('Set a password for the new account.',true);return}
   const doc={email,full_name:String(fd.get('full_name')||'').trim(),role:roleV,department:roleV==='DEPT_HEAD'?dep:null,
-    active:ed&&ed.builtin?true:fd.get('active')!=='NO',main:!!(ed&&ed.builtin),updated_at:nowISO()};
+    active:ed&&ed.builtin?true:fd.get('active')!=='NO',main:!!(ed&&ed.builtin),companies:cos,updated_at:nowISO()};
   if(!(ed&&ed.builtin)&&roleV!=='ADMIN'&&fd.get('access_mode')==='custom'){const m={};for(const[k]of PERMS)m[k]=fd.get('p_'+k)==='on';doc.custom=true;doc.perms=withDeps(m)}
   else{doc.custom=false;doc.perms=null}
   if(pw)Object.assign(doc,await makeHash(pw));else{doc.salt=ed.salt;doc.iter=ed.iter;doc.hash=ed.hash}
@@ -1660,7 +1737,7 @@ async function saveAcct(form){
       else await Store.update('accounts/'+acctId(oldEmail),trail);
       logAction('CHANGE_EMAIL','account',email,`${oldEmail} → ${email}`);
     }
-    logAction(ed?'UPDATE_USER':'CREATE_USER','account',email,`${ROLES[roleV]}${doc.department?' · '+doc.department:''}${pw?' · password set':''}${doc.active?'':' · disabled'}${doc.custom?' · custom access: '+PERMS.filter(p=>doc.perms[p[0]]).map(p=>p[1]).join(', '):' · access same as role'}`);
+    logAction(ed?'UPDATE_USER':'CREATE_USER','account',email,`${ROLES[roleV]}${doc.department?' · '+doc.department:''}${pw?' · password set':''}${doc.active?'':' · disabled'} · companies: ${coNames(cos)}${doc.custom?' · custom access: '+PERMS.filter(p=>doc.perms[p[0]]).map(p=>p[1]).join(', '):' · access same as role'}`);
     S.ui.acctForm=false;S.ui.acctEdit=null;toast(changed?'Email changed and account saved':'Account saved');scheduleRender();
   }catch(e){acctWriteError(e)}
 }
@@ -1726,7 +1803,7 @@ async function savePw(form){
   if(!pwOk(next)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
   const a=await findAccount(S.account.email);
   if(!a||!ctEq(await pbkdf2(cur,a.salt,a.iter||210000),a.hash)){toast('Current password is incorrect.',true);return}
-  const doc={email:a.email,full_name:a.full_name,role:a.role,department:a.department||null,active:a.active!==false,main:!!a.builtin,custom:!!a.custom,perms:a.perms||null,updated_at:nowISO(),...(await makeHash(next))};
+  const doc={email:a.email,full_name:a.full_name,role:a.role,department:a.department||null,active:a.active!==false,main:!!a.builtin,custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null,updated_at:nowISO(),...(await makeHash(next))};
   try{await Store.set('accounts/'+acctId(a.email),doc);logAction('CHANGE_PASSWORD','account',a.email,'');closeDlg();toast('Password changed')}
   catch(e){acctWriteError(e)}
 }
@@ -1792,6 +1869,8 @@ document.addEventListener('change',async e=>{
   else if(k==='fileIn')handleFile(el);
   else if(k==='restoreFile')restoreFromFile(el);
   else if(k==='auditMonth'){S.auditMonth=el.value;watchAudit()}
+  else if(k==='company')switchCompany(el.value);
+  else if(k==='acctCo'){S.ui.acctCo=el.value;render()}
 });
 /* All times use the 24-hour clock (HH:MM). Entries like 7:5, 0755, 1730 or 5:30 PM are converted. */
 document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24')&&i.value.trim()){const t=parseTime(i.value);if(t)i.value=t}});
@@ -1841,42 +1920,48 @@ function onSubErr(e){console.warn('subscription',e);if(errCode(e)==='revoked'){t
 function watchPeriod(){
   if(unsubDtr)unsubDtr();for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];
   S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};
-  unsubDtr=Store.watchCollection('dtr',[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
+  unsubDtr=Store.watchCollection(cp('dtr'),[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
   for(const c of S.period.cuts){
-    unsubPay.push(Store.watchDoc('payroll/'+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
-    unsubPay.push(Store.watchDoc('advances/'+c.key,d=>{S.adv[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('payroll/')+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('advances/')+c.key,d=>{S.adv[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
   }
 }
-function watchAudit(){if(unsubAudit)unsubAudit();S.audit=[];unsubAudit=Store.watchDoc('audit/'+S.auditMonth,d=>{S.audit=(d&&d.entries)||[];scheduleRender()},onSubErr)}
+function watchAudit(){if(unsubAudit)unsubAudit();S.audit=[];unsubAudit=Store.watchDoc(cp('audit/')+S.auditMonth,d=>{S.audit=(d&&d.entries)||[];scheduleRender()},onSubErr)}
 let unsubBase=[];
 function startData(){
   stopData();
   S.period=monthPeriods(activeCut().ym);
-  unsubBase.push(Store.watchCollection('employees',[],rows=>{S.employees=rows.map(r=>({...r,id:Number(r.id!=null?r.id:r._id)}));S.ready.employees=true;scheduleRender()},onSubErr));
+  unsubBase.push(Store.watchCollection(cp('employees'),[],rows=>{S.employees=rows.map(r=>({...r,id:Number(r.id!=null?r.id:r._id)}));S.ready.employees=true;scheduleRender()},onSubErr));
   let periodSig=S.settings.cutoff_day+'/'+S.settings.cut1_end;
-  unsubBase.push(Store.watchDoc('settings/main',d=>{
-    S.settings={...DEFAULTS,...(d||{})};syncDepartments();
+  unsubBase.push(Store.watchDoc(cp('settings/main'),d=>{
+    S.settings={...coDefaults(),...(d||{})};syncDepartments();
     const sig=S.settings.cutoff_day+'/'+S.settings.cut1_end;
     if(sig!==periodSig){periodSig=sig;S.period=monthPeriods(S.period.ym);watchPeriod()}
     scheduleRender();
   },onSubErr));
   unsubBase.push(Store.watchCollection('accounts',[],rows=>{
     S.accountDocs=rows.map(r=>({email:r.email||r._id,full_name:r.full_name||'',role:r.role,department:r.department||null,moved_to:r.moved_to||null,moved_at:r.moved_at||null,moved_by:r.moved_by||null,deleted:!!r.deleted,deleted_at:r.deleted_at||null,deleted_by:r.deleted_by||null}));
-    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,main:!!r.main,custom:!!r.custom,perms:r.perms||null}));
+    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,main:!!r.main,custom:!!r.custom,perms:r.perms||null,companies:Array.isArray(r.companies)?r.companies:null}));
     const me=S.account&&S.accounts.find(a=>a.email===S.account.email);
     if(S.account&&!me&&!(acctId(S.account.email)===BOOT_ACCOUNT.email&&!(S.accountDocs||[]).some(d=>d.email===BOOT_ACCOUNT.email))){
       const em=S.account.email;findAccount(em).then(a=>{if(S.account&&S.account.email===em&&!a)signOut('Your account was removed or its sign-in email was changed. Please sign in again.')});
     }
     if(S.account&&me){
       if(me.active===false){signOut('Your account was disabled.');return}
+      const nowCos=companiesOf(me);
+      if(JSON.stringify(nowCos)!==JSON.stringify(myCompanies())){
+        S.account={...S.account,companies:me.companies||null};brandSig='';
+        if(!nowCos.length){signOut('Your account no longer has access to any company.');return}
+        if(!nowCos.includes(S.company)){const nx=nowCos[0];setTimeout(()=>{toast('Your access to this company was removed.',true);switchCompany(nx)},0)}
+      }
       if(JSON.stringify([me.custom,me.perms||null])!==JSON.stringify([S.account.custom,S.account.perms||null]))S.account={...S.account,custom:me.custom,perms:me.perms||null};
       if(me.role!==S.account.role||(me.department||null)!==S.account.department){S.account={...S.account,role:me.role,department:me.department||null,full_name:me.full_name||S.account.full_name};if(S.account.role!=='ADMIN')S.viewAs=null}
     }
     scheduleRender();
   },onSubErr));
   unsubBase.push(Store.watchDoc('settings/access',d=>{S.roleAccess=(d&&d.roles)||{};scheduleRender()},onSubErr));
-  unsubBase.push(Store.watchCollection('deadlines',[],rows=>{const m={};for(const r of rows)m[r._id]=r;S.deadlines=m;scheduleRender()},onSubErr));
-  unsubBase.push(Store.watchDoc('audit/'+todayISO().slice(0,7),d=>{S.auditToday=(d&&d.entries)||[];scheduleRender()},onSubErr));
+  unsubBase.push(Store.watchCollection(cp('deadlines'),[],rows=>{const m={};for(const r of rows)m[r._id]=r;S.deadlines=m;scheduleRender()},onSubErr));
+  unsubBase.push(Store.watchDoc(cp('audit/')+todayISO().slice(0,7),d=>{S.auditToday=(d&&d.entries)||[];scheduleRender()},onSubErr));
   watchPeriod();watchAudit();
 }
 function stopData(){
@@ -1886,13 +1971,16 @@ function stopData(){
 }
 
 /* ---------------- Backup & restore (Admin) ---------------- */
-const BACKUP_COLS=['employees','dtr','payroll','advances','accounts','deadlines','audit','settings'];
+const SCOPED_COLS=['employees','dtr','payroll','advances','deadlines','audit','settings'];
+/* Backup covers user accounts plus every company the admin can open. Older backups (Prime Laundry only) still restore. */
+function backupCols(){const cols=['accounts'];for(const id of myCompanies()){const c=coById(id);for(const x of SCOPED_COLS)cols.push(c.prefix+x)}return cols}
+function colCompany(col){if(col==='accounts')return null;const c=COMPANIES.find(x=>x.prefix&&col.startsWith(x.prefix));if(c)return c.id;return col.startsWith('companies/')?'?':'prime'}
 function lastBackup(){try{return localStorage.getItem('pl-last-backup')||''}catch(e){return''}}
 function backupPanel(){
   if(role()!=='ADMIN'||S.viewAs)return'';
   const lb=lastBackup();
   return `<div class="panel"><h2>Backup &amp; restore</h2>
-  <p class="muted small">Download everything stored in the system (employees and rates, attendance, approvals, advances, settings, user accounts and the activity log) as one file. Restore loads such a file back, into this database or a new one. ${lb?`Last backup downloaded from this device: <b>${h(fmtStamp(lb))}</b>.`:'<b>No backup downloaded from this device yet.</b>'}</p>
+  <p class="muted small">Download everything stored for ${h(coNames(myCompanies()))} (employees and rates, attendance, approvals, advances, settings and the activity log of each company, plus user accounts) as one file. Restore loads such a file back, into this database or a new one. ${lb?`Last backup downloaded from this device: <b>${h(fmtStamp(lb))}</b>.`:'<b>No backup downloaded from this device yet.</b>'}</p>
   <div class="banner warn small" style="margin:0 0 12px">The backup file contains salaries and password hashes. Keep it private and store it somewhere safe.</div>
   <div class="row"><button class="btn primary" data-act="backupNow">Download backup</button>
   ${S.readOnly?'':`<label class="btn" style="cursor:pointer">Restore from file<input type="file" accept=".json,application/json" data-change="restoreFile" style="display:none"></label>`}</div>
@@ -1903,9 +1991,10 @@ async function backupNow(btn){
   btn.disabled=true;const old=btn.textContent;btn.textContent='Collecting data…';
   try{
     const data={};let docs=0;
-    for(const col of BACKUP_COLS){const rows=await Store.getAll(col);data[col]=Object.fromEntries(rows);docs+=rows.length}
-    const file={app:'prime-laundry-payroll-backup',version:1,created_at:nowISO(),created_by:actor(),collections:BACKUP_COLS,documents:docs,data};
-    const name=`prime-payroll-backup-${nowISO().slice(0,10)}.json`;
+    const cols=backupCols();
+    for(const col of cols){const rows=await Store.getAll(col);data[col]=Object.fromEntries(rows);docs+=rows.length}
+    const file={app:'prime-laundry-payroll-backup',version:2,created_at:nowISO(),created_by:actor(),companies:myCompanies(),collections:cols,documents:docs,data};
+    const name=`payroll-backup-${myCompanies().length===ALL_CO.length?'all-companies':myCompanies().join('-')}-${nowISO().slice(0,10)}.json`;
     const ok=await saveFile(name,JSON.stringify(file),'application/json');
     if(!ok){offerFile(name,JSON.stringify(file));}
     try{localStorage.setItem('pl-last-backup',nowISO())}catch(e){}
@@ -1919,10 +2008,15 @@ async function restoreFromFile(input){
   if(role()!=='ADMIN'){toast('Only an Admin can restore a backup.',true);return}
   let file;
   try{file=JSON.parse(await f.text())}catch(e){toast('That file is not a valid backup.',true);return}
-  if(!file||file.app!=='prime-laundry-payroll-backup'||!file.data){toast('That file is not a Prime Laundry payroll backup.',true);return}
-  const items=[];
-  for(const col of BACKUP_COLS)for(const[id,doc]of Object.entries(file.data[col]||{}))items.push([col+'/'+id,doc]);
-  if(!items.length){toast('The backup file has no records.',true);return}
+  if(!file||file.app!=='prime-laundry-payroll-backup'||!file.data){toast('That file is not a payroll backup from this system.',true);return}
+  const items=[],mine=myCompanies();let skipped=0;
+  for(const[col,docs]of Object.entries(file.data)){
+    const co=colCompany(col);
+    if(co==='?'||(co&&!mine.includes(co))){skipped+=Object.keys(docs||{}).length;continue}
+    for(const[id,doc]of Object.entries(docs||{}))items.push([col+'/'+id,doc]);
+  }
+  if(skipped)toast(`${skipped} records belong to companies you can’t open and will be skipped.`,true);
+  if(!items.length){toast('The backup file has no records you can restore.',true);return}
   const ok=await confirmDlg('Restore this backup?',`Backup made ${fmtStamp(file.created_at)} by ${file.created_by||'unknown'}\n${items.length} records\n\nRecords in the file will be added or will overwrite the current ones. Other records are kept. Do this only if you are sure.`,'Restore',true);
   if(!ok)return;
   let done=0,failed=0;const total=items.length;toast(`Restoring ${total} records…`);
@@ -1980,7 +2074,7 @@ async function boot(){
   else if(sessionStorage.getItem('pl-local-ok')||localStorage.getItem('pl-local-ok')){Local.load();Store=Local;S.mode='local'}
   else{S.mode='setup';render();return}
   const sess=readSession();
-  if(sess){const a=await findAccount(sess.email);if(a&&a.active!==false){S.account=publicAccount(a);saveSession(S.account.email);startData()}else clearSession()}
+  if(sess){const a=await findAccount(sess.email);const acc=a&&a.active!==false?publicAccount(a):null,cos=companiesOf(acc);if(acc&&cos.length){S.account=acc;S.company=pickCompany(acc.email,cos);S.settings=coDefaults();syncDepartments();saveSession(S.account.email);startData()}else clearSession()}
   render();
 }
 boot();
