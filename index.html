@@ -484,7 +484,8 @@ const Remote={
   async get(path){const s=await retry(()=>this.db.doc(path).get());return s.exists?JSON.parse(JSON.stringify(s.data())):null},
   set(path,d){return retry(()=>this.db.doc(path).set(d))},
   update(path,d){return retry(()=>this.db.doc(path).update(d))},
-  del(path){return retry(()=>this.db.doc(path).delete())}
+  del(path){return retry(()=>this.db.doc(path).delete())},
+  async getAll(col){const q=await retry(()=>this.db.collection(col).get());return q.docs.map(d=>[d.id,JSON.parse(JSON.stringify(d.data()))])}
 };
 const LKEY='prime-laundry-payroll-v1';
 const Local={
@@ -499,7 +500,8 @@ const Local={
   async get(path){return this.data[path]?JSON.parse(JSON.stringify(this.data[path])):null},
   async set(path,d){this.data[path]=JSON.parse(JSON.stringify(d));this.save();this.notify()},
   async update(path,d){if(!this.data[path])throw{code:'invalid_argument'};this.data[path]={...this.data[path],...JSON.parse(JSON.stringify(d))};this.save();this.notify()},
-  async del(path){delete this.data[path];this.save();this.notify()}
+  async del(path){delete this.data[path];this.save();this.notify()},
+  async getAll(col){const out=[];for(const[p,v]of Object.entries(this.data)){const i=p.lastIndexOf('/');if(p.slice(0,i)===col)out.push([p.slice(i+1),JSON.parse(JSON.stringify(v))])}return out}
 };
 let Store=Local;
 
@@ -1532,6 +1534,7 @@ function pageSettings(){
   const t=(k,l)=>`<label class="f">${l}<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="${k}" value="${h(st[k])}" ${dis}></label>`;
   const hol=[...(st.holidays||[])].sort((a,b)=>a.date.localeCompare(b.date));
   return `<h1>Settings</h1><p class="sub">Payroll rules from the payroll file. Changes apply to every unapproved cut-off immediately. Payroll is paid on the 15th (1st cut-off) and 30th/31st (2nd cut-off).</p>
+  ${backupPanel()}
   <div class="panel"><h2>Departments</h2><p class="muted small">New departments work everywhere the existing ones do: employees can be assigned to them, department heads can be set for them, DTR rows are matched to them, and they appear in filters, deadlines and reports.</p>
   <div class="tablewrap"><table><thead><tr><th>Department</th><th class="n">Employees</th><th class="n">Department heads</th><th></th></tr></thead><tbody>
   ${DEPARTMENTS.map(d=>{const ne=S.employees.filter(e=>e.department===d).length,nh=S.accounts.filter(a=>a.role==='DEPT_HEAD'&&a.department===d).length;return`<tr><td><b>${h(d)}</b></td><td class="n">${ne}</td><td class="n">${nh}</td><td style="text-align:right">${edit?(ne||nh?`<span class="muted small" title="Move its employees and department heads to another department first">In use</span>`:`<button class="btn sm danger" data-act="delDept" data-name="${h(d)}">Remove</button>`):''}</td></tr>`}).join('')}
@@ -1767,6 +1770,7 @@ const actions={
   async reopenPayroll(el){const n=Number(el.dataset.n);if(await confirmDlg('Reopen this cut-off?','Attendance and company advances become editable again and the approval is cleared.','Reopen',true))setPayrollStatus(n,'DRAFT')},
   delHoliday(el){const d=el.dataset.date;saveHolidays((S.settings.holidays||[]).filter(x=>x.date!==d),'Holiday removed')},
   signOut(){signOut()},
+  backupNow(el){backupNow(el)},
   localOnly(){localStorage.setItem('pl-local-ok','1');location.reload()},
   copyLink(){navigator.clipboard.writeText(shareLink()).then(()=>toast('Link copied'),()=>toast('Select and copy the link manually.',true))},
   changePw(){changePwDialog()},
@@ -1786,6 +1790,7 @@ document.addEventListener('change',async e=>{
   else if(k==='dtrCut'){S.ui.dtrCut=Number(el.value)||0;S.ui.openRow=null;render()}
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
   else if(k==='fileIn')handleFile(el);
+  else if(k==='restoreFile')restoreFromFile(el);
   else if(k==='auditMonth'){S.auditMonth=el.value;watchAudit()}
 });
 /* All times use the 24-hour clock (HH:MM). Entries like 7:5, 0755, 1730 or 5:30 PM are converted. */
@@ -1880,6 +1885,54 @@ function stopData(){
   S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};
 }
 
+/* ---------------- Backup & restore (Admin) ---------------- */
+const BACKUP_COLS=['employees','dtr','payroll','advances','accounts','deadlines','audit','settings'];
+function lastBackup(){try{return localStorage.getItem('pl-last-backup')||''}catch(e){return''}}
+function backupPanel(){
+  if(role()!=='ADMIN'||S.viewAs)return'';
+  const lb=lastBackup();
+  return `<div class="panel"><h2>Backup &amp; restore</h2>
+  <p class="muted small">Download everything stored in the system (employees and rates, attendance, approvals, advances, settings, user accounts and the activity log) as one file. Restore loads such a file back, into this database or a new one. ${lb?`Last backup downloaded from this device: <b>${h(fmtStamp(lb))}</b>.`:'<b>No backup downloaded from this device yet.</b>'}</p>
+  <div class="banner warn small" style="margin:0 0 12px">The backup file contains salaries and password hashes. Keep it private and store it somewhere safe.</div>
+  <div class="row"><button class="btn primary" data-act="backupNow">Download backup</button>
+  ${S.readOnly?'':`<label class="btn" style="cursor:pointer">Restore from file<input type="file" accept=".json,application/json" data-change="restoreFile" style="display:none"></label>`}</div>
+  <p class="muted small" style="margin:10px 0 0">Restore adds and overwrites records from the file. It does not delete records that aren't in the file. Approved payroll cut-offs are restored as approved.</p></div>`;
+}
+async function backupNow(btn){
+  if(role()!=='ADMIN'){toast('Only an Admin can download a backup.',true);return}
+  btn.disabled=true;const old=btn.textContent;btn.textContent='Collecting data…';
+  try{
+    const data={};let docs=0;
+    for(const col of BACKUP_COLS){const rows=await Store.getAll(col);data[col]=Object.fromEntries(rows);docs+=rows.length}
+    const file={app:'prime-laundry-payroll-backup',version:1,created_at:nowISO(),created_by:actor(),collections:BACKUP_COLS,documents:docs,data};
+    const name=`prime-payroll-backup-${nowISO().slice(0,10)}.json`;
+    const ok=await saveFile(name,JSON.stringify(file),'application/json');
+    if(!ok){offerFile(name,JSON.stringify(file));}
+    try{localStorage.setItem('pl-last-backup',nowISO())}catch(e){}
+    logAction('BACKUP','system',null,`${docs} records downloaded`);
+    toast(`Backup ready: ${docs} records`);
+  }catch(e){console.warn(e);toast('Could not read all data for the backup. Try again.',true)}
+  btn.disabled=false;btn.textContent=old;scheduleRender();
+}
+async function restoreFromFile(input){
+  const f=input.files&&input.files[0];if(!f)return;input.value='';
+  if(role()!=='ADMIN'){toast('Only an Admin can restore a backup.',true);return}
+  let file;
+  try{file=JSON.parse(await f.text())}catch(e){toast('That file is not a valid backup.',true);return}
+  if(!file||file.app!=='prime-laundry-payroll-backup'||!file.data){toast('That file is not a Prime Laundry payroll backup.',true);return}
+  const items=[];
+  for(const col of BACKUP_COLS)for(const[id,doc]of Object.entries(file.data[col]||{}))items.push([col+'/'+id,doc]);
+  if(!items.length){toast('The backup file has no records.',true);return}
+  const ok=await confirmDlg('Restore this backup?',`Backup made ${fmtStamp(file.created_at)} by ${file.created_by||'unknown'}\n${items.length} records\n\nRecords in the file will be added or will overwrite the current ones. Other records are kept. Do this only if you are sure.`,'Restore',true);
+  if(!ok)return;
+  let done=0,failed=0;const total=items.length;toast(`Restoring ${total} records…`);
+  const queue=[...items];
+  const worker=async()=>{while(queue.length){const[path,doc]=queue.shift();try{await Store.set(path,doc)}catch(e){failed++}done++;if(done%25===0)toast(`Restoring… ${done}/${total}`)}};
+  await Promise.all(Array.from({length:6},worker));
+  logAction('RESTORE','system',null,`${total-failed} of ${total} records restored from backup dated ${file.created_at||'?'}`);
+  toast(failed?`Restored with ${failed} failures. Try again.`:`Restore complete: ${total} records`,!!failed);
+  scheduleRender();
+}
 /* ---------------- Online setup (Firebase) ---------------- */
 const CFG_KEY='pl-fb-cfg';
 function getCfg(){
