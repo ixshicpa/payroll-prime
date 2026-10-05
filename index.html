@@ -168,6 +168,15 @@ th.stick{background:var(--surface-2);z-index:2}
 .dtr-row .tm{font-variant-numeric:tabular-nums;font-size:14px}
 .dtr-row .chips{display:flex;gap:5px;flex-wrap:wrap}
 .dtr-row .rv{text-align:right}
+/* Select mode (delete several attendance records) */
+.dtr-row.sel{grid-template-columns:28px minmax(160px,1.4fr) 110px 1.6fr 96px}
+.dtr-row.sel.on{background:var(--accent-soft)}
+.dtr-row.sel.lk{cursor:not-allowed;opacity:.6}
+.dtr-row .pick{display:flex;align-items:center;justify-content:center}
+.dtr-row .pick input,.imp-cb{width:18px;height:18px;margin:0;accent-color:var(--accent)}
+.selbar{position:sticky;top:64px;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:8px 12px;margin:0 0 14px}
+td.cb,th.cb{width:34px;text-align:center}
+tr.skip td{color:var(--muted)}
 .editor{padding:14px;background:var(--surface-2);border-top:1px dashed var(--line)}
 .editor .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
 /* Skip link & offline banner */
@@ -229,6 +238,12 @@ th.stick{background:var(--surface-2);z-index:2}
   .dtr-row .chips{grid-column:1/-1}
   .dtr-row .rv{grid-row:1;grid-column:2}
   .dtr-row .tm{grid-column:1}
+  .dtr-row.sel{grid-template-columns:28px 1fr auto}
+  .dtr-row.sel .pick{grid-row:1/span 3;grid-column:1}
+  .dtr-row.sel .nm,.dtr-row.sel .tm{grid-column:2}
+  .dtr-row.sel .chips{grid-column:2/-1}
+  .dtr-row.sel .rv{grid-row:1;grid-column:3}
+  .selbar{top:0}
   main{padding:16px 12px 60px}
   .top-inner{padding:10px 12px 0}
   .top{position:static}
@@ -547,7 +562,7 @@ const S={
   employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
-  ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,payslip:null,searchHits:[],auditMonth:null}
+  ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
 };
 const role=()=>S.viewAs?S.viewAs.role:(S.account?S.account.role:'NONE');
 const dept=()=>S.viewAs?S.viewAs.dept:(S.account?S.account.department||null:null);
@@ -748,10 +763,46 @@ setInterval(()=>{if(S.account&&Date.now()-lastActive>IDLE_MS)signOut('Signed out
 
 /* ---------------- Activity log ---------------- */
 let auditQueue=Promise.resolve();
-function logAction(action,entity,entityId,details){
+/* ---------------- Undo journal ----------------
+   Changes made through a journal remember how each record looked before (and a fingerprint of how it
+   looked after). The snapshot is saved under <company>/undo/<id> and linked from the activity-log entry,
+   so an Admin can put the records back later. Records changed again since are never overwritten. */
+function stableStr(v){
+  if(v===null||typeof v!=='object')return JSON.stringify(v===undefined?null:v);
+  if(Array.isArray(v))return '['+v.map(stableStr).join(',')+']';
+  return '{'+Object.keys(v).filter(k=>v[k]!==undefined).sort().map(k=>JSON.stringify(k)+':'+stableStr(v[k])).join(',')+'}';
+}
+function docPrint(d){const t=d==null?'null':stableStr(d);let x=5381;for(let i=0;i<t.length;i++)x=((x<<5)+x+t.charCodeAt(i))|0;return (x>>>0).toString(36)+'.'+t.length}
+const plainDoc=d=>{if(d==null)return null;const c=JSON.parse(JSON.stringify(d));delete c._id;return c};
+function journal(){
+  const ops=new Map();
+  const note=async(path,before)=>{
+    if(ops.has(path))return ops.get(path).cur;
+    const b=plainDoc(before!==undefined?before:await Store.get(path));
+    ops.set(path,{p:path,b,cur:b});return b;
+  };
+  const after=(path,doc)=>{const o=ops.get(path);o.cur=plainDoc(doc);o.a=docPrint(o.cur)};
+  return{ops,
+    async set(path,doc,before){await note(path,before);await Store.set(path,doc);after(path,doc)},
+    async update(path,patch,before){const b=await note(path,before);await Store.update(path,patch);after(path,{...(b||{}),...JSON.parse(JSON.stringify(patch))})},
+    async del(path,before){await note(path,before);await Store.del(path);after(path,null)}
+  };
+}
+async function saveUndo(entry,jr){
+  const ops=[...jr.ops.values()].filter(o=>o.a).map(o=>({p:o.p,b:o.b,a:o.a}));
+  if(!ops.length)return;
+  const id=entry.at.replace(/[^0-9]/g,'')+'_'+Math.random().toString(36).slice(2,8);
+  const parts=[[]];let size=0;   // Firestore documents hold up to 1 MB, so big imports are split
+  for(const o of ops){const n=JSON.stringify(o).length;if(size+n>700000&&parts[parts.length-1].length){parts.push([]);size=0}parts[parts.length-1].push(o);size+=n}
+  for(let i=parts.length-1;i>=1;i--)await Store.set(cp('undo/')+id+'~'+i,{ops:parts[i]});
+  await Store.set(cp('undo/')+id,{at:entry.at,by:entry.by,action:entry.action,details:entry.details,parts:parts.length,count:ops.length,ops:parts[0]});
+  entry.undo=id;
+}
+function logAction(action,entity,entityId,details,jr){
   const entry={at:nowISO(),by:actor(),action,entity,entity_id:entityId==null?null:String(entityId),details:details||''};
   const path=cp('audit/'+entry.at.slice(0,7));
   auditQueue=auditQueue.then(async()=>{
+    if(jr)try{await saveUndo(entry,jr)}catch(e){console.warn('undo snapshot',e)}
     try{const d=(await Store.get(path))||{entries:[]};const entries=(d.entries||[]).concat(entry).slice(-1500);await Store.set(path,{entries})}catch(e){console.warn('audit',e)}
   });
   return auditQueue;
@@ -825,7 +876,7 @@ function switchCompany(id){
   const ym=S.period&&S.period.ym;
   S.company=id;rememberCompany(S.account.email,id);
   S.settings=coDefaults();syncDepartments();S.viewAs=null;closeDlg();
-  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null});
+  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null,otherCo:null,dtrSelMode:false,dtrSel:new Set()});
   S.auditMonth=todayISO().slice(0,7);
   startData();
   if(ym&&ym!==S.period.ym){S.period=monthPeriods(ym);watchPeriod()}
@@ -974,16 +1025,18 @@ async function saveDeadline(form){
   const fd=new FormData(form),key=form.dataset.key,date=fd.get('date'),time=fd.get('time');
   if(!date||!time){toast('Choose a date and time.',true);return}
   const at=`${date}T${time}`;
-  try{await Store.set(cp('deadlines/')+key,{at,set_by:actor(),set_at:nowISO()});logAction('SET_DEADLINE','deadline',key,`Department head approvals due ${fmtDT(at)}`);toast('Deadline saved')}catch(e){writeError(e)}
+  const jr=journal();
+  try{await jr.set(cp('deadlines/')+key,{at,set_by:actor(),set_at:nowISO()});logAction('SET_DEADLINE','deadline',key,`Department head approvals due ${fmtDT(at)}`,jr);toast('Deadline saved')}catch(e){writeError(e)}
 }
 async function clearDeadline(key){
   if(!(await confirmDlg('Remove this deadline?','Department heads will no longer see a countdown for this cut-off.','Remove',true)))return;
-  try{await Store.del(cp('deadlines/')+key);logAction('CLEAR_DEADLINE','deadline',key,'Deadline removed');toast('Deadline removed')}catch(e){writeError(e)}
+  const jr=journal();
+  try{await jr.del(cp('deadlines/')+key);logAction('CLEAR_DEADLINE','deadline',key,'Deadline removed',jr);toast('Deadline removed')}catch(e){writeError(e)}
 }
 /* Admin: today's changes */
 function dashToday(){
   const t=todayISO(),ents=S.auditToday.filter(x=>{const d=new Date(x.at);return iso(d.getFullYear(),d.getMonth()+1,d.getDate())===t}).reverse();
-  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','ADVANCES']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
+  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY','DELETE_ATTENDANCE']],['Undone changes',['UNDO']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','ADVANCES']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
   const counts=groups.map(([l,a])=>[l,ents.filter(x=>a.includes(x.action)).length]).filter(x=>x[1]);
   const shown=ents.filter(x=>x.action!=='LOGIN'&&x.action!=='LOGOUT').slice(0,8);
   return `<div class="panel"><div class="row"><h2 style="margin:0">Today’s changes</h2><span class="muted small">${h(fmtDY(t))}</span><span class="spacer"></span><a class="btn sm" href="#audit">Open activity log</a></div>
@@ -1075,8 +1128,15 @@ function pageDtr(){
     ${!isHead?`<select data-change="dtrDept" aria-label="Department"><option value="">All departments</option>${DEPARTMENTS.map(d=>`<option ${f.dtrDept===d?'selected':''}>${h(d)}</option>`).join('')}</select>`:''}
     <input type="search" placeholder="Search name" value="${h(f.dtrSearch)}" data-change="dtrSearch" aria-label="Search name" style="width:160px">
     <span class="spacer"></span>
-    ${canAppr&&reviewable?`<button class="btn ok" data-act="bulkApprove">Mark ${reviewable} shown as approved</button>`:''}
+    ${canAppr&&reviewable&&!f.dtrSelMode?`<button class="btn ok" data-act="bulkApprove">Mark ${reviewable} shown as approved</button>`:''}
+    ${canDelDtr()&&list.length&&!f.dtrSelMode?`<button class="btn danger" data-act="dtrSelMode">Select to delete</button>`:''}
   </div>`;
+  if(f.dtrSelMode&&canDelDtr()){
+    const shown=new Set(list.map(o=>o.r._id));for(const id of [...f.dtrSel])if(!shown.has(id))f.dtrSel.delete(id);
+    html+=`<div class="selbar" id="selBar"><b id="selCount">${f.dtrSel.size} selected</b><span class="muted small">Tick the records to delete. Locked cut-offs can’t be selected.</span><span class="spacer"></span>
+      <button class="btn sm" data-act="dtrSelAll">Select all shown</button><button class="btn sm" data-act="dtrSelNone">Clear</button>
+      <button class="btn sm danger" data-act="dtrDelSel" id="selDel" ${f.dtrSel.size?'':'disabled'}>Delete selected</button><button class="btn sm" data-act="dtrSelMode">Done</button></div>`;
+  }
   if(!S.ready.dtr)return html+'<div class="loading">Loading attendance…</div>';
   if(!list.length){
     html+=`<div class="panel empty"><b>${rows.length?'No records match this filter.':'No attendance for this pay period yet.'}</b>${!rows.length&&can('importDtr')?'<a class="btn primary" href="#import" style="margin-top:10px">Import DTR</a>':(!rows.length?'HR will import it from the timekeeping app.':'')}</div>`;
@@ -1084,7 +1144,7 @@ function pageDtr(){
   }
   for(const d of Object.keys(groups)){
     html+=`<section class="daygroup"><div class="dayhead">${WD[dow(d)]}, ${h(fmtDY(d))}</div><div class="dtr">`;
-    for(const o of groups[d])html+=dtrRow(o,canAppr);
+    for(const o of groups[d])html+=(f.dtrSelMode&&canDelDtr())?dtrSelRow(o):dtrRow(o,canAppr);
     html+=`</div></section>`;
   }
   return html;
@@ -1114,6 +1174,43 @@ function dtrRow(o,canAppr){
   if(open)html+=dtrEditor(o,canAppr);
   return html;
 }
+/* Who may delete attendance records: HR and Admin (time correction or DTR import access). Department heads never. */
+function canDelDtr(){return !S.readOnly&&role()!=='DEPT_HEAD'&&(can('editTimes')||can('importDtr'))}
+function dtrSelRow(o){
+  const id=o.r._id,lk=lockedDate(o.r.work_date),on=S.ui.dtrSel.has(id);
+  return `<label class="dtr-row sel${on?' on':''}${lk?' lk':''}" title="${lk?'This cut-off is approved and locked':''}">
+    <span class="pick"><input type="checkbox" data-change="dtrSel" data-id="${h(id)}" ${on?'checked':''} ${lk?'disabled':''} aria-label="Select ${h(empName(o.e))} ${h(o.r.work_date)}"></span>
+    <span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')} · ${h(o.r.source||'—')}</span></span>
+    <span class="tm">${h(o.r.time_in||'—')} – ${h(o.r.time_out||'—')}</span>
+    <span class="chips">${dtrChips(o)}</span>
+    <span class="rv">${lk?'<span class="chip">Locked</span>':''}</span>
+  </label>`;
+}
+function updateSelBar(){
+  const n=S.ui.dtrSel.size,c=$('#selCount'),b=$('#selDel');
+  if(c)c.textContent=`${n} selected`;if(b)b.disabled=!n;
+}
+async function deleteDtrRecords(ids){
+  const recs=ids.map(id=>S.dtr.find(x=>x._id===id)).filter(Boolean);
+  const ok=recs.filter(r=>!lockedDate(r.work_date)), locked=recs.length-ok.length;
+  if(!ok.length){toast(locked?'Those records are in an approved, locked cut-off.':'Nothing to delete.',true);return false}
+  const one=ok.length===1?ok[0]:null;
+  const title=one?`Delete ${empName(empById(one.employee_id))} · ${fmtDY(one.work_date)}?`:`Delete ${ok.length} attendance records?`;
+  const msg=`${one?'This record is':'These records are'} removed from attendance and from payroll for ${one?'that day':'those days'}, together with ${one?'its':'their'} review and approvals. This can’t be undone — import the DTR again or use Single entry to bring ${one?'it':'them'} back.${locked?` ${locked} locked ${locked===1?'record':'records'} will be left as is.`:''}`;
+  if(!(await confirmDlg(title,msg,'Delete',true)))return false;
+  let n=0;const names=[],jr=journal();
+  try{
+    for(const r of ok){
+      await jr.del(cp('dtr/')+r._id,r);n++;
+      if(names.length<12)names.push(`${empName(empById(r.employee_id))} ${r.work_date} ${r.time_in||'—'}–${r.time_out||'—'}`);
+    }
+  }catch(e){writeError(e)}
+  if(n){
+    logAction('DELETE_ATTENDANCE','dtr',one?one._id:null,one?names[0]:`${n} records deleted: ${names.join('; ')}${n>names.length?` and ${n-names.length} more`:''}`,jr);
+    toast(n===1?'Attendance record deleted':`${n} attendance records deleted`);
+  }
+  return n>0;
+}
 function dtrEditor(o,canAppr){
   const r=o.r,c=o.c,lk=lockedDate(r.work_date),dis=(!canAppr||lk)?'disabled':'',tdis=(!can('editTimes')||lk||S.readOnly)?'disabled':'';
   const sel=(name,opts,val)=>`<select name="${name}" ${dis}>${opts.map(([v,l])=>`<option value="${v}" ${String(val)===v?'selected':''}>${l}</option>`).join('')}</select>`;
@@ -1133,7 +1230,8 @@ function dtrEditor(o,canAppr){
     <div class="row" style="margin-top:12px">
       <span class="muted small">Worked ${fmtMin(c.worked)} · ${r.reviewed_by?`Last reviewed by ${h(personName(r.reviewed_by))} ${h(fmtStamp(r.reviewed_at))}`:'Not reviewed yet'} · Source: ${h(r.source||'—')}</span>
       <span class="spacer"></span>
-      ${(canAppr||can('editTimes'))&&!lk?`<button type="button" class="btn" data-act="toggleRow" data-id="${h(r._id)}">Cancel</button><button type="submit" class="btn primary">Save review</button>`:''}
+      ${canDelDtr()&&!lk?`<button type="button" class="btn danger" data-act="delDtr" data-id="${h(r._id)}">Delete record</button>`:''}
+      ${(canAppr||can('editTimes'))&&!lk?`<button type="button" class="btn" data-act="toggleRow" data-id="${h(r._id)}">Cancel</button><button type="submit" class="btn primary">${can('editTimes')?'Save changes':'Save review'}</button>`:''}
     </div>
   </form>`;
 }
@@ -1157,9 +1255,10 @@ async function saveDtr(form){
     if(changes.length&&!patch.remarks&&!(r.remarks)){toast('Add a remark explaining the time correction.',true);return}
   }
   try{
-    await Store.update(cp('dtr/')+id,patch);
+    const jr=journal();
+    await jr.update(cp('dtr/')+id,patch,r);
     S.ui.openRow=null;
-    logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}`:''}${changes.length?'; '+changes.join(', '):''}`);
+    logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
     toast('Review saved');scheduleRender();
   }catch(err){writeError(err)}
 }
@@ -1167,14 +1266,14 @@ async function bulkApprove(btn){
   btn.disabled=true;
   const rows=[...document.querySelectorAll('.dtr-row')].map(b=>b.dataset.id);
   const targets=S.dtr.filter(r=>rows.includes(r._id)&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date));
-  let n=0;
+  let n=0;const jr=journal();
   try{
     for(const r of targets){
       const e=empById(r.employee_id);if(role()==='DEPT_HEAD'&&(!e||e.department!==dept()))continue;
-      await Store.update(cp('dtr/')+r._id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()});n++;
+      await jr.update(cp('dtr/')+r._id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()},r);n++;
       if(n%5===0)btn.textContent=`Saving ${n}/${targets.length}…`;
     }
-    logAction('BULK_APPROVE','dtr',null,`${n} records marked approved (overtime approvals unchanged)`);
+    logAction('BULK_APPROVE','dtr',null,`${n} records marked approved (overtime approvals unchanged)`,jr);
     toast(`${n} records marked approved. Overtime still needs its own approval.`);
   }catch(err){writeError(err)}
   scheduleRender();
@@ -1183,12 +1282,12 @@ async function bulkApprove(btn){
 /* ---------- Import ---------- */
 function pageImport(){
   const u=S.ui;
-  let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched to employees by first name; Employee ID is optional and only helps when two people share a first name.</p>`;
+  let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched by first name <b>only to employees registered under ${h(curCo().name)}</b> — the company selected at the top — so people in other companies who share a first name are never mixed up. Add a Company column if one file covers several companies; rows for other companies are left out.</p>`;
   if(S.readOnly)return html+'<div class="empty"><b>View-only access.</b></div>';
   html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['single','Single entry']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
   if(u.importResult){
     const R=u.importResult;
-    html+=`<div class="banner ${R.failed||R.skipped?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'}.${R.skipped?` ${R.skipped} skipped because the employee couldn't be matched or the pay period is locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">Import more</button></div>`;
+    html+=`<div class="banner ${R.failed||R.locked?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'} into ${h(R.co||curCo().short)}.${R.locked?` ${R.locked} skipped because the cut-off is approved and locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}${R.left?` ${R.left} ${R.left===1?'row was':'rows were'} not imported and ${R.left===1?'is':'are'} still listed below.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">${R.left?'Clear list':'Import more'}</button></div>`;
   }
   if(u.importTab==='upload'){
     html+=`<div class="panel"><h2>Upload Excel or CSV</h2><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
@@ -1205,42 +1304,85 @@ function pageImport(){
     </div><div class="row" style="margin-top:12px"><button class="btn primary">Save entry</button></div></form>`;
   }
   if(u.importRows&&u.importTab!=='single'){
-    const rows=u.importRows, ok=rows.filter(x=>x.match==='OK');
-    html+=`<div class="panel"><div class="row"><h2 style="margin:0">Preview</h2><span class="chip ok">${ok.length} matched</span>${rows.length-ok.length?`<span class="chip bad">${rows.length-ok.length} need attention</span>`:''}<span class="spacer"></span>
-      ${u.importBusy?'':`<button class="btn" data-act="clearImport">Discard</button><button class="btn primary" data-act="doImport" ${ok.length?'':'disabled'}>Import ${ok.length} matched ${ok.length===1?'row':'rows'}</button>`}</div>
+    if(u.otherCo===null)loadOtherCompanies();
+    const rows=u.importRows, ok=rows.filter(x=>x.match==='OK'), conf=rows.filter(x=>x.match==='CONFIRM'), bad=rows.length-ok.length-conf.length;
+    const nSel=rows.filter(x=>x.sel&&canPick(x)).length, pickable=rows.filter(canPick).length, allOn=pickable&&nSel===pickable;
+    const loaded=new Set(S.dtr.map(r=>r._id));
+    const LIMIT=1000;
+    html+=`<div class="panel"><div class="row"><h2 style="margin:0">Preview</h2><span class="chip acc">Into ${h(curCo().short)}</span><span class="chip ok">${ok.length} matched</span>${conf.length?`<span class="chip warn">${conf.length} to confirm</span>`:''}${bad?`<span class="chip bad">${bad} need attention</span>`:''}<span class="spacer"></span>
+      ${u.importBusy?'':`<button class="btn" data-act="clearImport">Discard</button><button class="btn" data-act="doImport" data-mode="all" id="impAll" ${ok.length?'':'disabled'}>Import all ${ok.length} matched</button><button class="btn primary" data-act="doImport" data-mode="sel" id="impSelBtn" ${nSel?'':'disabled'}>Import ${nSel} selected</button>`}</div>
       ${u.importBusy?`<div class="progress"><i style="width:${Math.round(u.importProgress*100)}%"></i></div><p class="muted small">Saving… keep this page open.</p>`:''}
-      <p class="muted small">Rows that already exist for the same employee and date get their times updated; their review and approvals are kept.</p>
-      <div class="tablewrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Date</th><th>In</th><th>Out</th><th>Match</th></tr></thead><tbody>
-      ${rows.slice(0,400).map(x=>`<tr class="${x.match==='OK'?'':'bad'}"><td>${h(x.name)}</td><td>${h(x.department||'')}</td><td>${h(x.date||'—')}</td><td>${h(x.time_in||'')}</td><td>${h(x.time_out||'')}</td><td style="white-space:normal">${h(x.match==='OK'?['Matched',x.punches>1?`${x.punches} punches merged`:'',x.note].filter(Boolean).join(' · '):x.match)}</td></tr>`).join('')}
-      </tbody></table></div>${rows.length>400?`<p class="muted small">Showing the first 400 of ${rows.length} rows.</p>`:''}</div>`;
+      <p class="muted small">Matched rows are ticked for you; untick any you don’t want, then <b>Import selected</b>. <b>Import all matched</b> brings in every matched row regardless of the ticks. Rows marked “to confirm” only partly match a first name, so they are left unticked until you check them. Rows that already exist for the same employee and date get their times updated; their review and approvals are kept.</p>
+      <div class="tablewrap"><table><thead><tr><th class="cb"><input type="checkbox" class="imp-cb" data-change="impSelAll" ${allOn?'checked':''} ${pickable&&!u.importBusy?'':'disabled'} aria-label="Select all rows that can be imported" title="Select all"></th><th>Employee</th><th>In the DTR</th><th>Department</th><th>Date</th><th>In</th><th>Out</th><th>Match</th></tr></thead><tbody>
+      ${rows.slice(0,LIMIT).map((x,i)=>{
+        const pk=canPick(x), other=pk?otherCoWith(x.employee_id):[], upd=pk&&loaded.has(`${x.employee_id}_${x.date}`);
+        const notes=x.match==='OK'||x.match==='CONFIRM'?[x.match==='OK'?'Matched':'Confirm this match',x.punches>1?`${x.punches} punches merged`:'',x.note,upd?'updates an existing record':'',other.length?`same first name also in ${other.join(', ')} — matched to the ${curCo().short} employee`:''].filter(Boolean).join(' · '):x.match;
+        return `<tr class="${pk?(x.sel?'':'skip'):'bad'}"><td class="cb">${pk?`<input type="checkbox" class="imp-cb" data-change="impSel" data-i="${i}" ${x.sel?'checked':''} ${u.importBusy?'disabled':''} aria-label="Import ${h(x.name)} ${h(x.date||'')}">`:''}</td><td>${h(x.name)}</td><td class="muted">${h(x.src||'')}</td><td>${h(x.department||'')}</td><td>${h(x.date||'—')}</td><td>${h(x.time_in||'')}</td><td>${h(x.time_out||'')}</td><td style="white-space:normal">${x.match==='CONFIRM'?'<span class="chip warn">Confirm</span> ':''}${h(notes)}</td></tr>`}).join('')}
+      </tbody></table></div>${rows.length>LIMIT?`<p class="muted small">Showing the first ${LIMIT} of ${rows.length} rows. Rows not shown keep their tick; Import all matched covers every row.</p>`:''}</div>`;
   }
   return html;
 }
-/* First name is the basis for matching. Employee ID is optional and only used
-   to tell apart two employees who share the same first name. */
+/* Matching only looks at employees registered under the company you are working in (S.employees
+   holds that company's employees only). Within one company no two employees share a first name,
+   so the first name decides; a DTR row is never matched to someone in another company.
+   Employee ID is optional and is only used as a tie-breaker. */
 const normName=v=>String(v||'').toUpperCase().replace(/\./g,' ').replace(/[^A-Z0-9Ñ ]/g,' ').replace(/\b(JR|SR|II|III|IV)\b/g,' ').replace(/\s+/g,' ').trim();
+const canPick=x=>x.match==='OK'||x.match==='CONFIRM';
 function findEmployee(id,name){
+  const co=curCo().short;
   const idStr=id!=null?String(id).trim():'', byId=/^\d+$/.test(idStr)?empById(Number(idStr)):null;
   const raw=String(name||'').trim();
   if(!raw){return byId?[byId,'OK','No name in the row — matched by Employee ID']:[null,'No first name']}
   let n=normName(raw), sur=null;
   if(raw.includes(',')){const parts=raw.split(',');sur=normName(parts[0]);n=normName(parts.slice(1).join(' '))}
-  const active=S.employees;
-  const pick=(list,how)=>{
-    if(sur){const s2=list.filter(e=>normName(e.surname)===sur);if(s2.length===1)return[s2[0],'OK',how]}
-    if(list.length===1)return[list[0],'OK',how];
+  const all=S.employees, act=all.filter(e=>e.active!==false);
+  const pick=(test,how,status)=>{
+    let list=act.filter(test),notes=[how];
+    if(!list.length){list=all.filter(test);if(list.length)notes.push('employee is marked inactive')}
+    if(sur){const s2=list.filter(e=>normName(e.surname)===sur);if(s2.length===1)list=s2}
+    if(list.length===1)return[list[0],status||'OK',notes.filter(Boolean).join(' · ')];
     if(list.length>1){
-      if(byId&&list.includes(byId))return[byId,'OK','Same first name as another employee — told apart by Employee ID'];
-      return[null,'Shared first name ('+list.map(e=>e.surname).join(' / ')+') — add the surname or Employee ID'];
+      if(byId&&list.includes(byId))return[byId,status||'OK','Same first name as another employee — told apart by Employee ID'];
+      return[null,`More than one ${co} employee matches (${list.map(e=>empName(e)).join(' / ')}) — add the surname or Employee ID`];
     }
     return null;
   };
-  let r=pick(active.filter(e=>normName(e.first_name)===n),'');
-  if(!r)r=pick(active.filter(e=>normName(e.first_name+' '+e.surname)===n||normName(e.surname+' '+e.first_name)===n),'');
-  if(!r){const tok=n.split(' ')[0];r=pick(active.filter(e=>normName(e.first_name).split(' ')[0]===tok),'Matched by first word of the name — please confirm')}
-  if(!r)return[null,'First name not found in Employees'];
-  if(r[0]&&byId&&byId!==r[0])r[2]=`Matched by first name; Employee ID ${idStr} belongs to ${empName(byId)} and was ignored`;
+  let r=pick(e=>normName(e.first_name)===n,'');
+  if(!r)r=pick(e=>normName(e.first_name+' '+e.surname)===n||normName(e.surname+' '+e.first_name)===n,'');
+  if(!r){
+    // Partial match (e.g. DTR "MARY" vs employee "MARY JANE"). Never ticked automatically.
+    const tok=n.split(' ')[0];
+    r=pick(e=>normName(e.first_name).split(' ')[0]===tok,'','CONFIRM');
+    if(r&&r[0])r[2]=[`DTR name “${raw}” only partly matches first name ${r[0].first_name}`,r[2]].filter(Boolean).join(' · ');
+  }
+  if(!r)return[null,`First name not found among ${co} employees`];
+  if(r[0]&&byId&&byId!==r[0])r[2]=[r[2],`Employee ID ${idStr} belongs to ${empName(byId)} and was ignored`].filter(Boolean).join(' · ');
   return r;
+}
+/* Optional Company column: which company a DTR row belongs to. */
+function companyFromText(v){
+  const n=normName(v);if(!n)return undefined;
+  const aliases=c=>[c.name,c.short,c.defaults.company,c.file.replace(/-/g,' ')].map(normName);
+  // A bare short code (e.g. "TSL", "CBL") counts only when no other company's name contains it — "PRIME" alone is ambiguous.
+  const code=c=>{const k=normName(c.id);return COMPANIES.some(o=>o!==c&&aliases(o).some(a=>a.split(' ').includes(k)))?[]:[k]};
+  let hit=COMPANIES.filter(c=>[...code(c),...aliases(c)].includes(n));
+  if(!hit.length)hit=COMPANIES.filter(c=>aliases(c).some(a=>a.length>=5&&(a.includes(n)&&n.length>=5||n.includes(a))));
+  return hit.length===1?hit[0].id:null;
+}
+/* First names used in the other companies you can open — only to point out, in the preview,
+   that a name also exists elsewhere. Matching itself never looks outside the current company. */
+async function loadOtherCompanies(){
+  S.ui.otherCo={};const coAtStart=S.company,out={};
+  for(const id of myCompanies()){
+    if(id===coAtStart)continue;const c=coById(id);
+    try{const docs=await Store.getAll(c.prefix+'employees');out[id]=new Set(docs.filter(([,e])=>e&&e.active!==false).map(([,e])=>normName(e.first_name)))}catch(e){}
+  }
+  if(S.company!==coAtStart)return;
+  S.ui.otherCo=out;if(S.route==='import')scheduleRender();
+}
+function otherCoWith(eid){
+  const e=empById(eid),m=S.ui.otherCo;if(!e||!m)return[];
+  const n=normName(e.first_name);return Object.keys(m).filter(id=>m[id].has(n)).map(id=>coById(id).short);
 }
 function rowsFromObjects(objs){
   if(!objs.length)throw new Error('The file has no data rows.');
@@ -1251,26 +1393,43 @@ function rowsFromObjects(objs){
   const cDate=pick('date','work date','day');
   const cIn=pick('time in','in','timein','am in','clock in');
   const cOut=pick('time out','out','timeout','pm out','clock out');
+  const cCo=pick('company','company name','employer');
   if(!cName||!cDate||!cIn||!cOut){const miss=[!cName&&'First Name',!cDate&&'Date',!cIn&&'Time In',!cOut&&'Time Out'].filter(Boolean);throw new Error('Missing column'+(miss.length>1?'s':'')+': '+miss.join(', ')+'. The header row needs First Name, Date, Time In and Time Out (Employee ID is optional).')}
   const out=[];
   for(const o of objs){
     const date=parseDate(o[cDate]);
     if(!date&&!o[cName]&&!(cId&&o[cId]))continue;
-    const [e,match,note]=findEmployee(cId?o[cId]:null,o[cName]);
-    out.push({employee_id:e?e.id:null,name:e?empName(e):String((cName&&o[cName])||(cId&&o[cId])||''),department:e?e.department:'',date,time_in:parseTime(o[cIn]),time_out:parseTime(o[cOut]),match:!date?'Date not readable — use yyyy-mm-dd, e.g. 2026-10-01':match,note:note||''});
+    const src=String((cName&&o[cName])||(cId&&o[cId])||'').trim();
+    let coNote=null;
+    if(cCo&&String(o[cCo]||'').trim()){
+      const coId=companyFromText(o[cCo]);
+      if(coId===null)coNote=`Company “${String(o[cCo]).trim()}” not recognised — use ${COMPANIES.map(c=>c.short).join(', ')}`;
+      else if(coId!==S.company)coNote=`For ${coById(coId).short} — switch to that company at the top to import this row`;
+    }
+    const [e,match,note]=coNote?[null,coNote]:findEmployee(cId?o[cId]:null,o[cName]);
+    out.push({employee_id:e?e.id:null,name:e?empName(e):src,src,department:e?e.department:'',date,time_in:parseTime(o[cIn]),time_out:parseTime(o[cOut]),match:!date?'Date not readable — use yyyy-mm-dd, e.g. 2026-10-01':match,note:note||''});
   }
   if(!out.length)throw new Error('No usable rows found.');
-  // Several time-clock punches for one employee and date collapse into one day:
-  // the earliest Time In and the latest Time Out are kept.
+  // Several time-clock punches for the same DTR name and date collapse into one day:
+  // the earliest Time In and the latest Time Out are kept. Punches are only merged when the
+  // name written in the DTR is the same, so two different people are never folded into one.
   const grouped=new Map(),rest=[];
   for(const x of out){
-    if(x.match!=='OK'){rest.push(x);continue}
-    const k=x.employee_id+'_'+x.date,cur=grouped.get(k);
+    if(!canPick(x)){rest.push(x);continue}
+    const k=x.employee_id+'_'+x.date+'_'+normName(x.src),cur=grouped.get(k);
     if(!cur){grouped.set(k,{...x,punches:1});continue}
     const ins=[cur.time_in,x.time_in].filter(Boolean),outs=[cur.time_out,x.time_out].filter(Boolean);
     cur.time_in=ins.length?ins.sort()[0]:null;cur.time_out=outs.length?outs.sort().pop():null;cur.punches++;
   }
-  return[...grouped.values(),...rest];
+  // Two different DTR names that landed on the same employee and date: neither is imported.
+  const byDay=new Map();for(const g of grouped.values()){const k=g.employee_id+'_'+g.date;(byDay.get(k)||byDay.set(k,[]).get(k)).push(g)}
+  for(const list of byDay.values())if(list.length>1){
+    const names=list.map(g=>`“${g.src||'(no name)'}”`).join(' and ');
+    for(const g of list){g.match=`${names} both matched ${empName(empById(g.employee_id))} on this date — they look like different people; fix the names in the DTR and check again`;g.employee_id=null}
+  }
+  const res=[...grouped.values(),...rest];
+  for(const x of res)x.sel=x.match==='OK';
+  return res;
 }
 async function handleFile(input){
   const f=input.files&&input.files[0];if(!f)return;
@@ -1284,30 +1443,34 @@ async function handleFile(input){
     S.ui.importRows=rowsFromObjects(objs);S.ui.importResult=null;scheduleRender();
   }catch(e){toast(e.message||'Could not read that file.',true)}
 }
-async function doImport(){
-  const rows=S.ui.importRows.filter(x=>x.match==='OK');
+async function doImport(mode){
+  const all=S.ui.importRows||[];
+  const rows=mode==='all'?all.filter(x=>x.match==='OK'):all.filter(x=>x.sel&&canPick(x));
+  if(!rows.length){toast(mode==='all'?'No matched rows to import.':'Tick at least one row to import.',true);return}
   S.ui.importBusy=true;S.ui.importProgress=0;scheduleRender();
   const lockCache={};
   const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
   const loaded=new Map(S.dtr.map(r=>[r._id,r]));
-  let saved=0,failed=0,skipped=S.ui.importRows.length-rows.length,i=0,lastErr=null;
-  const src=S.ui.importTab==='paste'?'paste':'upload';
+  let saved=0,failed=0,locked=0,i=0,lastErr=null;const done=new Set(),jr=journal();
+  const src=S.ui.importTab==='paste'?'paste':'upload', co=curCo().short;
   for(const x of rows){
     i++;
     try{
-      if(await isLocked(x.date)){skipped++;continue}
+      if(await isLocked(x.date)){locked++;done.add(x);continue}
       const id=`${x.employee_id}_${x.date}`;
       const inPeriod=x.date>=S.period.start&&x.date<=S.period.end;
       const existing=inPeriod?loaded.get(id):await Store.get(cp('dtr/')+id);
-      if(existing)await Store.update(cp('dtr/')+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()});
-      else await Store.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
-        ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null});
-      saved++;
+      if(existing)await jr.update(cp('dtr/')+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()},existing);
+      else await jr.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
+        ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
+      saved++;done.add(x);
     }catch(e){failed++;lastErr=e;if(errCode(e)==='invalid_argument'||errCode(e)==='quota_exceeded')break}
     if(i%4===0||i===rows.length){S.ui.importProgress=i/rows.length;const bar=document.querySelector('.progress i');if(bar)bar.style.width=Math.round(S.ui.importProgress*100)+'%'}
   }
-  S.ui.importBusy=false;S.ui.importRows=null;S.ui.importResult={saved,failed,skipped};
-  logAction('IMPORT','dtr',null,`${saved} rows imported (${src}); ${skipped} skipped; ${failed} failed`);
+  // Rows not imported this time (unticked, to confirm, unmatched or failed) stay in the list.
+  const remaining=all.filter(x=>!done.has(x));
+  S.ui.importBusy=false;S.ui.importRows=remaining.length?remaining:null;S.ui.importResult={saved,failed,locked,left:remaining.length,co};
+  logAction('IMPORT','dtr',null,`${saved} rows imported into ${co} (${src}, ${mode==='all'?'all matched':'selected rows'}); ${locked} locked; ${remaining.length} not imported; ${failed} failed`,jr);
   if(lastErr)writeError(lastErr);
   scheduleRender();
 }
@@ -1318,10 +1481,10 @@ async function saveSingle(form){
   if(pd&&pd.status==='APPROVED'){toast('That cut-off is approved and locked.',true);return}
   const id=`${eid}_${date}`, ti=fd.get('time_in')||null, to=fd.get('time_out')||null, rem=(fd.get('remarks')||'').trim();
   try{
-    const ex=await Store.get(cp('dtr/')+id);
-    if(ex)await Store.update(cp('dtr/')+id,{time_in:ti,time_out:to,source:'manual',imported_at:nowISO(),remarks:rem||ex.remarks||''});
-    else await Store.set(cp('dtr/')+id,{employee_id:eid,work_date:date,time_in:ti,time_out:to,status_override:null,source:'manual',imported_at:nowISO(),ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:rem,review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null});
-    logAction('MANUAL_ENTRY','dtr',id,`${empName(empById(eid))} ${date} ${ti||'—'}–${to||'—'}${rem?': '+rem:''}`);
+    const ex=await Store.get(cp('dtr/')+id),jr=journal();
+    if(ex)await jr.update(cp('dtr/')+id,{time_in:ti,time_out:to,source:'manual',imported_at:nowISO(),remarks:rem||ex.remarks||''},ex);
+    else await jr.set(cp('dtr/')+id,{employee_id:eid,work_date:date,time_in:ti,time_out:to,status_override:null,source:'manual',imported_at:nowISO(),ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:rem,review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
+    logAction('MANUAL_ENTRY','dtr',id,`${empName(empById(eid))} ${date} ${ti||'—'}–${to||'—'}${rem?': '+rem:''}`,jr);
     toast(ex?'Entry updated':'Entry added');form.reset();
   }catch(e){writeError(e)}
 }
@@ -1379,8 +1542,9 @@ async function saveEmp(form){
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
   try{
-    await Store.set(cp('employees/')+id,doc);
-    logAction(existing?'UPDATE':'CREATE','employee',id,empName(doc)+(existing&&existing.monthly_rate!==doc.monthly_rate?` · monthly rate ${existing.monthly_rate??'—'} → ${doc.monthly_rate??'—'}`:''));
+    const jr=journal();
+    await jr.set(cp('employees/')+id,doc,existing||null);
+    logAction(existing?'UPDATE':'CREATE','employee',id,empName(doc)+(existing&&existing.monthly_rate!==doc.monthly_rate?` · monthly rate ${existing.monthly_rate??'—'} → ${doc.monthly_rate??'—'}`:''),jr);
     S.ui.empForm=false;S.ui.empEdit=null;toast('Employee saved');scheduleRender();
   }catch(e){writeError(e)}
 }
@@ -1574,18 +1738,70 @@ async function saveAdvances(form){
     if(a>0)items[e.id]={amount:r2(a),note};
     const pa=prev[e.id]?prev[e.id].amount:0;if(r2(a)!==r2(pa||0))changes.push(`${empName(e)} ${amt(pa||0)} → ${amt(a)}`);
   }
-  try{await Store.set(cp('advances/')+c.key,{items,updated_by:actor(),updated_at:nowISO()});logAction('ADVANCES','payroll',c.key,changes.join('; ')||'No changes');closeDlg();toast('Company advances saved')}
+  const jr=journal();
+  try{await jr.set(cp('advances/')+c.key,{items,updated_by:actor(),updated_at:nowISO()});logAction('ADVANCES','payroll',c.key,changes.join('; ')||'No changes',jr);closeDlg();toast('Company advances saved')}
   catch(e){writeError(e)}
 }
 
 /* ---------- Activity log ---------- */
+/* ---------- Undo (Admin only) ---------- */
+const canUndo=()=>!!S.account&&S.account.role==='ADMIN'&&!S.viewAs&&!S.readOnly;
+function undoCell(x){
+  if(x.undone_at){resolveNames([x.undone_by]);return `<span class="chip">Undone</span><br><span class="muted small">${h(personName(x.undone_by))} · ${h(fmtStamp(x.undone_at))}</span>`}
+  if(!x.undo)return '<span class="muted small">—</span>';
+  return `<button class="btn sm" data-act="undoEntry" data-at="${h(x.at)}" data-action="${h(x.action)}">Undo</button>`;
+}
+async function undoEntry(btn){
+  if(!canUndo()){toast('Only an Admin can undo changes.',true);return}
+  const x=S.audit.find(e=>e.at===btn.dataset.at&&e.action===btn.dataset.action);if(!x||!x.undo)return;
+  btn.disabled=true;btn.textContent='Checking…';
+  const reset=()=>{btn.disabled=false;btn.textContent='Undo'};
+  try{
+    const main=await Store.get(cp('undo/')+x.undo);
+    if(!main){toast('The saved “before” copy for this change is missing, so it can’t be undone.',true);reset();return}
+    if(main.undone){toast('This change was already undone.',true);reset();return}
+    let ops=(main.ops||[]).slice();
+    for(let i=1;i<(main.parts||1);i++){const d=await Store.get(cp('undo/')+x.undo+'~'+i);if(!d){toast('Part of the saved copy is missing, so this can’t be undone.',true);reset();return}ops=ops.concat(d.ops||[])}
+    const lockCache={},isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
+    const todo=[],changed=[],locked=[];
+    for(const op of ops){
+      const cur=await Store.get(op.p);
+      if(docPrint(plainDoc(cur))!==op.a){changed.push(op);continue}
+      const wd=op.p.includes('dtr/')?((op.b||cur||{}).work_date):null;
+      if(wd&&await isLocked(wd)){locked.push(op);continue}
+      todo.push(op);
+    }
+    reset();
+    resolveNames([x.by]);
+    const who=personName(x.by)||x.by, rec=n=>`${n} ${n===1?'record':'records'}`;
+    if(!todo.length){toast(`Nothing to undo: ${changed.length?rec(changed.length)+' changed again since':''}${changed.length&&locked.length?', ':''}${locked.length?rec(locked.length)+' in a locked cut-off':''}.`,true);return}
+    const msg=`${rec(todo.length)} will go back to how ${todo.length===1?'it was':'they were'} before ${who} made this change on ${fmtStamp(x.at)}: ${todo.filter(o=>o.b==null).length?`${todo.filter(o=>o.b==null).length} added by it will be removed, `:''}${todo.filter(o=>o.b!=null).length} restored.${changed.length?` ${rec(changed.length)} changed again since and will be left as ${changed.length===1?'it is':'they are'}.`:''}${locked.length?` ${rec(locked.length)} in an approved, locked cut-off will be left as ${locked.length===1?'it is':'they are'} — reopen payroll first if those need undoing too.`:''}`;
+    if(!(await confirmDlg(`Undo “${x.action}”?`,msg,'Undo change',true)))return;
+    btn.disabled=true;btn.textContent='Undoing…';
+    const jr=journal();let n=0;
+    try{for(const op of todo){if(op.b==null)await jr.del(op.p);else await jr.set(op.p,op.b);n++}}catch(e){writeError(e)}
+    if(!n){reset();return}
+    const partial=n<ops.length;
+    await Store.update(cp('undo/')+x.undo,{undone:true,undone_by:actor(),undone_at:nowISO(),undone_count:n}).catch(()=>{});
+    await markAuditUndone(x);
+    logAction('UNDO',x.entity,x.entity_id,`Undid ${x.action} by ${x.by} from ${fmtStamp(x.at)}: ${rec(n)} put back${partial?`, ${rec(ops.length-n)} left as they are`:''}${x.details?` (was: ${String(x.details).slice(0,160)})`:''}`,jr);
+    toast(`Undone: ${rec(n)} put back${partial?` · ${rec(ops.length-n)} left as they are`:''}`);
+  }catch(e){reset();writeError(e)}
+}
+function markAuditUndone(x){
+  const path=cp('audit/'+x.at.slice(0,7)),by=actor(),at=nowISO();
+  auditQueue=auditQueue.then(async()=>{
+    try{const d=await Store.get(path);if(!d)return;const entries=(d.entries||[]).map(e=>e.at===x.at&&e.action===x.action&&e.by===x.by?{...e,undone_by:by,undone_at:at}:e);await Store.set(path,{entries})}catch(e){console.warn('audit',e)}
+  });
+  return auditQueue;
+}
 function pageAudit(){
   const months=[];let d=new Date();for(let i=0;i<6;i++){months.push(iso(d.getFullYear(),d.getMonth()+1,1).slice(0,7));d=new Date(d.getFullYear(),d.getMonth()-1,1)}
   const entries=[...S.audit].reverse();
   resolveNames(entries.map(x=>x.by));
-  return `<div class="row"><div><h1>Activity log</h1><p class="sub">Every sign-in, import, correction, approval and rate change, newest first. Entries are never erased; deleted accounts and changed emails are marked so the trail stays complete.</p></div><span class="spacer"></span>
+  return `<div class="row"><div><h1>Activity log</h1><p class="sub">Every sign-in, import, correction, approval and rate change, newest first. Entries are never erased; deleted accounts and changed emails are marked so the trail stays complete.${canUndo()?' As Admin you can <b>Undo</b> attendance, employee, advances, settings, deadline and access changes: the records go back to how they were before, except any that were changed again since. Undoing is logged too, and can itself be undone.':''}</p></div><span class="spacer"></span>
   <select data-change="auditMonth" aria-label="Month">${months.map(m=>{const[y,mm]=m.split('-');return`<option value="${m}" ${S.auditMonth===m?'selected':''}>${MON[+mm-1]} ${y}</option>`}).join('')}</select></div>
-  ${entries.length?`<div class="tablewrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>What</th><th>Details</th></tr></thead><tbody>${entries.map(x=>{const w=x.by&&x.by!=='local'?accountTrail(x.by):null,ent=x.entity==='account'&&x.entity_id?accountTrail(x.entity_id):null;return`<tr><td>${h(fmtStamp(x.at))}</td><td style="white-space:normal;min-width:180px">${h(w&&w.name?w.name+' ('+x.by+')':(x.by==='local'?'This device':x.by||'—'))}${w&&w.note?` <span class="chip ${w.deleted?'bad':'acc'}">${h(w.note)}</span>`:''}</td><td><span class="chip">${h(x.action)}</span></td><td style="white-space:normal">${h(x.entity)}${x.entity_id?' '+h(x.entity_id):''}${ent&&ent.note&&x.action!=='DELETE_USER'&&x.action!=='CHANGE_EMAIL'?` <span class="chip ${ent.deleted?'bad':'acc'}">${h(ent.note)}</span>`:''}</td><td style="white-space:normal;min-width:240px">${h(x.details)}</td></tr>`}).join('')}</tbody></table></div>`:'<div class="panel empty"><b>No activity this month.</b></div>'}`;
+  ${entries.length?`<div class="tablewrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>What</th><th>Details</th>${canUndo()?'<th>Undo</th>':''}</tr></thead><tbody>${entries.map(x=>{const w=x.by&&x.by!=='local'?accountTrail(x.by):null,ent=x.entity==='account'&&x.entity_id?accountTrail(x.entity_id):null;return`<tr><td>${h(fmtStamp(x.at))}</td><td style="white-space:normal;min-width:180px">${h(w&&w.name?w.name+' ('+x.by+')':(x.by==='local'?'This device':x.by||'—'))}${w&&w.note?` <span class="chip ${w.deleted?'bad':'acc'}">${h(w.note)}</span>`:''}</td><td><span class="chip">${h(x.action)}</span></td><td style="white-space:normal">${h(x.entity)}${x.entity_id?' '+h(x.entity_id):''}${ent&&ent.note&&x.action!=='DELETE_USER'&&x.action!=='CHANGE_EMAIL'?` <span class="chip ${ent.deleted?'bad':'acc'}">${h(ent.note)}</span>`:''}</td><td style="white-space:normal;min-width:240px">${h(x.details)}</td>${canUndo()?`<td>${undoCell(x)}</td>`:''}</tr>`}).join('')}</tbody></table></div>`:'<div class="panel empty"><b>No activity this month.</b></div>'}`;
 }
 
 /* ---------- Settings ---------- */
@@ -1626,11 +1842,13 @@ async function saveSettings(form){
   if(next.cutoff_day<2||next.cutoff_day>28){toast('The attendance month start day must be between 2 and 28.',true);return}
   if(next.cut1_end<1||next.cut1_end>=next.cutoff_day-1){toast('The 1st cut-off end day must be before the attendance month start day.',true);return}
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=next[k];
-  try{await Store.set(cp('settings/main'),save);logAction('UPDATE','settings',null,'Payroll settings changed');toast('Settings saved')}catch(e){writeError(e)}
+  const jr=journal();
+  try{await jr.set(cp('settings/main'),save);logAction('UPDATE','settings',null,'Payroll settings changed',jr);toast('Settings saved')}catch(e){writeError(e)}
 }
 async function saveDepartments(list,action,msg){
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=S.settings[k];save.departments=list;
-  try{await Store.set(cp('settings/main'),save);logAction(action,'department',null,msg);toast(msg)}catch(e){writeError(e)}
+  const jr=journal();
+  try{await jr.set(cp('settings/main'),save);logAction(action,'department',null,msg,jr);toast(msg)}catch(e){writeError(e)}
 }
 async function addDepartment(form){
   if(!can('settings')){toast('You don’t have access to change settings.',true);return}
@@ -1647,7 +1865,8 @@ async function removeDepartment(name){
 }
 async function saveHolidays(list,msg){
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=S.settings[k];save.holidays=list;
-  try{await Store.set(cp('settings/main'),save);logAction('UPDATE','holidays',null,msg);toast(msg)}catch(e){writeError(e)}
+  const jr=journal();
+  try{await jr.set(cp('settings/main'),save);logAction('UPDATE','holidays',null,msg,jr);toast(msg)}catch(e){writeError(e)}
 }
 
 /* ---------- User accounts ---------- */
@@ -1776,7 +1995,8 @@ async function saveRoleAccess(form,reset){
     if(on.length||off.length)changes.push(`${ROLES[r]}: ${on.length?'+ '+on.join(', '):''}${on.length&&off.length?'; ':''}${off.length?'− '+off.join(', '):''}`);
   }
   if(!changes.length){toast('No changes to save.');return}
-  try{await Store.set('settings/access',{roles,updated_by:actor(),updated_at:nowISO()});logAction(reset?'RESET_ACCESS':'ACCESS_ROLE','access',null,changes.join(' | '));toast(reset?'Access reset to defaults':'Access saved')}
+  const jr=journal();
+  try{await jr.set('settings/access',{roles,updated_by:actor(),updated_at:nowISO()});logAction(reset?'RESET_ACCESS':'ACCESS_ROLE','access',null,changes.join(' | '),jr);toast(reset?'Access reset to defaults':'Access saved')}
   catch(e){writeError(e)}
 }
 async function restoreAcct(email){
@@ -1820,8 +2040,14 @@ const actions={
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;scheduleRender()},
   clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
   parsePaste(){const t=$('#pasteArea').value;S.ui.pasteText=t;try{let objs=parsePasted(t);if(!objs.length)throw new Error('No DTR rows found under the header. Each row needs a first name, a yyyy-mm-dd date and the times.');try{S.ui.importRows=rowsFromObjects(objs)}catch(err){if(!/Missing column/.test(err.message))throw err;objs=parsePasted(t,true);if(!objs.length)throw err;S.ui.importRows=rowsFromObjects(objs)}S.ui.importResult=null;render()}catch(e){toast(e.message,true)}},
-  doImport(){doImport()},
-  template(){const d=todayISO();offerFile('dtr-import-template.csv',`First Name,Date,Time In,Time Out\nJUNE,${d},07:55,17:10\nMARY JANE,${d},08:02,17:00\nCHRISTINE JOY,${d},08:00,17:05\n`)},
+  doImport(el){doImport(el.dataset.mode)},
+  undoEntry(el){undoEntry(el)},
+  async delDtr(el){if(await deleteDtrRecords([el.dataset.id])){S.ui.openRow=null;scheduleRender()}},
+  dtrSelMode(){S.ui.dtrSelMode=!S.ui.dtrSelMode;S.ui.dtrSel=new Set();S.ui.openRow=null;render()},
+  dtrSelAll(){for(const c of document.querySelectorAll('input[data-change="dtrSel"]:not(:disabled)'))S.ui.dtrSel.add(c.dataset.id);render()},
+  dtrSelNone(){S.ui.dtrSel=new Set();render()},
+  async dtrDelSel(){if(await deleteDtrRecords([...S.ui.dtrSel])){S.ui.dtrSel=new Set();S.ui.dtrSelMode=false;scheduleRender()}},
+  template(){const d=todayISO();offerFile('dtr-import-template.csv',`First Name,Date,Time In,Time Out,Company\nJUNE,${d},07:55,17:10,${curCo().short}\nMARY JANE,${d},08:02,17:00,${curCo().short}\nCHRISTINE JOY,${d},08:00,17:05,${curCo().short}\n`)},
   newEmp(){S.ui.empForm=true;S.ui.empEdit=null;render()},
   editEmp(el){S.ui.empForm=true;S.ui.empEdit=Number(el.dataset.id);render();window.scrollTo({top:0,behavior:'smooth'})},
   cancelEmp(){S.ui.empForm=false;S.ui.empEdit=null;render()},
@@ -1867,6 +2093,15 @@ document.addEventListener('change',async e=>{
   else if(k==='dtrCut'){S.ui.dtrCut=Number(el.value)||0;S.ui.openRow=null;render()}
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
   else if(k==='fileIn')handleFile(el);
+  else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
+  else if(k==='impSel'||k==='impSelAll'){
+    const rows=S.ui.importRows||[];
+    if(k==='impSel'){const x=rows[Number(el.dataset.i)];if(x&&canPick(x))x.sel=el.checked}
+    else{for(const x of rows)if(canPick(x))x.sel=el.checked;for(const c of document.querySelectorAll('input[data-change="impSel"]')){c.checked=el.checked}}
+    for(const c of document.querySelectorAll('input[data-change="impSel"]')){const tr=c.closest('tr');if(tr)tr.classList.toggle('skip',!c.checked)}
+    const n=rows.filter(x=>x.sel&&canPick(x)).length,p=rows.filter(canPick).length,b=$('#impSelBtn'),all=document.querySelector('input[data-change="impSelAll"]');
+    if(b){b.textContent=`Import ${n} selected`;b.disabled=!n}if(all)all.checked=p>0&&n===p;
+  }
   else if(k==='restoreFile')restoreFromFile(el);
   else if(k==='auditMonth'){S.auditMonth=el.value;watchAudit()}
   else if(k==='company')switchCompany(el.value);
