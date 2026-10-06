@@ -668,13 +668,21 @@ function cutCalc(e,rows,cutoff){
   return {t,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
     hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv)};
 }
+/* Payroll frequency: most staff are paid on both cut-offs. Staff paid once a month ('first' or 'second') get the whole month in that one payout: both cut-offs are added together there and the other cut-off shows nothing. */
+const CUT_SUM=['basic','lateUt','absence','netLA','allowance','taxAllow','hol','otPay','ndPay','gross','govBasis','adv'];
+function mergeCuts(a,b){const o={...a,t:{},missing:a.missing+b.missing,absentNet:a.absentNet+b.absentNet};for(const f of CUT_SUM)o[f]=r2(a[f]+b[f]);for(const k of Object.keys(a.t))o.t[k]=a.t[k]+b.t[k];return o}
+function zeroCut(a){const o={...a,t:{},missing:0,absentNet:0,off:true};for(const f of CUT_SUM)o[f]=0;for(const k of Object.keys(a.t))o.t[k]=0;return o}
+const payFreq=e=>e&&(e.pay_frequency==='first'||e.pay_frequency==='second')?e.pay_frequency:'both';
+const payItems=(items,tab)=>tab==='1'||tab==='2'?items.filter(x=>!x['k'+tab].off):items;
 /* Whole payroll month: both cut-offs, government contributions (deducted on the 2nd cut-off) and BIR figures. */
 function computePayroll(){
   const st=S.settings,P=S.period;
   const byEmp={};for(const r of S.dtr)(byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r);
   return S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id).map(e=>{
     const rows=byEmp[e.id]||[];
-    const [k1,k2]=P.cuts.map(c=>cutCalc(e,rows.filter(r=>r.work_date>=c.start&&r.work_date<=c.end),c));
+    let [k1,k2]=P.cuts.map(c=>cutCalc(e,rows.filter(r=>r.work_date>=c.start&&r.work_date<=c.end),c));
+    const freq=payFreq(e);
+    if(freq==='first'){k1=mergeCuts(k1,k2);k2=zeroCut(k2)}else if(freq==='second'){k2=mergeCuts(k2,k1);k1=zeroCut(k1)}
     const hasRate=numOrNull(e.monthly_rate)!=null||numOrNull(e.daily_rate)!=null;
     const bir=hasRate&&e.deducted_government!==false;
     const compBasis=r2(k1.govBasis+k2.govBasis);
@@ -688,15 +696,16 @@ function computePayroll(){
     const taxable=bir&&!mwe?Math.max(0,r2(compBasis-contribEe)):0;
     const tax=bir&&!mwe?monthlyTax(taxable):0;
     const taxType=!bir?'':(mwe?'T1':(tax>0?'T3':'T2'));
-    k1.ded=k1.adv;k1.net=r2(k1.gross-k1.ded);
-    Object.assign(k2,{sss:sssEeTot,phic:phicEe,hdmf:hdmfEe,tax});
-    k1.sss=k1.phic=k1.hdmf=k1.tax=0;
-    k2.ded=r2(k2.adv+contribEe+tax);k2.net=r2(k2.gross-k2.ded);
+    const gk=freq==='first'?k1:k2,ok=freq==='first'?k2:k1; // government contributions and tax come off the last payout of the month
+    Object.assign(gk,{sss:sssEeTot,phic:phicEe,hdmf:hdmfEe,tax});
+    ok.sss=ok.phic=ok.hdmf=ok.tax=0;
+    gk.ded=r2(gk.adv+contribEe+tax);gk.net=r2(gk.gross-gk.ded);
+    ok.ded=ok.adv;ok.net=r2(ok.gross-ok.ded);
     const sum=f=>r2(k1[f]+k2[f]);
     const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),
       sss:sssEeTot,phic:phicEe,hdmf:hdmfEe,tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
-    return {e,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
+    return {e,freq,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
       birRow:{basic:mo.basic,lateAbs:r2(mo.lateUt+mo.absence),netLA:mo.netLA,hol:mo.hol,taxAllow:r2(k1.taxAllow+k2.taxAllow),ntAllow:r2(mo.allowance-k1.taxAllow-k2.taxAllow),otnd:r2(mo.otPay+mo.ndPay),comp:compBasis,phicBasis,
         msc:sss.msc,sssEr:sss.er,sssEe:sss.ee,ec:sss.ec,mpfEr:sss.mpfEr,mpfEe:sss.mpfEe,phicEr,phicEe,hdmfEr,hdmfEe,contribEe,netContrib:r2(compBasis-contribEe),taxable,tax,taxType}};
   });
@@ -1065,7 +1074,7 @@ function dashPayrollReminder(){
   const c=activeCut(),t=todayISO(),left=daysBetween(t,c.payEnd),d=inPeriod(c)?S.payDocs[c.n]:null,appr=!!(d&&d.status==='APPROVED');
   let issues='';
   if(inPeriod(c)){
-    const items=computePayroll(),k=c.n===1?'k1':'k2';
+    const k=c.n===1?'k1':'k2',items=computePayroll().filter(x=>!x[k].off);
     const noRate=items.filter(x=>!x.hasRate).length,pend=items.reduce((a,x)=>a+x[k].t.pendingOt,0),rev=items.reduce((a,x)=>a+x[k].t.review,0),negs=items.filter(x=>x[k].net<0).length;
     const w=[];if(rev)w.push(`${rev} attendance records not yet approved by department heads`);if(pend)w.push(`${pend} overtime entries pending`);if(noRate)w.push(`${noRate} employees without a salary rate`);if(negs)w.push(`${negs} employees with a negative net pay`);
     issues=w.length?`<br><span class="small">Check first: ${h(w.join(' · '))}.</span>`:'<br><span class="small">No open issues found in the generated payroll.</span>';
@@ -1819,7 +1828,7 @@ function pageEmployees(){
   if(!S.ready.employees)return html+'<div class="loading">Loading employees…</div>';
   if(!emps.length)return html+`<div class="panel empty"><b>No employees yet.</b>${edit?'Add your first employee to start matching DTR rows.':''}</div>`;
   html+=`<div class="tablewrap"><table><thead><tr><th>ID</th><th class="stick">Name</th><th>Department</th><th>Position</th><th>Status</th><th>Pay basis</th><th>Shift</th><th class="n">Monthly</th><th class="n">Daily</th><th class="n">Allowance</th><th>BIR</th></tr></thead><tbody>
-  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}</td>
+  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}${payFreq(e)!=='both'?` <span class="chip acc" title="Paid once a month">${payFreq(e)==='first'?'1st only':'2nd only'}</span>`:''}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}</td>
   <td class="n">${numOrNull(e.monthly_rate)!=null?amt(e.monthly_rate):'<span class="chip warn">Not set</span>'}</td><td class="n">${numOrNull(e.daily_rate)!=null?amt(e.daily_rate):(numOrNull(e.monthly_rate)!=null?`<span class="muted">${amt(e.monthly_rate*12/S.settings.divisor)}</span>`:'—')}</td><td class="n">${e.monthly_allowance?amt(e.monthly_allowance):'—'}</td><td>${e.deducted_government!==false?`<span class="chip acc">${e.subject_tax===false?'Yes · MWE':'Yes'}</span>`:'<span class="muted">No</span>'}</td></tr>`).join('')}
   </tbody></table></div><p class="muted small">Grey daily rates are derived from the monthly rate × 12 ÷ ${S.settings.divisor}.</p>`;
   return html;
@@ -1838,6 +1847,7 @@ function empForm(e){
     <label class="f">Branch<input name="branch" value="${v('branch','Main / Victoria')}"></label>
     <label class="f">Status<select name="employment_status">${opt(['Regular','Probationary','Contractual'],e?e.employment_status:'Regular')}</select></label>
     <label class="f">Pay basis<select name="pay_basis">${opt(['Monthly','Daily'],e?e.pay_basis:'Monthly')}</select></label>
+    <label class="f">Payroll frequency<select name="pay_frequency">${[['both','Every cut-off (1st and 2nd) — default'],['first','Once a month — 1st cut-off only'],['second','Once a month — 2nd cut-off only']].map(([pv,pl])=>`<option value="${pv}" ${payFreq(e)===pv?'selected':''}>${pl}</option>`).join('')}</select></label>
     <label class="f">Monthly rate (₱)<input name="monthly_rate" type="number" step="0.01" min="0" value="${v('monthly_rate')}"></label>
     <label class="f">Daily rate (₱)<input name="daily_rate" type="number" step="0.01" min="0" value="${v('daily_rate')}" placeholder="Auto from monthly"></label>
     <label class="f">Monthly allowance (₱)<input name="monthly_allowance" type="number" step="0.01" min="0" value="${v('monthly_allowance',0)}"></label>
@@ -1859,7 +1869,7 @@ async function saveEmp(form){
   const existing=empById(id);
   if(!S.ui.empEdit&&existing){toast(`Employee ID ${id} is already used by ${empName(existing)}.`,true);return}
   const doc={id,first_name:String(fd.get('first_name')).trim().toUpperCase(),surname:String(fd.get('surname')).trim().toUpperCase(),department:fd.get('department'),position:String(fd.get('position')||'').trim(),portal_name:String(fd.get('portal_name')||'').trim(),
-    branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
+    branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),pay_frequency:['first','second'].includes(fd.get('pay_frequency'))?fd.get('pay_frequency'):'both',monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
     monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
@@ -1874,18 +1884,18 @@ async function saveEmp(form){
 /* ---------- Payroll ---------- */
 const TABS=[['1','1st cut-off'],['2','2nd cut-off'],['M','Monthly'],['BIR','BIR Purposes']];
 const neg=(v)=>v?'−'+amt(v):amt(0);
-function sectionCols(tab){
+function sectionCols(tab,items){
   const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['adv','Company advances',1]];
   const gov=[['sss','SSS',1],['phic','PhilHealth',1],['hdmf','Pag-IBIG',1],['tax','W/tax',1]];
-  if(tab==='1')return[...base,['net','Net pay']];
+  if(tab==='1')return[...base,...(items&&items.some(x=>x.freq==='first')?gov:[]),['net','Net pay']]; // staff paid once a month on the 1st cut-off have their deductions here
   if(tab==='2')return[...base,...gov,['net','Net pay']];
   return[...base,...gov,['net1','1st cut-off'],['net2','2nd cut-off'],['net','Net pay']];
 }
 function pagePayroll(){
-  const tab=S.ui.payTab||'1', items=computePayroll(), P=S.period;
+  const tab=S.ui.payTab||'1', all=computePayroll(), items=payItems(all,tab), P=S.period;
   let html=`<div class="row"><div><h1>Payroll · ${h(fmtMonth(P.ym))}</h1><p class="sub">Paid every 15th and 30th/31st. Tap an employee for the payslip.</p></div><span class="spacer"></span><button class="btn" data-act="exportXlsx">Export Excel</button><button class="btn" data-act="exportAll" title="One workbook with all four sections">Export all sections</button></div>
   <div class="seg" role="tablist" style="margin-bottom:14px">${TABS.map(([k,l])=>`<button role="tab" data-act="payTab" data-v="${k}" aria-pressed="${tab===k}">${l}</button>`).join('')}</div>`;
-  if(!items.length)return html+'<div class="panel empty"><b>No active employees.</b></div>';
+  if(!items.length)return html+(all.length?'<div class="panel empty"><b>No one is paid on this cut-off.</b>Everyone here is paid once a month on the other cut-off.</div>':'<div class="panel empty"><b>No active employees.</b></div>');
   if(tab==='BIR')return html+pageBir(items);
   const cutN=tab==='M'?null:Number(tab), c=cutN?P.cuts[cutN-1]:null;
   const rowOf=x=>tab==='1'?x.k1:(tab==='2'?x.k2:x.mo);
@@ -1904,7 +1914,7 @@ function pagePayroll(){
   if(noRate)warn.push(`${noRate} without a salary rate`);if(pendOt)warn.push(`${pendOt} overtime entries pending (not paid until approved)`);
   if(chk)warn.push(`${chk} days with a missing punch`);if(review)warn.push(`${review} records not yet approved by department heads`);if(missing)warn.push(`${missing} workdays with no DTR record (not deducted)`);
   if(warn.length&&!appr)html+=`<div class="banner warn">Before approving: ${h(warn.join(' · '))}.</div>`;
-  const cols=sectionCols(tab);
+  const cols=sectionCols(tab,items);
   const tot={};for(const x of items){const r=rowOf(x);for(const[k]of cols)tot[k]=(tot[k]||0)+(r[k]||0)}
   html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
   const showCards=isPhone()&&S.ui.payView!=='table';
@@ -1914,7 +1924,7 @@ function pagePayroll(){
   ${items.map(x=>{const r=rowOf(x);return`<tr class="click" data-act="payslip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td class="stick"><b>${h(empName(x.e))}</b>${!x.hasRate?' <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' <span class="chip acc" title="Included in BIR Purposes">BIR</span>':''}${tk(x).pendingOt?' <span class="chip warn" title="Pending OT">OT?</span>':''}${r.net<0?' <span class="chip bad">Negative net</span>':''}</td><td>${h(x.e.department)}</td>
   ${cols.map(([k,,isNeg])=>`<td class="n">${k==='net'?'<b>'+amt(r[k])+'</b>':(isNeg?neg(r[k]):amt(r[k]))}</td>`).join('')}</tr>`}).join('')}
   </tbody><tfoot><tr><td></td><td class="stick">Total</td><td></td>${cols.map(c=>`<td class="n">${amt(tot[c[0]])}</td>`).join('')}</tr></tfoot></table></div>
-  <p class="muted small">Monthly-paid staff receive half the monthly rate each cut-off; daily-paid staff are paid for days present. Holiday pay: unworked regular holidays are paid to daily-paid staff; work on a regular holiday adds ${Math.round(S.settings.hol_rh_prem*100)}%, special days ${Math.round(S.settings.hol_snw_prem*100)}%, rest days ${Math.round(S.settings.rd_prem*100)}% (monthly-paid: ${Math.round((1+Number(S.settings.rd_prem))*100)}%). SSS, PhilHealth, Pag-IBIG and withholding tax are computed on the whole month and deducted on the 2nd cut-off, only for employees in BIR Purposes.</p>`;
+  <p class="muted small">Monthly-paid staff receive half the monthly rate each cut-off (staff set to “Once a month” receive the whole month on one cut-off); daily-paid staff are paid for days present. Holiday pay: unworked regular holidays are paid to daily-paid staff; work on a regular holiday adds ${Math.round(S.settings.hol_rh_prem*100)}%, special days ${Math.round(S.settings.hol_snw_prem*100)}%, rest days ${Math.round(S.settings.rd_prem*100)}% (monthly-paid: ${Math.round((1+Number(S.settings.rd_prem))*100)}%). SSS, PhilHealth, Pag-IBIG and withholding tax are computed on the whole month and deducted on the 2nd cut-off, only for employees in BIR Purposes.</p>`;
   return html;
 }
 function pageBir(items){
@@ -1954,7 +1964,7 @@ function payslipHtml(x,tab){
   const c=tab==='1'||tab==='2'?P.cuts[Number(tab)-1]:null;
   const payLbl=c?fmtRange(c.payStart,c.payEnd):fmtRange(P.cuts[0].payStart,P.cuts[1].payEnd), attLbl=c?fmtRange(c.start,c.end):fmtRange(P.start,P.end);
   const d=c?S.payDocs[c.n]:null;
-  const showGov=tab!=='1';
+  const showGov=tab!=='1'||x.freq==='first';
   return `<div class="slip"><p style="margin:0"><b>${h(st.company)}</b></p><p class="muted small" style="margin:0 0 12px">${h(st.address)}</p>
   <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h(['#'+e.id,e.employment_status,e.position,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">${c?(c.n===1?'1st':'2nd')+' cut-off':'Monthly'} payroll<br><b>${h(payLbl)}</b><br><span class="muted">Covered: ${h(attLbl)}</span></div></div>
   <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:14px">
@@ -1964,13 +1974,13 @@ function payslipHtml(x,tab){
     <div class="stat"><b style="font-size:18px">${fmtMin(t.ot)}</b><span>Approved OT</span></div>
   </div>
   <table><thead><tr><th>Earnings</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line(e.pay_basis==='Daily'?`Salary (${t.present} days × ${amt(x.daily)})`:(tab==='M'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
+  ${line(e.pay_basis==='Daily'?`Salary (${t.present} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
   ${line('Company advances',r.adv)}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
   ${!x.hasRate?'<p class="banner warn" style="margin-top:12px">No salary rate on file for this employee.</p>':''}
-  ${tab==='1'&&x.bir?'<p class="muted small" style="margin-top:10px">Government contributions and withholding tax are deducted on the 2nd cut-off.</p>':''}
+  ${tab==='1'&&x.bir&&x.freq==='both'?'<p class="muted small" style="margin-top:10px">Government contributions and withholding tax are deducted on the 2nd cut-off.</p>':''}${x.freq!=='both'&&tab!=='M'?`<p class="muted small" style="margin-top:10px">Paid once a month, on the ${x.freq==='first'?'1st':'2nd'} cut-off: this payslip holds the whole month’s pay and deductions.</p>`:''}
   <p class="muted small" style="margin-top:12px">${c?(d&&d.status==='APPROVED'?'Approved payroll':'Draft — not yet approved'):'Monthly summary'} · generated ${h(fmtStamp(nowISO()))}</p></div>`;
 }
 const SECTION_NAME={'1':'1st Cut-off','2':'2nd Cut-off','M':'Monthly','BIR':'BIR Purposes'};
@@ -1990,7 +2000,7 @@ function sectionData(tab,items){
     const sm=f=>r2(L.reduce((a,x)=>a+(x.birRow[f]||0),0));
     extra=[[],['REMITTANCES PAYABLE'],['SSS regular (ER + EE)',r2(sm('sssEr')+sm('sssEe'))],['SSS provident fund / MPF (ER + EE)',r2(sm('mpfEr')+sm('mpfEe'))],['SSS EC (employer)',sm('ec')],['PhilHealth (ER + EE)',r2(sm('phicEr')+sm('phicEe'))],['Pag-IBIG (ER + EE)',r2(sm('hdmfEr')+sm('hdmfEe'))],['Withholding tax (1601-C)',sm('tax')],['Total',r2(sm('sssEr')+sm('sssEe')+sm('mpfEr')+sm('mpfEe')+sm('ec')+sm('phicEr')+sm('phicEe')+sm('hdmfEr')+sm('hdmfEe')+sm('tax'))]];
   } else {
-    const cols=sectionCols(tab),rowOf=x=>tab==='1'?x.k1:(tab==='2'?x.k2:x.mo);
+    const cols=sectionCols(tab,items),rowOf=x=>tab==='1'?x.k1:(tab==='2'?x.k2:x.mo);
     head=['EE No','Employee','Department','Pay Basis',...cols.map(c=>c[1])];
     rows=items.map(x=>{const r=rowOf(x);return[x.e.id,empName(x.e),x.e.department,x.e.pay_basis||'Monthly',...cols.map(c=>r[c[0]]||0)]});
     tot=['','TOTAL','','',...cols.map(c=>r2(items.reduce((a,x)=>a+(rowOf(x)[c[0]]||0),0)))];
@@ -2017,7 +2027,7 @@ async function saveFile(filename,data,mime){
   return false;
 }
 async function exportExcel(tabs){
-  const items=computePayroll(),secs=tabs.map(t=>sectionData(t,items));
+  const all=computePayroll(),secs=tabs.map(t=>sectionData(t,payItems(all,t)));
   const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
   if(typeof XLSX!=='undefined'){
     const wb=XLSX.utils.book_new();
@@ -2033,7 +2043,7 @@ async function exportExcel(tabs){
   offerFile(base+'.csv',csv);
 }
 async function setPayrollStatus(n,status){
-  const c=S.period.cuts[n-1], items=computePayroll(), k=n===1?'k1':'k2';
+  const c=S.period.cuts[n-1], k=n===1?'k1':'k2', items=computePayroll().filter(x=>!x[k].off);
   const doc=status==='APPROVED'
     ?{status,approved_by:actor(),approved_at:nowISO(),pay_start:c.payStart,pay_end:c.payEnd,att_start:c.start,att_end:c.end,totals:{employees:items.length,gross:r2(items.reduce((a,x)=>a+x[k].gross,0)),net:r2(items.reduce((a,x)=>a+x[k].net,0))}}
     :{status:'DRAFT',reopened_by:actor(),reopened_at:nowISO()};
@@ -2044,7 +2054,7 @@ function advancesDialog(n){
   const c=S.period.cuts[n-1], items=(S.adv[n]||{});
   const emps=S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id);
   openDlg(`Company advances · ${n===1?'1st':'2nd'} cut-off`,`<form data-form="adv" data-n="${n}">
-    <p class="muted small" style="margin-top:0">Payroll ${h(fmtRange(c.payStart,c.payEnd))}. Amounts are deducted from this cut-off's net pay. Leave blank for none.</p>
+    <p class="muted small" style="margin-top:0">Payroll ${h(fmtRange(c.payStart,c.payEnd))}. Amounts are deducted from this cut-off's net pay (for staff paid once a month, from their one payday). Leave blank for none.</p>
     <div class="tablewrap"><table><thead><tr><th>Employee</th><th class="n">Amount (₱)</th><th>Note</th></tr></thead><tbody>
     ${emps.map(e=>{const it=items[e.id]||{};return`<tr><td>${h(empName(e))}</td><td class="n"><input name="a_${e.id}" type="number" min="0" step="0.01" value="${it.amount?h(it.amount):''}" style="width:120px;text-align:right"></td><td><input name="n_${e.id}" value="${h(it.note||'')}" maxlength="120" placeholder="e.g. CA 9/12" style="width:180px"></td></tr>`}).join('')}
     </tbody></table></div><div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary">Save advances</button></div></form>`);
