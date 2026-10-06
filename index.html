@@ -176,7 +176,7 @@ th.stick{background:var(--surface-2);z-index:2}
 .dtr-row .pick input,.imp-cb{width:18px;height:18px;margin:0;accent-color:var(--accent)}
 .selbar{position:sticky;top:64px;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--surface);border:1px solid var(--accent);border-radius:var(--radius);padding:8px 12px;margin:0 0 14px}
 td.cb,th.cb{width:34px;text-align:center}
-tr.skip td{color:var(--muted)}
+tr.unsel td{color:var(--muted)}
 .editor{padding:14px;background:var(--surface-2);border-top:1px dashed var(--line)}
 .editor .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
 /* Skip link & offline banner */
@@ -1284,13 +1284,15 @@ function pageImport(){
   const u=S.ui;
   let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched by first name <b>only to employees registered under ${h(curCo().name)}</b> — the company selected at the top — so people in other companies who share a first name are never mixed up. Add a Company column if one file covers several companies; rows for other companies are left out.</p>`;
   if(S.readOnly)return html+'<div class="empty"><b>View-only access.</b></div>';
-  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['single','Single entry']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
+  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
   if(u.importResult){
     const R=u.importResult;
     html+=`<div class="banner ${R.failed||R.locked?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'} into ${h(R.co||curCo().short)}.${R.locked?` ${R.locked} skipped because the cut-off is approved and locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}${R.left?` ${R.left} ${R.left===1?'row was':'rows were'} not imported and ${R.left===1?'is':'are'} still listed below.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">${R.left?'Clear list':'Import more'}</button></div>`;
   }
   if(u.importTab==='upload'){
-    html+=`<div class="panel"><h2>Upload Excel or CSV</h2><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
+    html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect time card exports can be uploaded as they are.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
+  } else if(u.importTab==='portal'){
+    html+=portalPanel();
   } else if(u.importTab==='paste'){
     html+=`<div class="panel"><h2>Paste DTR rows</h2><p class="muted small">Paste under the header row, or paste your own copy with its header — copying straight from Excel works. Dates are read as yyyy-mm-dd (for example 2026-10-01). Times use the 24-hour clock, e.g. 07:55 and 17:10; AM/PM entries are converted automatically.</p><textarea id="pasteArea" rows="10" spellcheck="false" placeholder="JUNE&#9;2026-10-01&#9;07:55&#9;17:10"></textarea><div class="row" style="margin-top:10px"><button class="btn primary" data-act="parsePaste">Check rows</button></div></div>`;
   } else {
@@ -1317,7 +1319,7 @@ function pageImport(){
       ${rows.slice(0,LIMIT).map((x,i)=>{
         const pk=canPick(x), other=pk?otherCoWith(x.employee_id):[], upd=pk&&loaded.has(`${x.employee_id}_${x.date}`);
         const notes=x.match==='OK'||x.match==='CONFIRM'?[x.match==='OK'?'Matched':'Confirm this match',x.punches>1?`${x.punches} punches merged`:'',x.note,upd?'updates an existing record':'',other.length?`same first name also in ${other.join(', ')} — matched to the ${curCo().short} employee`:''].filter(Boolean).join(' · '):x.match;
-        return `<tr class="${pk?(x.sel?'':'skip'):'bad'}"><td class="cb">${pk?`<input type="checkbox" class="imp-cb" data-change="impSel" data-i="${i}" ${x.sel?'checked':''} ${u.importBusy?'disabled':''} aria-label="Import ${h(x.name)} ${h(x.date||'')}">`:''}</td><td>${h(x.name)}</td><td class="muted">${h(x.src||'')}</td><td>${h(x.department||'')}</td><td>${h(x.date||'—')}</td><td>${h(x.time_in||'')}</td><td>${h(x.time_out||'')}</td><td style="white-space:normal">${x.match==='CONFIRM'?'<span class="chip warn">Confirm</span> ':''}${h(notes)}</td></tr>`}).join('')}
+        return `<tr class="${pk?(x.sel?'':'unsel'):'bad'}"><td class="cb">${pk?`<input type="checkbox" class="imp-cb" data-change="impSel" data-i="${i}" ${x.sel?'checked':''} ${u.importBusy?'disabled':''} aria-label="Import ${h(x.name)} ${h(x.date||'')}">`:''}</td><td>${impNameCell(x,i)}</td><td class="muted">${h(x.src||'')}</td><td>${h(x.department||'')}</td><td>${h(x.date||'—')}</td><td>${h(x.time_in||'')}</td><td>${h(x.time_out||'')}</td><td style="white-space:normal">${x.match==='CONFIRM'?'<span class="chip warn">Confirm</span> ':''}${h(notes)}</td></tr>`}).join('')}
       </tbody></table></div>${rows.length>LIMIT?`<p class="muted small">Showing the first ${LIMIT} of ${rows.length} rows. Rows not shown keep their tick; Import all matched covers every row.</p>`:''}</div>`;
   }
   return html;
@@ -1331,7 +1333,9 @@ const canPick=x=>x.match==='OK'||x.match==='CONFIRM';
 function findEmployee(id,name){
   const co=curCo().short;
   const idStr=id!=null?String(id).trim():'', byId=/^\d+$/.test(idStr)?empById(Number(idStr)):null;
-  const raw=String(name||'').trim();
+  const raw0=String(name||'').trim(),paren=(raw0.match(/[\(\[][^)\]]*[\)\]]/g)||[]).join(' ').trim();
+  // Notes such as "(Reliever)" in the DTR name are not part of the name.
+  const raw=raw0.replace(/[\(\[][^)\]]*[\)\]]/g,' ').replace(/\s+/g,' ').trim()||raw0;
   if(!raw){return byId?[byId,'OK','No name in the row — matched by Employee ID']:[null,'No first name']}
   let n=normName(raw), sur=null;
   if(raw.includes(',')){const parts=raw.split(',');sur=normName(parts[0]);n=normName(parts.slice(1).join(' '))}
@@ -1347,8 +1351,20 @@ function findEmployee(id,name){
     }
     return null;
   };
-  let r=pick(e=>normName(e.first_name)===n,'');
+  const sameTok=(a,b)=>{const x=normName(a).split(' ').filter(Boolean).sort().join(' '),y=normName(b).split(' ').filter(Boolean).sort().join(' ');return x&&x===y};
+  let r=pick(e=>e.portal_name&&sameTok(e.portal_name,raw),'matched by the name in the portal');
+  if(!r)r=pick(e=>normName(e.first_name)===n,'');
   if(!r)r=pick(e=>normName(e.first_name+' '+e.surname)===n||normName(e.surname+' '+e.first_name)===n,'');
+  if(!r){ // every word of "first name + surname" is in the DTR name, plus extra words (e.g. "Mary Jane Orquia Reliever")
+    const nt=new Set((n+' '+(sur||'')).split(' ').filter(Boolean));
+    r=pick(e=>{const ft=normName(e.first_name+' '+e.surname).split(' ').filter(Boolean);return ft.length>1&&ft.every(w=>nt.has(w))},'extra words in the DTR name were ignored');
+  }
+  if(!r){ // same first name, surname spelled one letter differently (Gonzales / Gonzalez): offered for confirmation, never ticked automatically
+    const nt2=[...new Set((n+' '+(sur||'')).split(' ').filter(Boolean))];
+    const near=(x,y)=>{if(x===y)return true;if(x.length<5||y.length<5||Math.abs(x.length-y.length)>1)return false;let i=0;while(i<x.length&&i<y.length&&x[i]===y[i])i++;return x.slice(i+1)===y.slice(i+1)||x.slice(i)===y.slice(i+1)||x.slice(i+1)===y.slice(i)};
+    r=pick(e=>{const ft=normName(e.first_name).split(' ').filter(Boolean),st=normName(e.surname).split(' ').filter(Boolean);return ft.length&&st.length&&ft.every(w=>nt2.includes(w))&&st.every(w=>nt2.some(t=>near(t,w)))},'surname is spelled slightly differently in the DTR','CONFIRM');
+    if(r&&r[0])r[2]=[`DTR name “${raw}” has a surname spelled differently from ${empName(r[0])} — check that it is the same person`,r[2]].filter(Boolean).join(' · ');
+  }
   if(!r){
     // Partial match (e.g. DTR "MARY" vs employee "MARY JANE"). Never ticked automatically.
     const tok=n.split(' ')[0];
@@ -1356,6 +1372,7 @@ function findEmployee(id,name){
     if(r&&r[0])r[2]=[`DTR name “${raw}” only partly matches first name ${r[0].first_name}`,r[2]].filter(Boolean).join(' · ');
   }
   if(!r)return[null,`First name not found among ${co} employees`];
+  if(r[0]&&paren)r[2]=[r[2],`“${paren}” in the DTR name was ignored`].filter(Boolean).join(' · ');
   if(r[0]&&byId&&byId!==r[0])r[2]=[r[2],`Employee ID ${idStr} belongs to ${empName(byId)} and was ignored`].filter(Boolean).join(' · ');
   return r;
 }
@@ -1383,6 +1400,36 @@ async function loadOtherCompanies(){
 function otherCoWith(eid){
   const e=empById(eid),m=S.ui.otherCo;if(!e||!m)return[];
   const n=normName(e.first_name);return Object.keys(m).filter(id=>m[id].has(n)).map(id=>coById(id).short);
+}
+/* Preview: change which employee a DTR name belongs to (for example two employees with the same first name). */
+function impNameCell(x,i){
+  const u=S.ui;
+  if(u.importBusy)return h(x.name);
+  if(!(x.editing||x.manual||!canPick(x)||x.match==='CONFIRM'))return `${h(x.name)} <button class="btn sm" data-act="impEdit" data-i="${i}" title="Choose a different employee for this name">Change</button>`;
+  const emps=[...S.employees].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  return `<select data-change="impAssign" data-i="${i}" aria-label="Employee for ${h(x.src||'this row')}"><option value="">${x.manual?'Use the automatic match again':(canPick(x)?'Keep: '+h(x.name):'Choose employee…')}</option>${emps.map(e=>`<option value="${e.id}" ${x.manual&&String(x.employee_id)===String(e.id)?'selected':''}>${h(empName(e))}</option>`).join('')}</select>${x.manual?' <span class="chip acc">Edited</span>':''}`;
+}
+function impAssign(i,val){
+  const rows=S.ui.importRows||[],x=rows[i];if(!x)return;
+  const key=normName(x.src),group=rows.filter(r=>normName(r.src)===key);
+  let n=0;
+  for(const r of group){
+    if(!val){ // back to the automatic match
+      if(r.orig){Object.assign(r,r.orig);delete r.orig}
+      r.manual=false;r.editing=false;n++;continue;
+    }
+    const e=empById(val);if(!e)continue;
+    if(!r.orig)r.orig={employee_id:r.employee_id,name:r.name,department:r.department,match:r.match,note:r.note,sel:r.sel};
+    Object.assign(r,{employee_id:e.id,name:empName(e),department:e.department,match:'OK',note:`Assigned by you: “${r.src}” → ${empName(e)}`,manual:true,editing:false,sel:true});n++;
+  }
+  if(val){ // two different DTR names must not land on the same employee and day
+    for(const r of group){
+      const other=rows.find(o=>o!==r&&!group.includes(o)&&canPick(o)&&String(o.employee_id)===String(r.employee_id)&&o.date===r.date);
+      if(other){r.match=`“${r.src}” and “${other.src}” are both assigned to ${r.name} on this date — they look like different people; change one of them`;r.employee_id=null}
+    }
+  }
+  toast(val?`Assigned ${n} ${n===1?'row':'rows'} named “${x.src}” to ${x.name}.`:`Restored the automatic match for ${n} ${n===1?'row':'rows'}.`);
+  scheduleRender();
 }
 function rowsFromObjects(objs){
   if(!objs.length)throw new Error('The file has no data rows.');
@@ -1431,6 +1478,223 @@ function rowsFromObjects(objs){
   for(const x of res)x.sel=x.match==='OK';
   return res;
 }
+
+/* ---------- Import from the TS Laundry franchise portal (read-only) ----------
+   The extractor below runs in the browser console on the portal's attendance report
+   page. It only READS the table on screen and copies the result; nothing is sent to
+   the portal and no portal password or cookie is ever handled by this app. */
+/* Set to true only if the optional Firebase function (portal-connector/functions) is deployed. With the free Windows-task or GitHub option, leave it false. */
+const PORTAL_REFRESH_BUTTON=false;
+const PORTAL_EXTRACTOR=String.raw`(()=>{
+const t=document.querySelector('table.tablesorter');
+if(!t){console.error('Attendance table not found. Open the All Branches Attendance Report and click Generate Report first.');return}
+const x=c=>(c&&c.innerText||'').trim();
+const rows=[...t.rows].slice(1),records=[],blank=[],dropped=[];
+rows.forEach((r,i)=>{const c=[...r.cells],v=c.slice(0,5).map(x);
+  if(!v.some(Boolean)){blank.push(i+1);return}
+  if(c.length>=5&&(/^\d{4}-\d{2}-\d{2}/.test(v[3])||/^\d{4}-\d{2}-\d{2}/.test(v[4])))records.push({code:v[0],branch:v[1],staff:v[2],time_in:v[3],time_out:v[4]});
+  else dropped.push({row:i+1,cells:v});
+});
+const out={v:1,tableRows:rows.length,records,blank,dropped};
+const s=JSON.stringify(out);
+console.log('table rows:',rows.length,'| records:',records.length,'| blank:',blank.length,'| dropped (need a look):',dropped.length);
+if(typeof copy==='function')copy(s);else navigator.clipboard.writeText(s);
+console.log('Copied. Paste it into the From portal tab.');
+})();`;
+function portalPanel(){
+  const u=S.ui,info=u.portalInfo,sk=u.portalSkipped||[];
+  let html=`<div class="panel"><h2>From the TS Laundry portal</h2>
+    <p class="muted small">Read-only. This app never sees a portal password.</p>
+    <div class="panel" style="margin:10px 0"><h3 style="margin:0 0 6px">Automatic sync from the portal</h3>
+      <p class="muted small" style="margin:0 0 8px">A scheduled job reads the portal report every morning for the branches below and saves it here for you to review. Nothing counts toward payroll until you press Import.</p>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:end">
+        <label class="f">Branch<select data-change="portalBranch">${portalBranchOptions()}</select></label>
+        <label class="f">Cut-off<select data-change="portalCut">${portalCutOptions()}</select></label>
+        <button class="btn primary" data-act="loadSynced">Load synced report</button>${PORTAL_REFRESH_BUTTON?'<button class="btn sm" data-act="requestSync">Refresh from portal now</button>':''}</div>
+      ${u.portalSyncMsg&&u.portalMode!=='staff'?`<p class="small" style="margin:8px 0 0">${u.portalSyncMsg}</p>`:''}</div>
+    <div class="panel" style="margin:10px 0"><h3 style="margin:0 0 6px">Staff without a fixed branch (Laundry Department)</h3>
+      <p class="muted small" style="margin:0 0 8px">Their attendance can be at any branch, so they are looked up in the portal by <b>name</b> instead. Type part of a name to search, or leave it empty to load everyone. Only the first name is searched in the portal; the surname is used to double-check.</p>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:end">
+        <label class="f">Staff name<input type="search" id="portalStaffQ" data-change="portalStaffQ" placeholder="e.g. Mary Jane" value="${h(u.portalStaffQ||'')}" autocomplete="off"></label>
+        <label class="f">Cut-off<select data-change="portalCut">${portalCutOptions()}</select></label>
+        <button class="btn primary" data-act="loadStaffSynced">Load staff attendance</button></div>
+      ${u.portalSyncMsg&&u.portalMode==='staff'?`<p class="small" style="margin:8px 0 0">${u.portalSyncMsg}</p>`:''}</div>
+    <h3 style="margin:14px 0 6px">Manual option</h3>
+    <ol class="small" style="margin:8px 0 12px 18px;padding:0">
+      <li>Open the portal's All Branches Attendance Report in your browser, set the dates and branch, and click Generate Report.</li>
+      <li>Click <b>Copy extractor script</b> below, open the browser console (F12 → Console) on that page, paste, and press Enter. If the browser asks you to type "allow pasting", do that first.</li>
+      <li>Paste the result into the box below and click <b>Check rows</b>. Compare the preview with the portal report before importing.</li></ol>
+    <div class="row"><button class="btn sm" data-act="copyExtractor">Copy extractor script</button></div>
+    <textarea id="portalArea" rows="5" spellcheck="false" placeholder="Paste the extractor result here" style="margin-top:10px">${h(u.portalText||'')}</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn primary" data-act="parsePortal">Check rows</button></div>`;
+  if(u.portalError)html+=`<div class="banner bad" style="margin-top:10px;display:block">${u.portalError}</div>`;
+  if(info)html+=`<p class="small" style="margin:10px 0 0"><b>${h(info)}</b></p>`;
+  if(sk.length)html+=`<div class="banner warn" style="margin-top:10px;display:block"><b>${sk.length} ${sk.length===1?'shift was':'shifts were'} not brought in</b> (add them with Single entry if needed):<ul style="margin:6px 0 0 18px;padding:0">${sk.map(x=>`<li>${h(x)}</li>`).join('')}</ul></div>`;
+  return html+'</div>';
+}
+/* ---- Cut-off and branch pickers for the synced report ---- */
+/* The sync always saves under TSL's data area, whichever company is selected here. */
+const PORTAL_SYNC_PREFIX='companies/tsl/';
+const PORTAL_BRANCHES=['Victoria','Chestnut','Towerville','Kiko','Saret','Presidential','Bignay','Arnaiz','Mandaluyong','Sapangpalay','Tungko','De Vera','Igay 1','Igay 2','Taytay 1','Taytay 2','Westbank','Tacloban','Northhill','Toledo','Balamban','Surigao','Busay','Magsaysay','Sablayan','Calintaan','Sta. Cruz','Bagong Pag-asa'];
+const portalSlug=n=>String(n).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+const nameTokens=v=>String(v||'').toUpperCase().replace(/[^A-Z0-9Ñ ]/g,' ').split(/\s+/).filter(Boolean);
+function portalCuts(){ // current cut-off, the one before it, and the one before that
+  const c0=cutoffFor(todayISO()),c1=cutoffFor(addDays(c0.start,-1)),c2=cutoffFor(addDays(c1.start,-1));
+  return [c0,c1,c2].map(c=>({...c,label:`${c.n===1?'1st':'2nd'} cut-off ${fmtMonth(c.key.slice(0,7))} (${c.start} to ${c.end})`}));
+}
+function portalBranchOptions(){const sel=S.ui.portalBranch||'__all';return `<option value="__all" ${sel==='__all'?'selected':''}>All branches</option>`+PORTAL_BRANCHES.map(n=>`<option value="${h(portalSlug(n))}" ${sel===portalSlug(n)?'selected':''}>${h(n)}</option>`).join('')}
+function portalCutOptions(){const cuts=portalCuts(),sel=S.ui.portalCut||cuts[0].key;return cuts.map(c=>`<option value="${h(c.key)}" ${sel===c.key?'selected':''}>${h(c.label)}</option>`).join('')}
+/* Pure: combine per-branch synced documents into one report limited to a cut-off. Returns {payload, notes, errors}. */
+function portalBuild(docs,cut){
+  const notes=[],errors=[],records=[],seen=new Set();let blank=0;
+  for(const {name,doc} of docs){
+    if(!doc){notes.push(`${name}: nothing synced yet`);continue}
+    if(!doc||!Array.isArray(doc.records)||!Array.isArray(doc.blank)||!Array.isArray(doc.dropped)||typeof doc.tableRows!=='number'){errors.push(`${name}: saved data is not in the expected format.`);continue}
+    if(doc.records.length+doc.blank.length+doc.dropped.length!==doc.tableRows){errors.push(`${name}: row count mismatch in the saved data (${doc.tableRows} table rows).`);continue}
+    if(doc.dropped.length){errors.push(`${name}: ${doc.dropped.length} table ${doc.dropped.length===1?'row has':'rows have'} content that was not recognised as attendance (table row ${doc.dropped.map(x=>x.row).join(', ')}).`);continue}
+    if(doc.range&&doc.range.start>cut.start)notes.push(`${name}: synced data starts ${doc.range.start}, so part of this cut-off is missing.`);
+    for(const r of doc.records){const d=String(r.time_in||r.time_out||'').slice(0,10);if(d>=cut.start&&d<=cut.end){const k=[r.code,r.staff,r.time_in,r.time_out].join('|');if(seen.has(k))continue;seen.add(k);records.push({...r,_branch:name})}}
+    blank+=doc.blank.length;
+  }
+  return {payload:{v:1,tableRows:records.length+blank,records,blank:Array.from({length:blank},(_,i)=>i+1),dropped:[]},notes,errors};
+}
+async function loadSynced(){
+  const u=S.ui;u.portalSyncMsg='Loading…';u.portalError='';u.importRows=null;scheduleRender();
+  try{
+    const cuts=portalCuts(),cut=cuts.find(c=>c.key===(u.portalCut||cuts[0].key))||cuts[0],sel=u.portalMode==='staff'?'__staff':(u.portalBranch||'__all');
+    const st=await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/status'));
+    const allStaff=st&&st.staff?Object.entries(st.staff).map(([id,v])=>({id,name:v.name,v})):[];
+    const qTok=nameTokens(u.portalStaffQ||''),staffList=sel==='__staff'?allStaff.filter(x=>{const t=nameTokens(x.name);return qTok.every(w=>t.some(y=>y.startsWith(w)))}):[];
+    const list=sel==='__staff'?[]:sel==='__all'?PORTAL_BRANCHES:PORTAL_BRANCHES.filter(n=>portalSlug(n)===sel);
+    const withStaff=sel==='__staff';
+    const when=iso=>iso?new Date(iso).toLocaleString('en-PH',{timeZone:'Asia/Manila',dateStyle:'medium',timeStyle:'short'}):'';
+    let msg='';
+    if(!st){u.portalSyncMsg='No sync status found at <code>'+h(PORTAL_SYNC_PREFIX+('portal_sync/status'))+'</code>. Check that the sync job saved to this company (TSL Corporation = companies/tsl/), then load again.';scheduleRender();return}
+    if(!st.branches){u.portalSyncMsg='The last sync run was made with the old single-branch script, so there is no per-branch data yet. Run the new sync (<code>run-sync.ps1</code>), then load again.';scheduleRender();return}
+    if(st.ok===false&&st.code)msg+=`<b>The last sync run failed</b> (${h(st.code)}) at ${h(when(st.at))}: ${h(st.message||'')}<br>`;
+    const docs=await Promise.all(list.map(async n=>({name:n,doc:await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/b_'+portalSlug(n)))})));
+    const sdocs=withStaff?await Promise.all(staffList.filter(x=>x.v.ok).map(async x=>({name:x.name+' (by name)',doc:await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/s_'+x.id))}))):[];
+    docs.push(...sdocs);
+    const sbad=withStaff?staffList.filter(x=>!x.v.ok&&x.v.code!=='no_rows'):[];const sNone=withStaff?staffList.filter(x=>x.v.code==='no_rows').length:0;
+    if(sel==='__staff'&&!staffList.length){u.portalSyncMsg=allStaff.length?`No synced staff matches “${h(u.portalStaffQ||'')}”. Synced by name: ${allStaff.slice(0,40).map(x=>h(x.name)).join(', ')}${allStaff.length>40?'…':''}.`:'No staff by name were in the last sync. Make sure the employee is active under TSL Corporation with department “Laundry Department” (or listed in <code>staff.json</code>), run <code>run-sync.ps1</code>, then load again.';scheduleRender();return}
+    const bad=list.map(n=>[n,(st.branches||{})[portalSlug(n)]]).filter(([n,b])=>!b||!b.ok);
+    const {payload,notes,errors}=portalBuild(docs,cut);
+    const fetchedAt=sdocs.map(d=>d.doc&&d.doc.fetched_at).filter(Boolean).sort().pop();
+    msg+=`${sel==='__staff'&&fetchedAt?'Looked up in the portal':'Synced'} ${h(when(sel==='__staff'&&fetchedAt?fetchedAt:st.at))} · ${h(sel==='__all'?'all branches':sel==='__staff'?'staff by name'+(u.portalStaffQ?' · “'+u.portalStaffQ+'”':''):list[0])} · ${h(cut.label)}. Synced range ${h(st.range?st.range.start+' to '+st.range.end:'?')}.`;
+    if(bad.length)msg+=`<br><b>${bad.length} ${bad.length===1?'branch has':'branches have'} no good data from the last run:</b> ${bad.map(([n,b])=>h(n)+' ('+h(b?(b.code||'failed')+(b.candidates&&b.candidates.length?' — portal has: '+b.candidates.join(' | '):''):'not in the last run')+')').join('; ')}`;
+    for(const n of list){const b=(st.branches||{})[portalSlug(n)];if(b&&b.ok){if(b.labels&&b.labels.length>1)notes.push(`${n}: the portal returned ${b.labels.length} different branches (${b.labels.join(' | ')}) — check these before importing.`);else if(b.labels&&b.labels.length===1&&list.length===1)notes.push(`Portal branch name: ${b.labels[0]}`)}}
+    if(sNone)msg+=`<br>${sNone} employee${sNone===1?'':'s'} had no attendance found by first name in this range (or the surname did not match).`;
+    for(const x of staffList.filter(y=>y.v.code==='no_rows'&&y.v.candidates&&y.v.candidates.length))msg+=`<br><b>${h(x.name)}</b>: the portal has staff with that first name but a different surname — ${x.v.candidates.map(h).join('; ')}. If one of them is ${h(x.name)}, type that name in <b>Employees → ${h(x.name)} → Name in the portal</b>; it is picked up on the next sync (within about 30 minutes).`;
+    if(sbad.length)msg+=`<br><b>${sbad.length} by-name ${sbad.length===1?'person has':'people have'} no good data:</b> ${sbad.map(x=>h(x.name)+' ('+h(x.v.code||'failed')+(x.v.message?': '+x.v.message:'')+')').join('; ')}`;
+    for(const x of staffList)if(withStaff&&x.v.ok&&x.v.branchesSeen&&x.v.branchesSeen.length>1)notes.push(`${x.name}: shown at ${x.v.branchesSeen.length} branches (${x.v.branchesSeen.join(' | ')}) — expected for someone who moved or covers shifts; check before importing.`);
+    if(notes.length)msg+='<br>'+notes.map(h).join('<br>');
+    u.portalSyncMsg=msg;
+    if(errors.length){u.portalError='Import stopped, nothing was loaded:<br>'+errors.map(h).join('<br>');scheduleRender();return}
+    parsePortal(JSON.stringify(payload));
+    // Staff in the portal belong to different companies. Outside TSL, show only people registered under the selected company.
+    if(S.company!=='tsl'&&u.importRows){
+      const all=u.importRows,keep=all.filter(canPick),hid=[...new Set(all.filter(x=>!canPick(x)).map(x=>x.src||x.name))];
+      u.importRows=keep.length?keep:null;
+      u.portalSyncMsg+=`<br><b>Only staff registered under ${h(curCo().short)} are shown.</b> ${hid.length?`Hidden (not employees of ${h(curCo().short)}): ${hid.slice(0,40).map(h).join(', ')}${hid.length>40?'…':''}.`:''}`;
+      if(!keep.length)u.portalError=`None of the staff in this selection are registered under ${h(curCo().short)}. Check the branch, the cut-off and the employee's name spelling.`;
+      scheduleRender();
+    }
+  }catch(e){u.portalSyncMsg='Could not read the synced report: '+h(e.message||e);scheduleRender()}
+}
+async function requestSync(){
+  try{await Store.set('portal_sync_requests/req',{requested_at:nowISO(),start:S.period.start,end:S.period.end});
+    S.ui.portalSyncMsg='Refresh requested for '+h(S.period.start)+' to '+h(S.period.end)+'. Wait about a minute, then press “Load latest synced report”.';
+    scheduleRender()}
+  catch(e){toast('Could not send the refresh request.',true)}
+}
+function parsePortal(txt){
+  const u=S.ui;u.portalText=txt!=null?txt:$('#portalArea').value;u.portalError='';u.portalInfo='';u.portalSkipped=[];u.importRows=null;
+  const fail=m=>{u.portalError=m;scheduleRender()};
+  let d;
+  try{d=JSON.parse(u.portalText)}catch(e){return fail('That is not the extractor result. Run the extractor again and paste everything it copied.')}
+  if(!d||d.v!==1||!Array.isArray(d.records)||!Array.isArray(d.blank)||!Array.isArray(d.dropped)||typeof d.tableRows!=='number')return fail('The pasted text is not in the expected format. Copy the extractor script again from this tab and re-run it.');
+  const accounted=d.records.length+d.blank.length+d.dropped.length;
+  if(accounted!==d.tableRows)return fail(`Row count mismatch: the table has ${d.tableRows} rows but only ${accounted} were accounted for. Nothing was loaded — run the extractor again.`);
+  if(d.dropped.length)return fail(`Import stopped: ${d.dropped.length} table ${d.dropped.length===1?'row has':'rows have'} content but ${d.dropped.length===1?'was':'were'} not recognised as attendance (table row ${d.dropped.map(x=>x.row).join(', ')}). Nothing was loaded. Send me what those rows contain so the extractor can be fixed.`);
+  const objs=[],skipped=[];
+  const tm=(v,dt)=>parseTime(String(v||'').replace(DATE_RE,' ').replace(dt||'',' '));
+  let overnight=0,noOut=0,noIn=0;
+  for(const r of d.records){
+    const hasIn=!!String(r.time_in||'').trim(),hasOut=!!String(r.time_out||'').trim();
+    const di=parseDate(hasIn?r.time_in:r.time_out),label=`${r.staff||'?'} · ${hasIn?r.time_in:'(no time-in) '+r.time_out}`;
+    if(!di){skipped.push(`${label} — date not readable`);continue}
+    const ti=hasIn?tm(r.time_in):null;
+    if(hasIn&&!ti){skipped.push(`${label} — time-in not readable`);continue}
+    let to=null;
+    if(hasOut){
+      const dout=parseDate(r.time_out);
+      if(hasIn&&dout&&dout!==di){
+        if(dout!==addDays(di,1)){skipped.push(`${label} → ${r.time_out} — time-out is more than a day later; check it on the portal`);continue}
+        overnight++;
+      }
+      to=tm(r.time_out);
+      if(!to){skipped.push(`${label} — time-out not readable`);continue}
+    }
+    if(!hasIn)noIn++;if(!hasOut)noOut++;
+    objs.push({'First Name':r.staff,'Date':di,'Time In':ti||'','Time Out':to||''});
+  }
+  u.portalSkipped=skipped;
+  u.portalInfo=`${d.tableRows} table rows: ${d.records.length} attendance records, ${d.blank.length} blank. ${objs.length} ready to check (${noOut} with no time-out yet, ${noIn} with no time-in, ${overnight} overnight), ${skipped.length} not brought in.`;
+  if(!objs.length){u.portalError='No attendance rows to import from this report.';scheduleRender();return}
+  try{u.importRows=rowsFromObjects(objs);u.importResult=null;scheduleRender()}catch(e){fail(h(e.message||'Could not read the rows.'))}
+}
+/* ---- Reading any attendance file: find the header row, keep only the columns the app needs ---- */
+let TABLE_NOTE='';
+function splitTable(text){
+  const lines=String(text).replace(/\r/g,'').replace(/^﻿/,'').split('\n');
+  const sample=lines.filter(l=>l.trim()).slice(0,40);
+  let delim=',',best=-1;for(const d of[',','\t',';'])for(const l of sample){const c=l.split(d).length-1;if(c>best){best=c;delim=d}}
+  const split=line=>{const out=[];let cur='',q=false;for(let i=0;i<line.length;i++){const c=line[i];
+    if(q){if(c==='"'&&line[i+1]==='"'){cur+='"';i++}else if(c==='"')q=false;else cur+=c}
+    else if(c==='"')q=true;else if(c===delim){out.push(cur);cur=''}else cur+=c}out.push(cur);return out.map(x=>x.trim())};
+  return lines.map(split);
+}
+function tableToObjects(grid){
+  TABLE_NOTE='';
+  const nm=s=>String(s==null?'':s).toLowerCase().replace(/[ _\-.]+/g,' ').replace(/\s+/g,' ').trim();
+  const rows=(grid||[]).map(r=>(r||[]).map(c=>typeof c==='string'?c.trim():(c==null?'':c)));
+  const blank=r=>!r.some(c=>String(c).trim()!=='');
+  const NAMES=['first name','firstname','employee first name','name','employee','employee name'],DATES=['date','work date','day'];
+  let hi=-1;
+  for(let i=0;i<Math.min(rows.length,40);i++){const h=rows[i].map(nm);if(h.some(x=>NAMES.includes(x))&&h.some(x=>DATES.includes(x))){hi=i;break}}
+  if(hi<0){hi=rows.findIndex(r=>!blank(r));if(hi<0)throw new Error('The file has no data rows.')}
+  const head=rows[hi],H=head.map(nm);
+  const find=(...ns)=>{for(const n of ns){const i=H.indexOf(n);if(i>=0)return i}return -1};
+  const iFirst=find(...NAMES),iLast=find('last name','lastname','surname'),iDate=find(...DATES);
+  const basicIn=find('time in','timein','am in','in'),basicOut=find('time out','timeout','pm out','out');
+  let iIn=basicIn>=0?basicIn:find('clock in time','check in time','first in','in time','punch in','clock in');
+  let iOut=basicOut>=0?basicOut:find('clock out time','check out time','last out','out time','punch out','clock out');
+  const iRec=find('records','record','punch records','punches'),iCo=find('company','company name','employer');
+  const iId=find('employee id','ee no','employee no','employee number','emp id','emp no','id');
+  const useRec=(iIn<0||iOut<0)&&iRec>=0;
+  if(iFirst<0||iDate<0||(!useRec&&(iIn<0||iOut<0))){
+    const seen=head.filter(x=>String(x).trim()).slice(0,14).join(', ');
+    const miss=[iFirst<0&&'First Name',iDate<0&&'Date',(!useRec&&iIn<0)&&'Time In',(!useRec&&iOut<0)&&'Time Out'].filter(Boolean);
+    throw new Error('Could not find '+miss.join(', ')+' in this file. Columns seen: '+(seen||'none')+'.');
+  }
+  const smart=hi>0||useRec||iIn!==basicIn||iOut!==basicOut;
+  const timesIn=txt=>{const m=String(txt).match(/\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AaPp]\.?[Mm]\.?)?/g)||[];return m.map(parseTime).filter(Boolean)};
+  const out=[];let skipped=0;
+  for(let r=hi+1;r<rows.length;r++){
+    const c=rows[r];if(blank(c))continue;
+    const first=String(c[iFirst]??'').trim(),last=iLast>=0?String(c[iLast]??'').trim():'';
+    const date=c[iDate];if(String(date).trim()===''&&!first)continue;
+    let tin=iIn>=0?c[iIn]:'',tout=iOut>=0?c[iOut]:'';
+    if(useRec){const ts=timesIn(c[iRec]);if(iIn<0)tin=ts.length?ts[0]:'';if(iOut<0)tout=ts.length>1?ts[ts.length-1]:''}
+    if(smart&&!parseTime(tin)&&!parseTime(tout)){skipped++;continue}
+    const o={'First Name':last&&first&&iLast>=0&&H[iFirst]!=='name'?`${last}, ${first}`:first,'Date':date,'Time In':tin,'Time Out':tout};
+    if(iCo>=0)o['Company']=c[iCo];
+    if(iId>=0)o['Employee ID']=c[iId];
+    out.push(o);
+  }
+  if(skipped)TABLE_NOTE=`${skipped} ${skipped===1?'row':'rows'} with no clock-in or clock-out ${skipped===1?'was':'were'} left out.`;
+  return out;
+}
 async function handleFile(input){
   const f=input.files&&input.files[0];if(!f)return;
   try{
@@ -1438,9 +1702,10 @@ async function handleFile(input){
     if(/\.(xlsx|xls)$/i.test(f.name)){
       if(typeof XLSX==='undefined')throw new Error('Excel reading is unavailable here. Save the sheet as CSV and upload that instead.');
       const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];
-      objs=XLSX.utils.sheet_to_json(ws,{raw:true,defval:''});
-    } else objs=parseDelimited(await f.text());
+      objs=tableToObjects(XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''}));
+    } else objs=tableToObjects(splitTable(await f.text()));
     S.ui.importRows=rowsFromObjects(objs);S.ui.importResult=null;scheduleRender();
+    if(TABLE_NOTE)toast(TABLE_NOTE);
   }catch(e){toast(e.message||'Could not read that file.',true)}
 }
 async function doImport(mode){
@@ -1452,7 +1717,7 @@ async function doImport(mode){
   const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
   const loaded=new Map(S.dtr.map(r=>[r._id,r]));
   let saved=0,failed=0,locked=0,i=0,lastErr=null;const done=new Set(),jr=journal();
-  const src=S.ui.importTab==='paste'?'paste':'upload', co=curCo().short;
+  const src=S.ui.importTab==='portal'?'portal':S.ui.importTab==='paste'?'paste':'upload', co=curCo().short;
   for(const x of rows){
     i++;
     try{
@@ -1513,6 +1778,7 @@ function empForm(e){
     <label class="f">Surname<input name="surname" required value="${v('surname')}"></label>
     <label class="f">Department<select name="department">${opt([...new Set([...DEPARTMENTS,...(e&&e.department?[e.department]:[])])],e?e.department:'')}</select></label>
     <label class="f">Position<input name="position" value="${v('position')}"></label>
+    <label class="f">Name in the portal <span class="muted small">(only if different)</span><input name="portal_name" value="${v('portal_name')}" placeholder="e.g. Teresa Davidson or Davidson, Teresa"></label>
     <label class="f">Branch<input name="branch" value="${v('branch','Main / Victoria')}"></label>
     <label class="f">Status<select name="employment_status">${opt(['Regular','Probationary','Contractual'],e?e.employment_status:'Regular')}</select></label>
     <label class="f">Pay basis<select name="pay_basis">${opt(['Monthly','Daily'],e?e.pay_basis:'Monthly')}</select></label>
@@ -1536,7 +1802,7 @@ async function saveEmp(form){
   if(!id){toast('Enter an employee ID.',true);return}
   const existing=empById(id);
   if(!S.ui.empEdit&&existing){toast(`Employee ID ${id} is already used by ${empName(existing)}.`,true);return}
-  const doc={id,first_name:String(fd.get('first_name')).trim().toUpperCase(),surname:String(fd.get('surname')).trim().toUpperCase(),department:fd.get('department'),position:String(fd.get('position')||'').trim(),
+  const doc={id,first_name:String(fd.get('first_name')).trim().toUpperCase(),surname:String(fd.get('surname')).trim().toUpperCase(),department:fd.get('department'),position:String(fd.get('position')||'').trim(),portal_name:String(fd.get('portal_name')||'').trim(),
     branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
     monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
@@ -1545,7 +1811,7 @@ async function saveEmp(form){
     const jr=journal();
     await jr.set(cp('employees/')+id,doc,existing||null);
     logAction(existing?'UPDATE':'CREATE','employee',id,empName(doc)+(existing&&existing.monthly_rate!==doc.monthly_rate?` · monthly rate ${existing.monthly_rate??'—'} → ${doc.monthly_rate??'—'}`:''),jr);
-    S.ui.empForm=false;S.ui.empEdit=null;toast('Employee saved');scheduleRender();
+    S.ui.empForm=false;S.ui.empEdit=null;toast(/laundry/i.test(doc.department||'')&&doc.active!==false&&!existing?'Employee saved · Laundry Department staff are searched in the portal by name automatically (about 30 minutes after the sync task runs).':'Employee saved');scheduleRender();
   }catch(e){writeError(e)}
 }
 
@@ -2038,8 +2304,14 @@ const actions={
   toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;render()},
   bulkApprove(el){bulkApprove(el)},
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;scheduleRender()},
-  clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
+  impEdit(el){const x=(S.ui.importRows||[])[Number(el.dataset.i)];if(x){x.editing=true;scheduleRender()}},
+  clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.portalText='';S.ui.portalSyncMsg='';S.ui.portalInfo='';S.ui.portalError='';S.ui.portalSkipped=[];S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
   parsePaste(){const t=$('#pasteArea').value;S.ui.pasteText=t;try{let objs=parsePasted(t);if(!objs.length)throw new Error('No DTR rows found under the header. Each row needs a first name, a yyyy-mm-dd date and the times.');try{S.ui.importRows=rowsFromObjects(objs)}catch(err){if(!/Missing column/.test(err.message))throw err;objs=parsePasted(t,true);if(!objs.length)throw err;S.ui.importRows=rowsFromObjects(objs)}S.ui.importResult=null;render()}catch(e){toast(e.message,true)}},
+  copyExtractor(){try{navigator.clipboard.writeText(PORTAL_EXTRACTOR).then(()=>toast('Extractor script copied'),()=>toast('Could not copy automatically.',true))}catch(e){toast('Could not copy automatically.',true)}},
+  parsePortal(){parsePortal()},
+  loadSynced(){S.ui.portalMode='branch';loadSynced()},
+  loadStaffSynced(){const q=$('#portalStaffQ');if(q)S.ui.portalStaffQ=q.value.trim();S.ui.portalMode='staff';loadSynced()},
+  requestSync(){requestSync()},
   doImport(el){doImport(el.dataset.mode)},
   undoEntry(el){undoEntry(el)},
   async delDtr(el){if(await deleteDtrRecords([el.dataset.id])){S.ui.openRow=null;scheduleRender()}},
@@ -2094,17 +2366,21 @@ document.addEventListener('change',async e=>{
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
   else if(k==='fileIn')handleFile(el);
   else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
+  else if(k==='impAssign')impAssign(Number(el.dataset.i),el.value);
   else if(k==='impSel'||k==='impSelAll'){
     const rows=S.ui.importRows||[];
     if(k==='impSel'){const x=rows[Number(el.dataset.i)];if(x&&canPick(x))x.sel=el.checked}
     else{for(const x of rows)if(canPick(x))x.sel=el.checked;for(const c of document.querySelectorAll('input[data-change="impSel"]')){c.checked=el.checked}}
-    for(const c of document.querySelectorAll('input[data-change="impSel"]')){const tr=c.closest('tr');if(tr)tr.classList.toggle('skip',!c.checked)}
+    for(const c of document.querySelectorAll('input[data-change="impSel"]')){const tr=c.closest('tr');if(tr)tr.classList.toggle('unsel',!c.checked)}
     const n=rows.filter(x=>x.sel&&canPick(x)).length,p=rows.filter(canPick).length,b=$('#impSelBtn'),all=document.querySelector('input[data-change="impSelAll"]');
     if(b){b.textContent=`Import ${n} selected`;b.disabled=!n}if(all)all.checked=p>0&&n===p;
   }
   else if(k==='restoreFile')restoreFromFile(el);
   else if(k==='auditMonth'){S.auditMonth=el.value;watchAudit()}
   else if(k==='company')switchCompany(el.value);
+  else if(k==='portalBranch'){S.ui.portalBranch=el.value}
+  else if(k==='portalStaffQ'){S.ui.portalStaffQ=el.value.trim()}
+  else if(k==='portalCut'){S.ui.portalCut=el.value}
   else if(k==='acctCo'){S.ui.acctCo=el.value;render()}
 });
 /* All times use the 24-hour clock (HH:MM). Entries like 7:5, 0755, 1730 or 5:30 PM are converted. */
