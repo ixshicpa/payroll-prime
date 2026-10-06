@@ -1503,6 +1503,7 @@ console.log('Copied. Paste it into the From portal tab.');
 })();`;
 function portalPanel(){
   const u=S.ui,info=u.portalInfo,sk=u.portalSkipped||[];
+  if(!u.branchCfgLoaded&&!u.branchCfgBusy)loadBranchCfg();
   let html=`<div class="panel"><h2>From the TS Laundry portal</h2>
     <p class="muted small">Read-only. This app never sees a portal password.</p>
     <div class="panel" style="margin:10px 0"><h3 style="margin:0 0 6px">Automatic sync from the portal</h3>
@@ -1512,6 +1513,7 @@ function portalPanel(){
         <label class="f">Cut-off<select data-change="portalCut">${portalCutOptions()}</select></label>
         <button class="btn primary" data-act="loadSynced">Load synced report</button>${PORTAL_REFRESH_BUTTON?'<button class="btn sm" data-act="requestSync">Refresh from portal now</button>':''}</div>
       ${u.portalSyncMsg&&u.portalMode!=='staff'?`<p class="small" style="margin:8px 0 0">${u.portalSyncMsg}</p>`:''}</div>
+    ${branchManager()}
     <div class="panel" style="margin:10px 0"><h3 style="margin:0 0 6px">Staff without a fixed branch (Laundry Department)</h3>
       <p class="muted small" style="margin:0 0 8px">Their attendance can be at any branch, so they are looked up in the portal by <b>name</b> instead. Type part of a name to search, or leave it empty to load everyone. Only the first name is searched in the portal; the surname is used to double-check.</p>
       <div class="row" style="gap:10px;flex-wrap:wrap;align-items:end">
@@ -1535,14 +1537,19 @@ function portalPanel(){
 /* ---- Cut-off and branch pickers for the synced report ---- */
 /* The sync always saves under TSL's data area, whichever company is selected here. */
 const PORTAL_SYNC_PREFIX='companies/tsl/';
-const PORTAL_BRANCHES=['Victoria','Chestnut','Towerville','Kiko','Saret','Presidential','Bignay','Arnaiz','Mandaluyong','Sapangpalay','Tungko','De Vera','Igay 1','Igay 2','Taytay 1','Taytay 2','Westbank','Tacloban','Northhill','Toledo','Balamban','Surigao','Busay','Magsaysay','Sablayan','Calintaan','Sta. Cruz','Bagong Pag-asa'];
+const PORTAL_BRANCHES_DEFAULT=['Victoria','Chestnut','Towerville','Kiko','Saret','Presidential','Bignay','Arnaiz','Mandaluyong','Sapangpalay','Tungko','De Vera','Igay RD','Igay Skyline','Taytay Rizal','San Isidro Taytay','Westbank','Tacloban','Northhill','Toledo','Balamban','Surigao','Busay','Magsaysay','Sablayan','Calintaan','Sta. Cruz','Pag-asa Sablayan'];
+/* The branch list can be changed in "Manage branches". Once saved it lives at portal_sync/branches_config and the sync job follows it; until then this default list is used. */
+let PORTAL_BRANCH_CFG=null;
+const portalBranchList=()=>PORTAL_BRANCH_CFG&&Array.isArray(PORTAL_BRANCH_CFG.list)?PORTAL_BRANCH_CFG.list:PORTAL_BRANCHES_DEFAULT.map(name=>({name,active:true}));
+const portalBranches=()=>portalBranchList().filter(x=>x&&x.name&&x.active!==false).map(x=>x.name);
+const BRANCH_CFG_PATH=PORTAL_SYNC_PREFIX+'portal_sync/branches_config';
 const portalSlug=n=>String(n).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
 const nameTokens=v=>String(v||'').toUpperCase().replace(/[^A-Z0-9Ñ ]/g,' ').split(/\s+/).filter(Boolean);
 function portalCuts(){ // current cut-off, the one before it, and the one before that
   const c0=cutoffFor(todayISO()),c1=cutoffFor(addDays(c0.start,-1)),c2=cutoffFor(addDays(c1.start,-1));
   return [c0,c1,c2].map(c=>({...c,label:`${c.n===1?'1st':'2nd'} cut-off ${fmtMonth(c.key.slice(0,7))} (${c.start} to ${c.end})`}));
 }
-function portalBranchOptions(){const sel=S.ui.portalBranch||'__all';return `<option value="__all" ${sel==='__all'?'selected':''}>All branches</option>`+PORTAL_BRANCHES.map(n=>`<option value="${h(portalSlug(n))}" ${sel===portalSlug(n)?'selected':''}>${h(n)}</option>`).join('')}
+function portalBranchOptions(){const sel=S.ui.portalBranch||'__all';return `<option value="__all" ${sel==='__all'?'selected':''}>All branches</option>`+portalBranches().map(n=>`<option value="${h(portalSlug(n))}" ${sel===portalSlug(n)?'selected':''}>${h(n)}</option>`).join('')}
 function portalCutOptions(){const cuts=portalCuts(),sel=S.ui.portalCut||cuts[0].key;return cuts.map(c=>`<option value="${h(c.key)}" ${sel===c.key?'selected':''}>${h(c.label)}</option>`).join('')}
 /* Pure: combine per-branch synced documents into one report limited to a cut-off. Returns {payload, notes, errors}. */
 function portalBuild(docs,cut){
@@ -1565,7 +1572,8 @@ async function loadSynced(){
     const st=await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/status'));
     const allStaff=st&&st.staff?Object.entries(st.staff).map(([id,v])=>({id,name:v.name,v})):[];
     const qTok=nameTokens(u.portalStaffQ||''),staffList=sel==='__staff'?allStaff.filter(x=>{const t=nameTokens(x.name);return qTok.every(w=>t.some(y=>y.startsWith(w)))}):[];
-    const list=sel==='__staff'?[]:sel==='__all'?PORTAL_BRANCHES:PORTAL_BRANCHES.filter(n=>portalSlug(n)===sel);
+    if(!u.branchCfgLoaded)await loadBranchCfg();
+    const list=sel==='__staff'?[]:sel==='__all'?portalBranches():portalBranches().filter(n=>portalSlug(n)===sel);
     const withStaff=sel==='__staff';
     const when=iso=>iso?new Date(iso).toLocaleString('en-PH',{timeZone:'Asia/Manila',dateStyle:'medium',timeStyle:'short'}):'';
     let msg='';
@@ -1600,6 +1608,54 @@ async function loadSynced(){
       scheduleRender();
     }
   }catch(e){u.portalSyncMsg='Could not read the synced report: '+h(e.message||e);scheduleRender()}
+}
+
+/* ---- Manage branches: add / edit the branches the sync should read ---- */
+async function loadBranchCfg(){
+  const u=S.ui;u.branchCfgBusy=true;
+  try{const [c,st]=await Promise.all([Store.get(BRANCH_CFG_PATH),Store.get(PORTAL_SYNC_PREFIX+'portal_sync/status')]);PORTAL_BRANCH_CFG=c&&Array.isArray(c.list)?c:null;u.branchStatus=st&&st.branches?st.branches:null;u.branchCfgErr=''}
+  catch(e){u.branchCfgErr='Could not read the branch list: '+(e.message||e)}
+  u.branchCfgLoaded=true;u.branchCfgBusy=false;scheduleRender();
+}
+async function saveBranchList(list,okMsg,detail){
+  try{
+    const doc={list,updated_at:nowISO(),by:actor()};
+    await Store.set(BRANCH_CFG_PATH,doc);PORTAL_BRANCH_CFG=doc;
+    const u=S.ui;if(u.portalBranch&&u.portalBranch!=='__all'&&!portalBranches().some(n=>portalSlug(n)===u.portalBranch))u.portalBranch='__all';
+    logAction('UPDATE','portal_branches','list',detail);toast(okMsg);return true;
+  }catch(e){toast('Could not save the branch list: '+(e.message||e),true);return false}
+}
+function branchStatusCell(name){
+  const bs=S.ui.branchStatus;if(!bs)return '<span class="muted small">Status not loaded yet</span>';
+  const b=bs[portalSlug(name)];
+  if(!b)return '<span class="chip warn">Waiting for the next sync</span> <span class="muted small">(within about 30 minutes)</span>';
+  if(b.ok)return `<span class="chip ok">Found in the portal</span> <span class="muted small">${h(b.label||'')}${b.records!=null?' · '+b.records+' rows':''}</span>`;
+  const why=b.code==='no_match'?'Not found in the portal':b.code==='ambiguous'?'More than one portal branch matches':'Failed ('+(b.code||'error')+')';
+  return `<span class="chip bad">${h(why)}</span>${b.candidates&&b.candidates.length?` <span class="muted small">Portal has: ${b.candidates.map(h).join(' | ')}</span>`:''}`;
+}
+function branchManager(){
+  const u=S.ui,edit=!S.readOnly&&!S.viewAs,list=portalBranchList();
+  let html=`<div class="panel" style="margin:10px 0"><h3 style="margin:0 0 6px">Branches to sync</h3>
+    <p class="muted small" style="margin:0 0 8px">${list.filter(x=>x.active!==false).length} branches are read from the portal. Add a branch here and it is found in the portal and synced automatically (within about 30 minutes, same as a new Laundry Department employee). Use the name as the portal shows it, or a distinctive part of it.
+      <button class="btn sm" data-act="brOpen" style="margin-left:6px">${u.branchOpen?'Hide the list':'Manage branches'}</button></p>`;
+  if(u.branchCfgErr)html+=`<div class="banner bad" style="display:block">${h(u.branchCfgErr)}</div>`;
+  if(u.branchOpen){
+    html+=`<div class="tablewrap"><table class="tbl"><thead><tr><th>Branch (as in the portal)</th><th>Last sync</th><th></th></tr></thead><tbody>`;
+    list.forEach((x,i)=>{
+      const act=x.active!==false;
+      if(u.branchEdit===i)html+=`<tr><td><input id="brEdit" value="${h(x.name)}" maxlength="60" style="width:100%" autocomplete="off"></td><td class="small muted">The new name is looked up in the portal on the next sync.</td><td style="text-align:right;white-space:nowrap"><button class="btn sm primary" data-act="brSave" data-i="${i}">Save</button> <button class="btn sm" data-act="brCancel">Cancel</button></td></tr>`;
+      else if(u.branchDel===i)html+=`<tr><td><b>${h(x.name)}</b></td><td class="small">Stop syncing this branch? Attendance already saved stays; it just stops updating.</td><td style="text-align:right;white-space:nowrap"><button class="btn sm danger" data-act="brDelYes" data-i="${i}">Yes, remove</button> <button class="btn sm" data-act="brCancel">No</button></td></tr>`;
+      else html+=`<tr><td><b>${h(x.name)}</b></td><td>${act?branchStatusCell(x.name):'<span class="chip">Paused</span>'}</td><td style="text-align:right;white-space:nowrap">${edit?`<button class="btn sm" data-act="brEdit" data-i="${i}">Edit</button> <button class="btn sm" data-act="brToggle" data-i="${i}">${act?'Pause':'Resume'}</button> <button class="btn sm danger" data-act="brDel" data-i="${i}">Remove</button>`:''}</td></tr>`;
+    });
+    html+=`</tbody></table></div>`;
+    if(edit)html+=`<div class="row" style="gap:10px;flex-wrap:wrap;align-items:end;margin-top:10px"><label class="f">Add a branch<input type="text" id="brNew" data-change="brNew" placeholder="e.g. Marikina" value="${h(u.branchNew||'')}" maxlength="60" autocomplete="off"></label><button class="btn primary" data-act="brAdd">Add branch</button><button class="btn sm" data-act="brRefresh">Refresh status</button></div>`;
+  }
+  return html+'</div>';
+}
+function branchNameOK(name,skip){
+  if(!name){toast('Type the branch name first.',true);return false}
+  if(portalBranchList().some((x,i)=>i!==skip&&portalSlug(x.name)===portalSlug(name))){toast('That branch is already in the list.',true);return false}
+  return true;
 }
 async function requestSync(){
   try{await Store.set('portal_sync_requests/req',{requested_at:nowISO(),start:S.period.start,end:S.period.end});
@@ -2311,6 +2367,15 @@ const actions={
   parsePortal(){parsePortal()},
   loadSynced(){S.ui.portalMode='branch';loadSynced()},
   loadStaffSynced(){const q=$('#portalStaffQ');if(q)S.ui.portalStaffQ=q.value.trim();S.ui.portalMode='staff';loadSynced()},
+  brOpen(){S.ui.branchOpen=!S.ui.branchOpen;S.ui.branchEdit=null;S.ui.branchDel=null;scheduleRender()},
+  brRefresh(){loadBranchCfg()},
+  brEdit(el){S.ui.branchEdit=Number(el.dataset.i);S.ui.branchDel=null;scheduleRender()},
+  brDel(el){S.ui.branchDel=Number(el.dataset.i);S.ui.branchEdit=null;scheduleRender()},
+  brCancel(){S.ui.branchEdit=null;S.ui.branchDel=null;scheduleRender()},
+  async brSave(el){const i=Number(el.dataset.i),inp=$('#brEdit'),name=inp?inp.value.trim().replace(/\s+/g,' '):'';if(!branchNameOK(name,i))return;const list=portalBranchList().map(x=>({...x})),old=list[i].name;if(old===name){S.ui.branchEdit=null;scheduleRender();return}list[i].name=name;if(await saveBranchList(list,'Saved. The new name is looked up within about 30 minutes.',`Branch renamed: ${old} → ${name}`)){S.ui.branchEdit=null;scheduleRender()}},
+  async brToggle(el){const i=Number(el.dataset.i),list=portalBranchList().map(x=>({...x}));list[i].active=list[i].active===false;if(await saveBranchList(list,list[i].active?'Branch resumed.':'Branch paused.',`Branch ${list[i].active?'resumed':'paused'}: ${list[i].name}`))scheduleRender()},
+  async brDelYes(el){const i=Number(el.dataset.i),list=portalBranchList().map(x=>({...x})),gone=list.splice(i,1)[0];if(await saveBranchList(list,'Branch removed from the sync.',`Branch removed: ${gone.name}`)){S.ui.branchDel=null;scheduleRender()}},
+  async brAdd(){const inp=$('#brNew'),name=inp?inp.value.trim().replace(/\s+/g,' '):'';if(!branchNameOK(name,-1))return;const list=portalBranchList().map(x=>({...x}));list.push({name,active:true});if(await saveBranchList(list,'Branch added. It is looked up in the portal within about 30 minutes.',`Branch added: ${name}`)){S.ui.branchNew='';scheduleRender()}},
   requestSync(){requestSync()},
   doImport(el){doImport(el.dataset.mode)},
   undoEntry(el){undoEntry(el)},
@@ -2380,6 +2445,7 @@ document.addEventListener('change',async e=>{
   else if(k==='company')switchCompany(el.value);
   else if(k==='portalBranch'){S.ui.portalBranch=el.value}
   else if(k==='portalStaffQ'){S.ui.portalStaffQ=el.value.trim()}
+  else if(k==='brNew'){S.ui.branchNew=el.value}
   else if(k==='portalCut'){S.ui.portalCut=el.value}
   else if(k==='acctCo'){S.ui.acctCo=el.value;render()}
 });
