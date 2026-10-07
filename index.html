@@ -749,7 +749,7 @@ function computePayroll(){
       for(const a of led){const sc=advSchedule(a,e,c.key);if(!k.off&&sc.ded>0)k.advItems.push({id:advId(a),amount:sc.ded});if(a.status!=='closed')k.advBal=r2(k.advBal+(k.off?sc.before:sc.after))}
       k.advLedger=r2(k.advItems.reduce((t,x)=>t+x.amount,0));k.adv=r2(k.adv+k.advLedger);
     });
-    [[k1,1],[k2,2]].forEach(([k,n])=>{k.auto={...k.auto,adv:k.adv};const o=((S.edits[n]||{})[e.id]||{}).v||{};if(!k.off&&o.adv!=null){k.adv=r2(Number(o.adv));k.edited=true}});
+    [[k1,1],[k2,2]].forEach(([k,n])=>{k.auto={...k.auto,adv:k.adv};const o=((S.edits[n]||{})[e.id]||{}).v||{};if(!k.off&&o.adv!=null){k.adv=r2(Number(o.adv));k.edited=true;const before=k.advLedger||0;let left=k.adv;for(const it of (k.advItems||[])){it.amount=r2(Math.min(it.amount,left));left=r2(left-it.amount)}k.advItems=(k.advItems||[]).filter(it=>it.amount>0);k.advLedger=r2(k.advItems.reduce((t,it)=>t+it.amount,0));k.advOther=r2(k.adv-k.advLedger);k.advBal=r2((k.advBal||0)+before-k.advLedger)}});
     const gk=freq==='first'?k1:k2,ok=freq==='first'?k2:k1; // government contributions and tax come off the last payout of the month
     Object.assign(gk,{sss:sssEeTot,phic:phicEe,hdmf:hdmfEe,tax});
     ok.sss=ok.phic=ok.hdmf=ok.tax=0;
