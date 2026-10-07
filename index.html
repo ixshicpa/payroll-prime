@@ -295,6 +295,28 @@ body.signed-out .top .period,body.signed-out .top .who,body.signed-out nav.tabs{
 #printArea{display:none}
 .pa-page{break-after:page;page-break-after:always}
 .pa-page:last-child{break-after:auto;page-break-after:auto}
+.slip .cert{font-size:12.5px;margin:10px 0 0;text-align:justify}
+/* Print all payslips: 2 employees per page, each with a company copy and an employee copy (4 payslips per page) */
+.ps-page{break-after:page;page-break-after:always;display:grid;grid-template-rows:124mm 124mm;gap:4mm;overflow:hidden}
+.ps-page:last-child{break-after:auto;page-break-after:auto}
+.ps-row{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px dashed #888;padding-bottom:2mm;min-height:0}
+.ps-row:last-child{border-bottom:0}
+.ps-cell{position:relative;padding:2mm 3mm;overflow:hidden;font-size:9px;line-height:1.3;border-right:1px dashed #888;color:#000}
+.ps-cell:last-child{border-right:0}
+.ps-tag{position:absolute;top:1.5mm;right:3mm;font-size:8px;font-weight:800;letter-spacing:.06em;border:1px solid #000;padding:0 4px;border-radius:3px}
+.ps-sig{margin-top:6px;font-size:8.5px}
+.ps-cell .slip p,.ps-cell .slip div,.ps-cell .slip td,.ps-cell .slip th,.ps-cell .slip span{font-size:9px!important}
+.ps-cell .slip b{font-size:inherit}
+.ps-cell .slip td,.ps-cell .slip th{padding:1.5px 4px!important;white-space:normal}
+.ps-cell .slip .grid{grid-template-columns:repeat(4,1fr)!important;gap:3px!important;margin-bottom:6px!important}
+.ps-cell .slip .stat{padding:2px 4px}
+.ps-cell .slip .stat b{font-size:10.5px!important}
+.ps-cell .slip .stat span{font-size:7.5px!important}
+.ps-cell .slip table{margin-top:6px!important}
+.ps-cell .slip .net{margin-top:6px;padding:4px 8px}
+.ps-cell .slip .net b{font-size:14px!important}
+.ps-cell .slip .cert{font-size:7.5px!important;line-height:1.25;margin:4px 0 0!important}
+.ps-cell .slip .banner{padding:3px 6px;margin-top:4px!important}
 .rec-sec table{font-size:13px}
 .adv-detail td{background:var(--surface-2,rgba(0,0,0,.025))}
 @media print{
@@ -748,6 +770,13 @@ function computePayroll(){
 
 
 /* ---------------- Print several pages (all payslips, a payroll record) ---------------- */
+function slipSheets(items,tab){
+  let out='';
+  for(let i=0;i<items.length;i+=2){
+    out+=`<div class="ps-page">${items.slice(i,i+2).map(x=>{const sl=payslipHtml(x,tab);return `<div class="ps-row"><div class="ps-cell"><div class="ps-tag">COMPANY COPY</div>${sl}<div class="ps-sig">Received by (signature): ____________________ Date: __________</div></div><div class="ps-cell"><div class="ps-tag">EMPLOYEE COPY</div>${sl}</div></div>`}).join('')}</div>`;
+  }
+  return out;
+}
 function printHtml(html){
   const a=$('#printArea');if(!a)return;closeDlg();
   a.innerHTML=html;document.body.classList.add('print-area');
@@ -948,7 +977,7 @@ function secTable(d){
 }
 function recSlipItems(rec){return payItems(rec.items,String(rec.n))}
 function recPrintHtml(rec,s){
-  if(s==='slips')return withRec(rec,()=>recSlipItems(rec).map(x=>`<div class="pa-page">${payslipHtml(x,String(rec.n))}</div>`).join(''));
+  if(s==='slips')return withRec(rec,()=>slipSheets(recSlipItems(rec),String(rec.n)));
   return secTable(recSecData(rec,s));
 }
 async function exportRecord(rec){
@@ -2253,7 +2282,7 @@ function payslipHtml(x,tab){
   const d=c?S.payDocs[c.n]:null;
   const showGov=tab!=='1'||x.freq==='first';
   return `<div class="slip"><p style="margin:0"><b>${h(st.company)}</b></p><p class="muted small" style="margin:0 0 12px">${h(st.address)}</p>
-  <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h(['#'+e.id,e.employment_status,e.position,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">${c?(c.n===1?'1st':'2nd')+' cut-off':'Monthly'} payroll<br><b>${h(payLbl)}</b><br><span class="muted">Covered: ${h(attLbl)}</span></div></div>
+  <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h(['#'+e.id,e.employment_status,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">${c?(c.n===1?'1st':'2nd')+' cut-off':'Monthly'} payroll<br><b>${h(payLbl)}</b><br><span class="muted">Covered: ${h(attLbl)}</span></div></div>
   <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:14px">
     <div class="stat"><b style="font-size:18px">${t.present}</b><span>Days present</span></div>
     <div class="stat"><b style="font-size:18px">${r2(tab==='1'?x.k1.absentNet:tab==='2'?x.k2.absentNet:x.absentNet)}</b><span>Absences</span></div>
@@ -2266,10 +2295,11 @@ function payslipHtml(x,tab){
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
   ${line('Company advances',r.adv)}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
-  ${r.advBal>0?`<p class="small" style="margin-top:10px">Remaining company advance balance after this payday: <b>${peso(r.advBal)}</b></p>`:''}
-  ${!x.hasRate?'<p class="banner warn" style="margin-top:12px">No salary rate on file for this employee.</p>':''}${(tab==='M'?(x.k1.edited||x.k2.edited):r.edited)?`<p class="banner info" style="margin-top:12px">Some amounts were edited manually${tab!=='M'&&r.editNote?': '+h(r.editNote):''}.</p>`:''}
-  ${tab==='1'&&x.bir&&x.freq==='both'?'<p class="muted small" style="margin-top:10px">Government contributions and withholding tax are deducted on the 2nd cut-off.</p>':''}${x.freq!=='both'&&tab!=='M'?`<p class="muted small" style="margin-top:10px">Paid once a month, on the ${x.freq==='first'?'1st':'2nd'} cut-off: this payslip holds the whole month’s pay and deductions.</p>`:''}
-  <p class="muted small" style="margin-top:12px">${c?(d&&d.status==='APPROVED'?'Approved payroll':'Draft — not yet approved'):'Monthly summary'} · generated ${h(fmtStamp(nowISO()))}</p></div>`;
+  <p class="cert">I, the undersigned hereby certify to the best of my knowledge and belief that the amounts indicated above are the exact payments of my services rendered for the period covered by this payroll receipt of which I hereby acknowledge.</p>
+  
+  
+  
+</div>`;
 }
 const SECTION_NAME={'1':'1st Cut-off','2':'2nd Cut-off','M':'Monthly','BIR':'BIR Purposes'};
 /* Table for one payroll section, used for the Excel export (and the CSV fallback). */
@@ -2716,7 +2746,7 @@ const actions={
     openDlg('Edit payroll · '+empName(x.e),`<form data-form="payedit" data-n="${n}" data-id="${x.e.id}"><p class="muted small" style="margin-top:0">${n===1?'1st':'2nd'} cut-off. Type an amount to replace the computed one; leave blank to keep the computed amount. Gross, net pay and government contributions are recalculated.</p><div class="grid">${F.map(([f,l])=>`<label class="f">${l}<input type="number" name="f_${f}" min="0" step="0.01" value="${v[f]!=null?h(v[f]):''}" placeholder="${amt(a[f])}"><span class="muted small" style="font-weight:400">Computed: ${peso(a[f])}</span></label>`).join('')}<label class="f wide">Reason for the change<input name="note" maxlength="200" value="${h(it.note||'')}" placeholder="Required when you change an amount"></label></div><div class="row" style="margin-top:14px">${it.v?'<button type="button" class="btn danger" data-act="resetSlip">Reset to computed</button>':''}<span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save changes</button></div></form>`);
   },
   resetSlip(){const f=$('#dlgBody form');if(f)savePayEdit(f,true)},
-  printAllSlips(){const tab=S.ui.payTab||'1';if(tab==='BIR')return;const items=payItems(computePayroll(),tab);if(!items.length){toast('No payslips to print.',true);return}printHtml(items.map(x=>`<div class="pa-page">${payslipHtml(x,tab)}</div>`).join(''))},
+  printAllSlips(){const tab=S.ui.payTab||'1';if(tab==='BIR')return;const items=payItems(computePayroll(),tab);if(!items.length){toast('No payslips to print.',true);return}printHtml(slipSheets(items,tab))},
   recRefresh(){S.ui.recList=null;S.ui.recListLoaded=false;loadRecordList()},
   recOpen(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';scheduleRender();window.scrollTo(0,0)},
   recBack(){S.ui.recKey=null;S.ui.recData=null;S.ui.recErr='';scheduleRender()},
