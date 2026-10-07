@@ -777,6 +777,14 @@ function slipSheets(items,tab){
   }
   return out;
 }
+function printSelected(f){
+  const tab=S.ui.printTab||'1',items=payItems(computePayroll(),tab);
+  const sel=new Set([...f.querySelectorAll('input[name=pk]:checked')].map(c=>c.value));
+  S.ui.printSkip=items.filter(x=>!sel.has(String(x.e.id))).map(x=>x.e.id);
+  const list=items.filter(x=>sel.has(String(x.e.id)));
+  if(!list.length){toast('Select at least one employee.',true);return}
+  printHtml(slipSheets(list,tab));
+}
 function printHtml(html){
   const a=$('#printArea');if(!a)return;closeDlg();
   a.innerHTML=html;document.body.classList.add('print-area');
@@ -2746,7 +2754,13 @@ const actions={
     openDlg('Edit payroll · '+empName(x.e),`<form data-form="payedit" data-n="${n}" data-id="${x.e.id}"><p class="muted small" style="margin-top:0">${n===1?'1st':'2nd'} cut-off. Type an amount to replace the computed one; leave blank to keep the computed amount. Gross, net pay and government contributions are recalculated.</p><div class="grid">${F.map(([f,l])=>`<label class="f">${l}<input type="number" name="f_${f}" min="0" step="0.01" value="${v[f]!=null?h(v[f]):''}" placeholder="${amt(a[f])}"><span class="muted small" style="font-weight:400">Computed: ${peso(a[f])}</span></label>`).join('')}<label class="f wide">Reason for the change<input name="note" maxlength="200" value="${h(it.note||'')}" placeholder="Required when you change an amount"></label></div><div class="row" style="margin-top:14px">${it.v?'<button type="button" class="btn danger" data-act="resetSlip">Reset to computed</button>':''}<span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save changes</button></div></form>`);
   },
   resetSlip(){const f=$('#dlgBody form');if(f)savePayEdit(f,true)},
-  printAllSlips(){const tab=S.ui.payTab||'1';if(tab==='BIR')return;const items=payItems(computePayroll(),tab);if(!items.length){toast('No payslips to print.',true);return}printHtml(slipSheets(items,tab))},
+  printAllSlips(){
+    const tab=S.ui.payTab||'1';if(tab==='BIR')return;
+    const items=payItems(computePayroll(),tab);if(!items.length){toast('No payslips to print.',true);return}
+    const skip=new Set((S.ui.printSkip||[]).map(String));S.ui.printTab=tab;
+    openDlg('Print all payslips',`<form data-form="printsel"><p class="muted small" style="margin-top:0">Untick the employees whose payslip should not be printed. Each page holds 2 employees, with a company copy and an employee copy.</p><div class="row" style="margin-bottom:10px"><button type="button" class="btn sm" data-act="selSlips" data-v="all">Select all</button><button type="button" class="btn sm" data-act="selSlips" data-v="none">Select none</button></div><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr))">${items.map(x=>`<label class="chk"><input type="checkbox" name="pk" value="${x.e.id}" ${skip.has(String(x.e.id))?'':'checked'}> <span>${h(empName(x.e))} <span class="muted small">· ${h(x.e.department||'')}</span></span></label>`).join('')}</div><div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Print selected</button></div></form>`);
+  },
+  selSlips(el){document.querySelectorAll('#dlgBody input[name=pk]').forEach(c=>c.checked=el.dataset.v==='all')},
   recRefresh(){S.ui.recList=null;S.ui.recListLoaded=false;loadRecordList()},
   recOpen(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';scheduleRender();window.scrollTo(0,0)},
   recBack(){S.ui.recKey=null;S.ui.recData=null;S.ui.recErr='';scheduleRender()},
@@ -2846,6 +2860,7 @@ document.addEventListener('submit',e=>{
   if(k==='fbsetup'){const c=parseFbConfig(new FormData(f).get('cfg'));if(!c){S.ui.setupErr='Could not find apiKey, projectId and appId in what you pasted. Copy the whole firebaseConfig block.';render();return}localStorage.setItem(CFG_KEY,JSON.stringify(c));location.reload();return}
   if(k==='acct'){saveAcct(f);return}
   if(k==='payedit'){savePayEdit(f);return}
+  if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
   if(k==='deadline'){saveDeadline(f);return}
