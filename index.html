@@ -1904,10 +1904,10 @@ async function loadSynced(){
     const cuts=portalCuts(),cut=cuts.find(c=>c.key===(u.portalCut||cuts[0].key))||cuts[0],sel=u.portalMode==='staff'?'__staff':(u.portalBranch||'__all');
     const st=await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/status'));
     const allStaff=st&&st.staff?Object.entries(st.staff).map(([id,v])=>({id,name:v.name,v})):[];
-    const qTok=nameTokens(u.portalStaffQ||''),staffList=sel==='__staff'?allStaff.filter(x=>{const t=nameTokens(x.name);return qTok.every(w=>t.some(y=>y.startsWith(w)))}):[];
+    const qTok=nameTokens(u.portalStaffQ||''),staffList=sel==='__staff'?allStaff.filter(x=>{const t=nameTokens(x.name);return qTok.every(w=>t.some(y=>y.startsWith(w)))}):(sel==='__all'?allStaff:[]);
     if(!u.branchCfgLoaded)await loadBranchCfg();
     const list=sel==='__staff'?[]:sel==='__all'?portalBranches():portalBranches().filter(n=>portalSlug(n)===sel);
-    const withStaff=sel==='__staff';
+    const withStaff=sel==='__staff'||sel==='__all';
     const when=iso=>iso?new Date(iso).toLocaleString('en-PH',{timeZone:'Asia/Manila',dateStyle:'medium',timeStyle:'short'}):'';
     let msg='';
     if(!st){u.portalSyncMsg='No sync status found at <code>'+h(PORTAL_SYNC_PREFIX+('portal_sync/status'))+'</code>. Check that the sync job saved to this company (TSL Corporation = companies/tsl/), then load again.';scheduleRender();return}
@@ -1916,21 +1916,23 @@ async function loadSynced(){
     const docs=await Promise.all(list.map(async n=>({name:n,doc:await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/b_'+portalSlug(n)))})));
     const sdocs=withStaff?await Promise.all(staffList.filter(x=>x.v.ok).map(async x=>({name:x.name+' (by name)',doc:await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/s_'+x.id))}))):[];
     docs.push(...sdocs);
-    const sbad=withStaff?staffList.filter(x=>!x.v.ok&&x.v.code!=='no_rows'):[];const sNone=withStaff?staffList.filter(x=>x.v.code==='no_rows').length:0;
+    const sbad=withStaff?staffList.filter(x=>!x.v.ok&&x.v.code!=='no_rows'):[];const sNone=sel==='__staff'?staffList.filter(x=>x.v.code==='no_rows').length:0;
     if(sel==='__staff'&&!staffList.length){u.portalSyncMsg=allStaff.length?`No synced staff matches “${h(u.portalStaffQ||'')}”. Synced by name: ${allStaff.slice(0,40).map(x=>h(x.name)).join(', ')}${allStaff.length>40?'…':''}.`:'No staff by name were in the last sync. Make sure the employee is active under TSL Corporation with department “Laundry Department” (or listed in <code>staff.json</code>), run <code>run-sync.ps1</code>, then load again.';scheduleRender();return}
     const bad=list.map(n=>[n,(st.branches||{})[portalSlug(n)]]).filter(([n,b])=>!b||!b.ok);
     const {payload,notes,errors}=portalBuild(docs,cut);
     const fetchedAt=sdocs.map(d=>d.doc&&d.doc.fetched_at).filter(Boolean).sort().pop();
+    if(sel==='__all'){const okB=list.filter(n=>{const b=(st.branches||{})[portalSlug(n)];return b&&b.ok}).length;msg+=`<b>${okB} of ${list.length} branches${staffList.filter(x=>x.v.ok).length?' + '+staffList.filter(x=>x.v.ok).length+' staff by name':''} loaded.</b><br>`}
     msg+=`${sel==='__staff'&&fetchedAt?'Looked up in the portal':'Synced'} ${h(when(sel==='__staff'&&fetchedAt?fetchedAt:st.at))} · ${h(sel==='__all'?'all branches':sel==='__staff'?'staff by name'+(u.portalStaffQ?' · “'+u.portalStaffQ+'”':''):list[0])} · ${h(cut.label)}. Synced range ${h(st.range?st.range.start+' to '+st.range.end:'?')}.`;
     if(bad.length)msg+=`<br><b>${bad.length} ${bad.length===1?'branch has':'branches have'} no good data from the last run:</b> ${bad.map(([n,b])=>h(n)+' ('+h(b?(b.code||'failed')+(b.candidates&&b.candidates.length?' — portal has: '+b.candidates.join(' | '):''):'not in the last run')+')').join('; ')}`;
     for(const n of list){const b=(st.branches||{})[portalSlug(n)];if(b&&b.ok){if(b.labels&&b.labels.length>1)notes.push(`${n}: the portal returned ${b.labels.length} different branches (${b.labels.join(' | ')}) — check these before importing.`);else if(b.labels&&b.labels.length===1&&list.length===1)notes.push(`Portal branch name: ${b.labels[0]}`)}}
     if(sNone)msg+=`<br>${sNone} employee${sNone===1?'':'s'} had no attendance found by first name in this range (or the surname did not match).`;
-    for(const x of staffList.filter(y=>y.v.code==='no_rows'&&y.v.candidates&&y.v.candidates.length))msg+=`<br><b>${h(x.name)}</b>: the portal has staff with that first name but a different surname — ${x.v.candidates.map(h).join('; ')}. If one of them is ${h(x.name)}, type that name in <b>Employees → ${h(x.name)} → Name in the portal</b>; it is picked up on the next sync (within about 30 minutes).`;
+    if(sel==='__staff')for(const x of staffList.filter(y=>y.v.code==='no_rows'&&y.v.candidates&&y.v.candidates.length))msg+=`<br><b>${h(x.name)}</b>: the portal has staff with that first name but a different surname — ${x.v.candidates.map(h).join('; ')}. If one of them is ${h(x.name)}, type that name in <b>Employees → ${h(x.name)} → Name in the portal</b>; it is picked up on the next sync (within about 30 minutes).`;
     if(sbad.length)msg+=`<br><b>${sbad.length} by-name ${sbad.length===1?'person has':'people have'} no good data:</b> ${sbad.map(x=>h(x.name)+' ('+h(x.v.code||'failed')+(x.v.message?': '+x.v.message:'')+')').join('; ')}`;
-    for(const x of staffList)if(withStaff&&x.v.ok&&x.v.branchesSeen&&x.v.branchesSeen.length>1)notes.push(`${x.name}: shown at ${x.v.branchesSeen.length} branches (${x.v.branchesSeen.join(' | ')}) — expected for someone who moved or covers shifts; check before importing.`);
+    for(const x of staffList)if(sel==='__staff'&&x.v.ok&&x.v.branchesSeen&&x.v.branchesSeen.length>1)notes.push(`${x.name}: shown at ${x.v.branchesSeen.length} branches (${x.v.branchesSeen.join(' | ')}) — expected for someone who moved or covers shifts; check before importing.`);
     if(notes.length)msg+='<br>'+notes.map(h).join('<br>');
     u.portalSyncMsg=msg;
-    if(errors.length){u.portalError='Import stopped, nothing was loaded:<br>'+errors.map(h).join('<br>');scheduleRender();return}
+    if(errors.length&&(sel!=='__all'||!payload.records.length)){u.portalError='Import stopped, nothing was loaded:<br>'+errors.map(h).join('<br>');scheduleRender();return}
+    if(errors.length)u.portalSyncMsg+=`<br><b>${errors.length} ${errors.length===1?'branch was':'branches were'} left out (not loaded):</b><br>`+errors.map(h).join('<br>');
     parsePortal(JSON.stringify(payload));
     // Staff in the portal belong to different companies. Outside TSL, show only people registered under the selected company.
     if(S.company!=='tsl'&&u.importRows){
