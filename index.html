@@ -561,7 +561,7 @@ async function retry(fn){
 }
 const Remote={
   db:null,
-  watchCollection(col,filters,cb,onErr){let q=this.db.collection(col);for(const f of filters)q=q.where(f[0],f[1],f[2]);q=q.limit(1000);
+  watchCollection(col,filters,cb,onErr){let q=this.db.collection(col);for(const f of filters)q=q.where(f[0],f[1],f[2]);if(col.split('/').pop()!=='dtr')q=q.limit(5000); // attendance: no cap (a month of a large company is well over 1000 rows; a cap silently dropped the latest days)
     return q.onSnapshot(s=>cb(s.docs.map(d=>({...d.data(),_id:d.id}))),e=>onErr&&onErr(e))},
   watchDoc(path,cb,onErr){return this.db.doc(path).onSnapshot(s=>cb(s.exists?{...s.data()}:null),e=>onErr&&onErr(e))},
   async get(path){const s=await retry(()=>this.db.doc(path).get());return s.exists?JSON.parse(JSON.stringify(s.data())):null},
@@ -634,6 +634,7 @@ function calcEntry(r,emp){
     } else otActual=Math.max(0,worked-Number(st.hours_per_day)*60);
     for(const base of[-1440,0,1440]){const a=Math.max(ti2,base+ndS),b=Math.min(to,base+1440+ndE);if(b>a)nd+=Math.round(b-a)}
   }
+  else if(status==='CHK'&&tiA!=null&&dayClass==='REG')late=Math.max(0,Math.round(tiA-sIn)-Number(st.grace_min)); // time-out missing (not yet out, or forgot to punch): the late still counts from the time-in
   const otOk=emp?emp.ot_eligible!==false:true;
   const approvedOt=(otOk&&r.ot_approval==='YES'&&otActual>=Number(st.min_ot))?otActual:0;
   const offset=r.offset_ot_to_absent==='YES'?Math.min(approvedOt,Math.max(0,Number(r.offset_minutes)||0)):0;
@@ -2112,7 +2113,7 @@ async function doImport(mode){
       if(await isLocked(x.date)){locked++;done.add(x);continue}
       const id=`${x.employee_id}_${x.date}`;
       const inPeriod=x.date>=S.period.start&&x.date<=S.period.end;
-      const existing=inPeriod?loaded.get(id):await Store.get(cp('dtr/')+id);
+      const existing=(inPeriod&&loaded.get(id))||await Store.get(cp('dtr/')+id); // never overwrite a saved day that isn't on screen
       if(existing)await jr.update(cp('dtr/')+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()},existing);
       else await jr.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
         ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
