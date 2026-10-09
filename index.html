@@ -17,6 +17,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-check-compat.js"></script>
 <script src="config.js"></script>
 <style>
 :root{
@@ -3087,7 +3088,7 @@ async function boot(){
   let db=null;
   takeCfgFromLink();
   const fc=getCfg();
-  if(fc&&window.firebase){try{firebase.initializeApp(fc);db=firebase.firestore();Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
+  if(fc&&window.firebase){try{firebase.initializeApp(fc);try{if(firebase.appCheck&&fc.projectId==='database-55b53')firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider('6LdyWeYtAAAAAAsoZzyTKM_zoKGjrKNBUyjEO2Eg'),true)}catch(e){console.warn('App Check',e)}db=firebase.firestore();Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
   else if(window.claude&&typeof window.claude.use==='function'){try{db=await window.claude.use('db')}catch(e){db=null}}
   if(db){Remote.db=db;Store=Remote;S.mode='shared';if(!fc){try{S.downloads=await window.claude.use('downloads')}catch(e){}}}
   else if(sessionStorage.getItem('pl-local-ok')||localStorage.getItem('pl-local-ok')){Local.load();Store=Local;S.mode='local'}
