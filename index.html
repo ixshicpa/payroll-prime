@@ -634,6 +634,37 @@ const holidayMap=()=>{const m={};for(const x of (S.settings.holidays||[]))m[x.da
 const cutLocked=n=>{const d=S.payDocs[n];return !!(d&&d.status==='APPROVED')};
 const lockedDate=d=>{if(!S.period||d<S.period.start||d>S.period.end)return false;const c=S.period.cuts.find(c=>d>=c.start&&d<=c.end);return c?cutLocked(c.n):false};
 const anyLocked=()=>cutLocked(1)||cutLocked(2);
+/* Working days with no DTR record show as Absent for the supervisor to review, and payroll counts them as absences.
+   They run from the start of the cut-off up to the last day that has imported attendance in this company (so days HR
+   hasn't imported yet aren't flagged) and never include today. Rest days and holidays are skipped. These rows are not
+   saved until someone reviews them; approving the payroll keeps the range it was approved with (absent_through). */
+const NO_RECORD='no record';
+let _autoAbs={key:null,rows:[]};
+function absentThrough(c){
+  let last='';for(const r of S.dtr)if((r.time_in||r.time_out)&&r.work_date>last)last=r.work_date;
+  if(!last||last<c.start)return '';
+  return [c.end,last,addDays(todayISO(),-1)].sort()[0];
+}
+function blankAbsent(eid,d){return {_id:eid+'_'+d,_auto:true,employee_id:eid,work_date:d,time_in:null,time_out:null,status_override:null,source:NO_RECORD,imported_at:null,
+  ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null}}
+function autoAbsents(){
+  const P=S.period;if(!P||!S.ready.dtr||!S.ready.employees)return [];
+  const key=[S.dtr,S.employees,S.settings,P,S.payDocs[1],S.payDocs[2],todayISO()];
+  if(_autoAbs.key&&key.every((v,i)=>v===_autoAbs.key[i]))return _autoAbs.rows;
+  const st=S.settings,hol=holidayMap(),have=new Set(S.dtr.map(r=>String(r.employee_id)+'_'+r.work_date));
+  const emps=S.employees.filter(e=>e.active!==false),rows=[];
+  for(const c of P.cuts){
+    const through=cutLocked(c.n)?(S.payDocs[c.n].absent_through||''):absentThrough(c); // payroll approved before this feature: nothing added
+    if(!through)continue;
+    for(let d=c.start;d<=c.end&&d<=through;d=addDays(d,1)){
+      if(dow(d)===Number(st.rest_day)||hol[d])continue;
+      for(const e of emps)if(!have.has(String(e.id)+'_'+d))rows.push(blankAbsent(e.id,d));
+    }
+  }
+  _autoAbs={key,rows};return rows;
+}
+const dtrAll=()=>{const a=autoAbsents();return a.length?S.dtr.concat(a):S.dtr};
+const dtrDoc=r=>{const o={...r};delete o._id;delete o._auto;return o};
 
 /* ---------------- Calculations (from the workbook rules) ---------------- */
 function calcEntry(r,emp){
@@ -690,14 +721,14 @@ function cutCalc(e,rows,cutoff){
   const mr=numOrNull(e.monthly_rate),dr=numOrNull(e.daily_rate);
   const daily=dr!=null?dr:(mr!=null?mr*12/st.divisor:0), monthly=mr!=null?mr:daily*st.divisor/12, hourly=daily/hpd;
   const isMonthly=e.pay_basis!=='Daily';
-  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0};
+  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0};
   const byDate={};
   for(const r of rows){
     byDate[r.work_date]=r;
     const c=calcEntry(r,e);
     t.late+=c.late;t.ut+=c.ut;t.absent+=c.absent;t.offset+=c.offset;t.ot+=c.otPaid;t.nd+=c.nd;
     if(c.status==='P')t.present+=1;if(c.status==='HD')t.present+=0.5;
-    if(c.otPending)t.pendingOt++;if(c.status==='CHK')t.chk++;if((r.review_status||'FOR REVIEW')!=='APPROVED')t.review++;
+    if(c.otPending)t.pendingOt++;if(c.status==='CHK')t.chk++;if(r._auto&&c.status==='A')t.noRec++;if((r.review_status||'FOR REVIEW')!=='APPROVED')t.review++;
     t.otPay+=hourly*(c.otPaid/60)*otMult(c.dayClass);
     t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase(c.dayClass);
     if(c.status==='P'){ // premium for work on holidays / rest days (first 8 hours; beyond that is overtime)
@@ -746,7 +777,7 @@ const payItems=(items,tab)=>tab==='1'||tab==='2'?items.filter(x=>!x['k'+tab].off
 /* Whole payroll month: both cut-offs, government contributions (deducted on the 2nd cut-off) and BIR figures. */
 function computePayroll(){
   const st=S.settings,P=S.period;
-  const byEmp={};for(const r of S.dtr)(byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r);
+  const byEmp={};for(const r of dtrAll())(byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r);
   return S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id).map(e=>{
     const rows=byEmp[e.id]||[];
     let [k1,k2]=P.cuts.map(c=>cutCalc(e,rows.filter(r=>r.work_date>=c.start&&r.work_date<=c.end),c));
@@ -1321,12 +1352,13 @@ function pageLogin(){
 
 /* ---------- Dashboard ---------- */
 function visibleDtr(){
-  if(role()==='DEPT_HEAD'){const d=dept();return S.dtr.filter(r=>{const e=empById(r.employee_id);return e&&e.department===d})}
-  return S.dtr;
+  const all=dtrAll();
+  if(role()==='DEPT_HEAD'){const d=dept();return all.filter(r=>{const e=empById(r.employee_id);return e&&e.department===d})}
+  return all;
 }
 /* ---------- Dashboard (by role) ---------- */
 const cutName=c=>`${c.n===1?'1st':'2nd'} cut-off`;
-function cutRows(c,deptName){return S.dtr.filter(r=>r.work_date>=c.start&&r.work_date<=c.end&&(!deptName||(empById(r.employee_id)||{}).department===deptName))}
+function cutRows(c,deptName){return dtrAll().filter(r=>r.work_date>=c.start&&r.work_date<=c.end&&(!deptName||(empById(r.employee_id)||{}).department===deptName))}
 function pendingOf(rows){return rows.filter(r=>(r.review_status||'FOR REVIEW')!=='APPROVED').length}
 const inPeriod=c=>S.period&&c.start>=S.period.start&&c.end<=S.period.end;
 function deadlineMs(c){const d=S.deadlines[c.key];return d&&d.at?new Date(d.at).getTime():null}
@@ -1342,12 +1374,13 @@ function statsHtml(rows,emps){
   return `<div class="stats"><div class="stat hl"><b>${pending}</b><span>For review</span></div><div class="stat"><b>${issue}</b><span>With issue</span></div><div class="stat"><b>${approved}</b><span>Approved</span></div><div class="stat"><b>${rows.length}</b><span>Attendance records</span></div><div class="stat"><b>${emps.filter(e=>e.active!==false).length}</b><span>Employees</span></div></div>`;
 }
 function attentionHtml(rows,emps){
-  let pending=0,otPend=0,chk=0;
-  for(const r of rows){if((r.review_status||'FOR REVIEW')!=='APPROVED')pending++;const c=calcEntry(r,empById(r.employee_id));if(c.otPending)otPend++;if(c.status==='CHK')chk++}
+  let pending=0,otPend=0,chk=0,noRec=0;
+  for(const r of rows){if((r.review_status||'FOR REVIEW')!=='APPROVED')pending++;if(r._auto&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date))noRec++;const c=calcEntry(r,empById(r.employee_id));if(c.otPending)otPend++;if(c.status==='CHK')chk++}
   const noRate=emps.filter(e=>e.active!==false&&numOrNull(e.monthly_rate)==null&&numOrNull(e.daily_rate)==null).length;
   const attn=[];
   if(otPend)attn.push(['warn',`${otPend} overtime ${otPend===1?'entry needs':'entries need'} approval`,'#dtr','Review']);
   if(chk)attn.push(['bad',`${chk} ${chk===1?'day has':'days have'} a missing time in or time out`,'#dtr','Review']);
+  if(noRec)attn.push(['bad',`${noRec} working ${noRec===1?'day has':'days have'} no time record and ${noRec===1?'is':'are'} marked absent for review`,'#dtr','Review']);
   if(pending)attn.push(['acc',`${pending} attendance ${pending===1?'record is':'records are'} waiting for department review`,'#dtr','Open']);
   if(noRate&&can('viewEmployees'))attn.push(['warn',`${noRate} ${noRate===1?'employee has':'employees have'} no salary rate, so payroll shows ₱0 for them`,'#employees','Add rates']);
   for(const c of [...S.period.cuts].reverse()){const d=S.payDocs[c.n];if(d&&d.status==='APPROVED')attn.unshift(['ok',`${cutName(c)} (${fmtRange(c.payStart,c.payEnd)}) was approved by ${personName(d.approved_by)} on ${fmtStamp(d.approved_at)}`,can('viewPayroll')?'#payroll':'',can('viewPayroll')?'View':''])}
@@ -1487,14 +1520,16 @@ function pageDtr(){
   if(f.dtrSearch){const q=f.dtrSearch.toUpperCase();rows=rows.filter(x=>empName(empById(x.employee_id)).toUpperCase().includes(q))}
   const withCalc=rows.map(x=>({r:x,e:empById(x.employee_id),c:calcEntry(x,empById(x.employee_id))}));
   const filt={all:()=>true,review:o=>(o.r.review_status||'FOR REVIEW')==='FOR REVIEW',issue:o=>o.r.review_status==='WITH ISSUE',approved:o=>o.r.review_status==='APPROVED',
-    ot:o=>o.c.otActual>=S.settings.min_ot,exceptions:o=>o.c.status==='A'||o.c.status==='CHK'||o.c.late>0||o.c.ut>0||o.c.otPending};
+    ot:o=>o.c.otActual>=S.settings.min_ot,absent:o=>o.c.status==='A'||o.c.status==='HD',exceptions:o=>o.c.status==='A'||o.c.status==='CHK'||o.c.late>0||o.c.ut>0||o.c.otPending};
   const list=withCalc.filter(filt[f.dtrFilter]||filt.all).sort((a,b)=>b.r.work_date.localeCompare(a.r.work_date)||(a.e?.surname||'').localeCompare(b.e?.surname||''));
   const groups={};for(const o of list)(groups[o.r.work_date]=groups[o.r.work_date]||[]).push(o);
   const reviewable=list.filter(o=>(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
-  const segs=[['all','All'],['review','For review'],['exceptions','Exceptions'],['ot','Overtime'],['issue','With issue'],['approved','Approved']];
+  const segs=[['all','All'],['review','For review'],['exceptions','Exceptions'],['absent','Absent'],['ot','Overtime'],['issue','With issue'],['approved','Approved']];
   let html=`<h1>Attendance</h1><p class="sub">${isHead?`Showing ${h(dept())} only.`:'Tap a row to review overtime, absences and remarks.'} attendance ${h(fmtRange(S.period.start,S.period.end))}.</p>`;
   if(isHead){const c=activeCut();if(S.deadlines[c.key]&&inPeriod(c)){const p=pendingOf(cutRows(c,dept()));html+=`<div class="banner ${deadlineMs(c)<Date.now()?'bad':(p?'warn':'ok')}">${cutName(c)} approvals due ${h(fmtDT(S.deadlines[c.key].at))} · ${countdownHtml(c)} · ${p} ${p===1?'record':'records'} left to review.</div>`}}
   const lk=S.period.cuts.filter(c=>cutLocked(c.n));
+  const nr=withCalc.filter(o=>o.r._auto&&(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
+  if(nr)html+=`<div class="banner warn"><div><b>${nr} working ${nr===1?'day has':'days have'} no time record</b> and ${nr===1?'is':'are'} marked <b>Absent</b> for review. Open a row to approve the absence, or mark it <b>With issue</b> with a remark if the employee did work — HR can then add the times. Days are checked up to the last day with imported attendance; rest days and holidays are skipped. Payroll counts them as absences.</div><span class="spacer"></span>${f.dtrFilter!=='absent'?`<button class="btn sm" data-act="dtrFilter" data-v="absent">Show absences</button>`:''}</div>`;
   if(lk.length)html+=`<div class="banner ok">${lk.map(c=>`${c.n===1?'1st':'2nd'} cut-off attendance (${fmtRange(c.start,c.end)})`).join(' and ')} ${lk.length>1?'are':'is'} locked because payroll was approved. Payroll can reopen it if a correction is needed.</div>`;
   html+=`<div class="row" style="margin-bottom:14px">
     <select data-change="dtrCut" aria-label="Cut-off"><option value="0">Whole month</option>${S.period.cuts.map(c=>`<option value="${c.n}" ${f.dtrCut===c.n?'selected':''}>${c.n===1?'1st':'2nd'} cut-off · ${h(fmtD(c.start))}–${h(fmtD(c.end))}</option>`).join('')}</select>
@@ -1527,6 +1562,7 @@ function dtrChips(o){
   const c=o.c,st=S.settings,ch=[];
   const sCls={P:'ok',A:'bad',CHK:'bad',RD:'',HOL:'acc',HD:'warn'}[c.status]||'';
   ch.push(`<span class="chip ${sCls}">${STATUS_LABEL[c.status]||c.status}</span>`);
+  if(o.r._auto)ch.push(`<span class="chip bad" title="No time in or time out was imported for this working day">No record</span>`);
   if(c.dayClass!=='REG'&&c.status!=='RD'&&c.status!=='HOL')ch.push(`<span class="chip acc">${{RD:'Rest day',RH:'Regular holiday',SNW:'Special holiday'}[c.dayClass]}</span>`);
   if(c.late)ch.push(`<span class="chip warn">Late ${fmtMin(c.late)}</span>`);
   if(c.ut)ch.push(`<span class="chip warn">Undertime ${fmtMin(c.ut)}</span>`);
@@ -1551,13 +1587,13 @@ function dtrRow(o,canAppr){
 /* Who may delete attendance records: HR and Admin (time correction or DTR import access). Department heads never. */
 function canDelDtr(){return !S.readOnly&&role()!=='DEPT_HEAD'&&(can('editTimes')||can('importDtr'))}
 function dtrSelRow(o){
-  const id=o.r._id,lk=lockedDate(o.r.work_date),on=S.ui.dtrSel.has(id);
-  return `<label class="dtr-row sel${on?' on':''}${lk?' lk':''}" title="${lk?'This cut-off is approved and locked':''}">
+  const id=o.r._id,lk=lockedDate(o.r.work_date)||!!o.r._auto,on=S.ui.dtrSel.has(id)&&!lk;
+  return `<label class="dtr-row sel${on?' on':''}${lk?' lk':''}" title="${o.r._auto?'No time record was imported for this day, so there is nothing to delete':(lk?'This cut-off is approved and locked':'')}">
     <span class="pick"><input type="checkbox" data-change="dtrSel" data-id="${h(id)}" ${on?'checked':''} ${lk?'disabled':''} aria-label="Select ${h(empName(o.e))} ${h(o.r.work_date)}"></span>
     <span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')} · ${h(o.r.source||'—')}</span></span>
     <span class="tm">${h(o.r.time_in||'—')} – ${h(o.r.time_out||'—')}</span>
     <span class="chips">${dtrChips(o)}</span>
-    <span class="rv">${lk?'<span class="chip">Locked</span>':''}</span>
+    <span class="rv">${o.r._auto?'':(lk?'<span class="chip">Locked</span>':'')}</span>
   </label>`;
 }
 function updateSelBar(){
@@ -1590,6 +1626,7 @@ function dtrEditor(o,canAppr){
   const sel=(name,opts,val)=>`<select name="${name}" ${dis}>${opts.map(([v,l])=>`<option value="${v}" ${String(val)===v?'selected':''}>${l}</option>`).join('')}</select>`;
   if(r.reviewed_by)resolveNames([r.reviewed_by]);
   return `<form class="editor" data-form="dtr" data-id="${h(r._id)}">
+    ${r._auto?`<div class="banner warn small" style="margin:0 0 12px"><div>No time in or time out was imported for this working day, so it counts as <b>absent</b>. Approve the absence (and add the leave type in Remarks), or set Review to <b>With issue</b> if the employee worked${can('editTimes')?' — or enter the time in and time out below with a remark':''}.</div></div>`:''}
     <div class="grid">
       <label class="f">Time in<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_in" value="${h(r.time_in||'')}" ${tdis}></label>
       <label class="f">Time out<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
@@ -1604,13 +1641,13 @@ function dtrEditor(o,canAppr){
     <div class="row" style="margin-top:12px">
       <span class="muted small">Worked ${fmtMin(c.worked)} · ${r.reviewed_by?`Last reviewed by ${h(personName(r.reviewed_by))} ${h(fmtStamp(r.reviewed_at))}`:'Not reviewed yet'} · Source: ${h(r.source||'—')}</span>
       <span class="spacer"></span>
-      ${canDelDtr()&&!lk?`<button type="button" class="btn danger" data-act="delDtr" data-id="${h(r._id)}">Delete record</button>`:''}
+      ${canDelDtr()&&!lk&&!r._auto?`<button type="button" class="btn danger" data-act="delDtr" data-id="${h(r._id)}">Delete record</button>`:''}
       ${(canAppr||can('editTimes'))&&!lk?`<button type="button" class="btn" data-act="toggleRow" data-id="${h(r._id)}">Cancel</button><button type="submit" class="btn primary">${can('editTimes')?'Save changes':'Save review'}</button>`:''}
     </div>
   </form>`;
 }
 async function saveDtr(form){
-  const id=form.dataset.id, r=S.dtr.find(x=>x._id===id); if(!r)return;
+  const id=form.dataset.id, r=dtrAll().find(x=>x._id===id); if(!r)return;
   const e=empById(r.employee_id);
   if(role()==='DEPT_HEAD'&&(!e||e.department!==dept())){toast('You can only review your own department.',true);return}
   if(lockedDate(r.work_date)){toast('This cut-off is approved and locked.',true);return}
@@ -1627,10 +1664,14 @@ async function saveDtr(form){
     if(to!==(r.time_out||null)){changes.push(`time out ${r.time_out||'—'} → ${to||'—'}`);patch.time_out=to}
     if(so!==(r.status_override||null)){changes.push(`status → ${so||'automatic'}`);patch.status_override=so}
     if(changes.length&&!patch.remarks&&!(r.remarks)){toast('Add a remark explaining the time correction.',true);return}
+    if(patch.time_in!==undefined||patch.time_out!==undefined)patch.corrected=true;
   }
   try{
     const jr=journal();
-    await jr.update(cp('dtr/')+id,patch,r);
+    if(r._auto){ // first save of a day with no DTR record: create the record (unless an import just brought one in)
+      if(await Store.get(cp('dtr/')+id)){toast('Attendance for this day was just imported. Please review it again.',true);S.ui.openRow=null;scheduleRender();return}
+      await jr.set(cp('dtr/')+id,{...dtrDoc(r),...patch},null);
+    } else await jr.update(cp('dtr/')+id,patch,r);
     S.ui.openRow=null;
     logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
     toast('Review saved');scheduleRender();
@@ -1639,12 +1680,14 @@ async function saveDtr(form){
 async function bulkApprove(btn){
   btn.disabled=true;
   const rows=[...document.querySelectorAll('.dtr-row')].map(b=>b.dataset.id);
-  const targets=S.dtr.filter(r=>rows.includes(r._id)&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date));
+  const targets=dtrAll().filter(r=>rows.includes(r._id)&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date));
   let n=0;const jr=journal();
   try{
     for(const r of targets){
       const e=empById(r.employee_id);if(role()==='DEPT_HEAD'&&(!e||e.department!==dept()))continue;
-      await jr.update(cp('dtr/')+r._id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()},r);n++;
+      const ap={review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()};
+      if(r._auto){if(await Store.get(cp('dtr/')+r._id))continue;await jr.set(cp('dtr/')+r._id,{...dtrDoc(r),...ap},null)}
+      else await jr.update(cp('dtr/')+r._id,ap,r);n++;
       if(n%5===0)btn.textContent=`Saving ${n}/${targets.length}…`;
     }
     logAction('BULK_APPROVE','dtr',null,`${n} records marked approved (overtime approvals unchanged)`,jr);
@@ -1659,9 +1702,10 @@ function pageImport(){
   let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched by first name <b>only to employees registered under ${h(curCo().name)}</b> — the company selected at the top — so people in other companies who share a first name are never mixed up. Add a Company column if one file covers several companies; rows for other companies are left out.</p>`;
   if(S.readOnly)return html+'<div class="empty"><b>View-only access.</b></div>';
   html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
+  if(u.importNote&&!u.importRows)html+=`<div class="banner ok">${h(u.importNote)}<span class="spacer"></span><button class="btn sm" data-act="clearImport">OK</button></div>`;
   if(u.importResult){
     const R=u.importResult;
-    html+=`<div class="banner ${R.failed||R.locked?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'} into ${h(R.co||curCo().short)}.${R.locked?` ${R.locked} skipped because the cut-off is approved and locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}${R.left?` ${R.left} ${R.left===1?'row was':'rows were'} not imported and ${R.left===1?'is':'are'} still listed below.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">${R.left?'Clear list':'Import more'}</button></div>`;
+    html+=`<div class="banner ${R.failed||R.locked?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'} into ${h(R.co||curCo().short)}.${R.dup?` ${R.dup} already imported, skipped.`:''}${R.locked?` ${R.locked} skipped because the cut-off is approved and locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}${R.left?` ${R.left} ${R.left===1?'row was':'rows were'} not imported and ${R.left===1?'is':'are'} still listed below.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">${R.left?'Clear list':'Import more'}</button></div>`;
   }
   if(u.importTab==='upload'){
     html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect time card exports can be uploaded as they are.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
@@ -1681,18 +1725,19 @@ function pageImport(){
   }
   if(u.importRows&&u.importTab!=='single'){
     if(u.otherCo===null)loadOtherCompanies();
-    const rows=u.importRows, ok=rows.filter(x=>x.match==='OK'), conf=rows.filter(x=>x.match==='CONFIRM'), bad=rows.length-ok.length-conf.length;
+    if(!u.importRows._checked){checkImportRows();return html+'<div class="panel"><div class="loading">Checking which days are already imported…</div></div>'}
+    const rows=u.importRows, ok=rows.filter(x=>x.match==='OK'&&x.dup!=='diff'), diffN=rows.filter(x=>canPick(x)&&x.dup==='diff').length, conf=rows.filter(x=>x.match==='CONFIRM'), bad=rows.filter(x=>!canPick(x)).length;
     const nSel=rows.filter(x=>x.sel&&canPick(x)).length, pickable=rows.filter(canPick).length, allOn=pickable&&nSel===pickable;
     const loaded=new Set(S.dtr.map(r=>r._id));
     const LIMIT=1000;
-    html+=`<div class="panel"><div class="row"><h2 style="margin:0">Preview</h2><span class="chip acc">Into ${h(curCo().short)}</span><span class="chip ok">${ok.length} matched</span>${conf.length?`<span class="chip warn">${conf.length} to confirm</span>`:''}${bad?`<span class="chip bad">${bad} need attention</span>`:''}<span class="spacer"></span>
+    html+=`<div class="panel"><div class="row"><h2 style="margin:0">Preview</h2><span class="chip acc">Into ${h(curCo().short)}</span><span class="chip ok">${ok.length} matched</span>${conf.length?`<span class="chip warn">${conf.length} to confirm</span>`:''}${bad?`<span class="chip bad">${bad} need attention</span>`:''}${rows._dupes?`<span class="chip">${rows._dupes} already imported · skipped</span>`:''}${diffN?`<span class="chip warn">${diffN} saved with different times</span>`:''}<span class="spacer"></span>
       ${u.importBusy?'':`<button class="btn" data-act="clearImport">Discard</button><button class="btn" data-act="doImport" data-mode="all" id="impAll" ${ok.length?'':'disabled'}>Import all ${ok.length} matched</button><button class="btn primary" data-act="doImport" data-mode="sel" id="impSelBtn" ${nSel?'':'disabled'}>Import ${nSel} selected</button>`}</div>
       ${u.importBusy?`<div class="progress"><i style="width:${Math.round(u.importProgress*100)}%"></i></div><p class="muted small">Saving… keep this page open.</p>`:''}
-      <p class="muted small">Matched rows are ticked for you; untick any you don’t want, then <b>Import selected</b>. <b>Import all matched</b> brings in every matched row regardless of the ticks. Rows marked “to confirm” only partly match a first name, so they are left unticked until you check them. Rows that already exist for the same employee and date get their times updated; their review and approvals are kept.</p>
+      <p class="muted small">Matched rows are ticked for you; untick any you don’t want, then <b>Import selected</b>. <b>Import all matched</b> brings in every matched row regardless of the ticks. Rows marked “to confirm” only partly match a first name, so they are left unticked until you check them. Days already imported with the same times are skipped, so loading the same file or the synced report again never brings them in twice. If a saved day is missing its time in or time out, only the missing time is added and its review is kept. Days saved with different times (for example, corrected by HR) are left as they are and unticked — tick one only if you want the new times to replace the saved ones.${rows._checkErr?' <b>Could not check saved days just now; they are checked again while importing.</b>':''}</p>
       <div class="tablewrap"><table><thead><tr><th class="cb"><input type="checkbox" class="imp-cb" data-change="impSelAll" ${allOn?'checked':''} ${pickable&&!u.importBusy?'':'disabled'} aria-label="Select all rows that can be imported" title="Select all"></th><th>Employee</th><th>In the DTR</th><th>Department</th><th>Date</th><th>In</th><th>Out</th><th>Match</th></tr></thead><tbody>
       ${rows.slice(0,LIMIT).map((x,i)=>{
-        const pk=canPick(x), other=pk?otherCoWith(x.employee_id):[], upd=pk&&loaded.has(`${x.employee_id}_${x.date}`);
-        const notes=x.match==='OK'||x.match==='CONFIRM'?[x.match==='OK'?'Matched':'Confirm this match',x.punches>1?`${x.punches} punches merged`:'',x.note,upd?'updates an existing record':'',other.length?`same first name also in ${other.join(', ')} — matched to the ${curCo().short} employee`:''].filter(Boolean).join(' · '):x.match;
+        const pk=canPick(x), other=pk?otherCoWith(x.employee_id):[], upd=pk&&x.dup==='fill', dif=pk&&x.dup==='diff';
+        const notes=x.match==='OK'||x.match==='CONFIRM'?[x.match==='OK'?'Matched':'Confirm this match',x.punches>1?`${x.punches} punches merged`:'',x.note,upd?`adds the missing time to the saved day (${x.exIn||'no time in'} – ${x.exOut||'no time out'})`:'',dif?`already imported with ${x.exIn||'—'}–${x.exOut||'—'}; tick to replace`:'',other.length?`same first name also in ${other.join(', ')} — matched to the ${curCo().short} employee`:''].filter(Boolean).join(' · '):x.match;
         return `<tr class="${pk?(x.sel?'':'unsel'):'bad'}"><td class="cb">${pk?`<input type="checkbox" class="imp-cb" data-change="impSel" data-i="${i}" ${x.sel?'checked':''} ${u.importBusy?'disabled':''} aria-label="Import ${h(x.name)} ${h(x.date||'')}">`:''}</td><td>${impNameCell(x,i)}</td><td class="muted">${h(x.src||'')}</td><td>${h(x.department||'')}</td><td>${h(x.date||'—')}</td><td>${h(x.time_in||'')}</td><td>${h(x.time_out||'')}</td><td style="white-space:normal">${x.match==='CONFIRM'?'<span class="chip warn">Confirm</span> ':''}${h(notes)}</td></tr>`}).join('')}
       </tbody></table></div>${rows.length>LIMIT?`<p class="muted small">Showing the first ${LIMIT} of ${rows.length} rows. Rows not shown keep their tick; Import all matched covers every row.</p>`:''}</div>`;
   }
@@ -1704,6 +1749,44 @@ function pageImport(){
    Employee ID is optional and is only used as a tie-breaker. */
 const normName=v=>String(v||'').toUpperCase().replace(/\./g,' ').replace(/[^A-Z0-9Ñ ]/g,' ').replace(/\b(JR|SR|II|III|IV)\b/g,' ').replace(/\s+/g,' ').trim();
 const canPick=x=>x.match==='OK'||x.match==='CONFIRM';
+/* Re-importing (the same file, or the synced portal report again) never brings a day in twice.
+   'same'  saved with the same times (or the row adds nothing new): skipped
+   'fill'  the saved day is missing its time in or time out and this row has it: the missing time is added, review kept
+   'diff'  saved with different times, or corrected by hand: left as is unless the row is ticked on purpose
+   'new'   not saved yet */
+const sameT=(a,b)=>toMin(a)===toMin(b);
+function importState(x,ex){
+  if(!ex)return 'new';
+  if(ex.source===NO_RECORD&&!ex.time_in&&!ex.time_out)return (x.time_in||x.time_out)?'fill':'same';
+  const ok=(e,n)=>!n||!e||sameT(e,n);
+  if(!ok(ex.time_in,x.time_in)||!ok(ex.time_out,x.time_out))return 'diff';
+  const adds=(!ex.time_in&&x.time_in)||(!ex.time_out&&x.time_out);
+  if(!adds)return 'same';
+  return ex.corrected||ex.source==='manual'?'diff':'fill';
+}
+function readDtrRange(start,end){
+  return new Promise((res,rej)=>{let un=null,done=false;
+    un=Store.watchCollection(cp('dtr'),[['work_date','>=',start],['work_date','<=',end]],rows=>{if(done)return;done=true;res(rows);setTimeout(()=>{try{un&&un()}catch(e){}},0)},e=>{if(!done){done=true;rej(e)}});
+  });
+}
+async function checkImportRows(){
+  const u=S.ui,rows=u.importRows;if(!rows||rows._checked||rows._checking)return;
+  rows._checking=true;
+  const pk=rows.filter(x=>canPick(x)&&x.date&&x.employee_id!=null);
+  try{
+    const have=new Map(S.dtr.map(r=>[r._id,r])),dates=pk.map(x=>x.date).sort();
+    if(dates.length&&(dates[0]<S.period.start||dates[dates.length-1]>S.period.end))for(const r of await readDtrRange(dates[0],dates[dates.length-1]))have.set(r._id,r);
+    let same=0;
+    for(const x of pk){const ex=have.get(x.employee_id+'_'+x.date);x.dup=importState(x,ex);if(ex){x.exIn=ex.time_in||null;x.exOut=ex.time_out||null}
+      if(x.dup==='same')same++;else if(x.dup==='diff')x.sel=false}
+    if(u.importRows!==rows)return;
+    const keep=rows.filter(x=>x.dup!=='same');keep._checked=true;keep._dupes=(rows._dupes||0)+same;
+    if(!keep.length){u.importRows=null;u.importNote=`All ${same} ${same===1?'row is':'rows are'} already imported with the same times — nothing new to bring in.`}
+    else u.importRows=keep;
+  }catch(e){rows._checked=true;rows._checkErr=true}
+  finally{rows._checking=false}
+  scheduleRender();
+}
 function findEmployee(id,name){
   const co=curCo().short;
   const idStr=id!=null?String(id).trim():'', byId=/^\d+$/.test(idStr)?empById(Number(idStr)):null;
@@ -1940,7 +2023,7 @@ function portalBuild(docs,cut){
   return {payload:{v:1,tableRows:records.length+blank,records,blank:Array.from({length:blank},(_,i)=>i+1),dropped:[]},notes,errors};
 }
 async function loadSynced(){
-  const u=S.ui;u.portalSyncMsg='Loading…';u.portalError='';u.importRows=null;scheduleRender();
+  const u=S.ui;u.portalSyncMsg='Loading…';u.portalError='';u.importRows=null;u.importNote='';scheduleRender();
   try{
     const cuts=portalCuts(),cut=cuts.find(c=>c.key===(u.portalCut||cuts[0].key))||cuts[0],sel=u.portalMode==='staff'?'__staff':(u.portalBranch||'__all');
     const st=await Store.get(PORTAL_SYNC_PREFIX+('portal_sync/status'));
@@ -2040,7 +2123,7 @@ async function requestSync(){
   catch(e){toast('Could not send the refresh request.',true)}
 }
 function parsePortal(txt){
-  const u=S.ui;u.portalText=txt!=null?txt:$('#portalArea').value;u.portalError='';u.portalInfo='';u.portalSkipped=[];u.importRows=null;
+  const u=S.ui;u.portalText=txt!=null?txt:$('#portalArea').value;u.portalError='';u.importNote='';u.portalInfo='';u.portalSkipped=[];u.importRows=null;
   const fail=m=>{u.portalError=m;scheduleRender()};
   let d;
   try{d=JSON.parse(u.portalText)}catch(e){return fail('That is not the extractor result. Run the extractor again and paste everything it copied.')}
@@ -2136,19 +2219,19 @@ async function handleFile(input){
       const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];
       objs=tableToObjects(XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''}));
     } else objs=tableToObjects(splitTable(await f.text()));
-    S.ui.importRows=rowsFromObjects(objs);S.ui.importResult=null;scheduleRender();
+    S.ui.importRows=rowsFromObjects(objs);S.ui.importResult=null;S.ui.importNote='';scheduleRender();
     if(TABLE_NOTE)toast(TABLE_NOTE);
   }catch(e){toast(e.message||'Could not read that file.',true)}
 }
 async function doImport(mode){
   const all=S.ui.importRows||[];
-  const rows=mode==='all'?all.filter(x=>x.match==='OK'):all.filter(x=>x.sel&&canPick(x));
+  const rows=mode==='all'?all.filter(x=>x.match==='OK'&&x.dup!=='diff'):all.filter(x=>x.sel&&canPick(x));
   if(!rows.length){toast(mode==='all'?'No matched rows to import.':'Tick at least one row to import.',true);return}
   S.ui.importBusy=true;S.ui.importProgress=0;scheduleRender();
   const lockCache={};
   const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
   const loaded=new Map(S.dtr.map(r=>[r._id,r]));
-  let saved=0,failed=0,locked=0,i=0,lastErr=null;const done=new Set(),jr=journal();
+  let saved=0,failed=0,locked=0,dup=0,i=0,lastErr=null;const done=new Set(),jr=journal();
   const src=S.ui.importTab==='portal'?'portal':S.ui.importTab==='paste'?'paste':'upload', co=curCo().short;
   for(const x of rows){
     i++;
@@ -2157,7 +2240,15 @@ async function doImport(mode){
       const id=`${x.employee_id}_${x.date}`;
       const inPeriod=x.date>=S.period.start&&x.date<=S.period.end;
       const existing=(inPeriod&&loaded.get(id))||await Store.get(cp('dtr/')+id); // never overwrite a saved day that isn't on screen
-      if(existing)await jr.update(cp('dtr/')+id,{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO()},existing);
+      const st=importState(x,existing);
+      if(st==='same'){dup++;done.add(x);continue}
+      if(st==='diff'&&x.dup!=='diff'){x.dup='diff';x.sel=false;x.exIn=existing.time_in||null;x.exOut=existing.time_out||null;continue} // changed since the preview: leave it for HR to decide
+      if(existing){
+        const patch=st==='fill'?{time_in:existing.time_in||x.time_in,time_out:existing.time_out||x.time_out,source:src,imported_at:nowISO()}
+          :{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO(),corrected:false};
+        if(existing.source===NO_RECORD)Object.assign(patch,{review_status:'FOR REVIEW',absent_approval:'PENDING',reviewed_by:null,reviewed_at:null});
+        await jr.update(cp('dtr/')+id,patch,existing);
+      }
       else await jr.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
         ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
       saved++;done.add(x);
@@ -2165,9 +2256,9 @@ async function doImport(mode){
     if(i%4===0||i===rows.length){S.ui.importProgress=i/rows.length;const bar=document.querySelector('.progress i');if(bar)bar.style.width=Math.round(S.ui.importProgress*100)+'%'}
   }
   // Rows not imported this time (unticked, to confirm, unmatched or failed) stay in the list.
-  const remaining=all.filter(x=>!done.has(x));
-  S.ui.importBusy=false;S.ui.importRows=remaining.length?remaining:null;S.ui.importResult={saved,failed,locked,left:remaining.length,co};
-  logAction('IMPORT','dtr',null,`${saved} rows imported into ${co} (${src}, ${mode==='all'?'all matched':'selected rows'}); ${locked} locked; ${remaining.length} not imported; ${failed} failed`,jr);
+  const remaining=all.filter(x=>!done.has(x));remaining._checked=true;remaining._dupes=(all._dupes||0)+dup;
+  S.ui.importBusy=false;S.ui.importRows=remaining.length?remaining:null;S.ui.importResult={saved,failed,locked,dup,left:remaining.length,co};
+  logAction('IMPORT','dtr',null,`${saved} rows imported into ${co} (${src}, ${mode==='all'?'all matched':'selected rows'}); ${dup} already imported, skipped; ${locked} locked; ${remaining.length} not imported; ${failed} failed`,jr);
   if(lastErr)writeError(lastErr);
   scheduleRender();
 }
@@ -2277,10 +2368,10 @@ function pagePayroll(){
   } else html+=`<div class="banner info">Monthly view: both cut-offs together · payroll ${h(fmtRange(P.cuts[0].payStart,P.cuts[1].payEnd))} · attendance ${h(fmtRange(P.start,P.end))}.</div>`;
   const tk=x=>tab==='1'?x.k1.t:(tab==='2'?x.k2.t:x.t);
   const noRate=items.filter(x=>!x.hasRate).length, pendOt=items.reduce((a,x)=>a+tk(x).pendingOt,0), chk=items.reduce((a,x)=>a+tk(x).chk,0), review=items.reduce((a,x)=>a+tk(x).review,0);
-  const missing=items.reduce((a,x)=>a+(tab==='1'?x.k1.missing:tab==='2'?x.k2.missing:x.missing),0);
+  const missing=items.reduce((a,x)=>a+(tab==='1'?x.k1.missing:tab==='2'?x.k2.missing:x.missing),0), noRec=items.reduce((a,x)=>a+(tk(x).noRec||0),0);
   const warn=[];
   if(noRate)warn.push(`${noRate} without a salary rate`);if(pendOt)warn.push(`${pendOt} overtime entries pending (not paid until approved)`);
-  if(chk)warn.push(`${chk} days with a missing punch`);if(review)warn.push(`${review} records not yet approved by department heads`);if(missing)warn.push(`${missing} workdays with no DTR record (not deducted)`);
+  if(chk)warn.push(`${chk} days with a missing punch`);if(review)warn.push(`${review} records not yet approved by department heads`);if(noRec)warn.push(`${noRec} absences from workdays with no DTR record (deducted)`);if(missing)warn.push(`${missing} workdays not imported yet (not deducted)`);
   if(warn.length&&!appr)html+=`<div class="banner warn">Before approving: ${h(warn.join(' · '))}.</div>`;
   const cols=sectionCols(tab,items);
   const tot={};for(const x of items){const r=rowOf(x);for(const[k]of cols)tot[k]=(tot[k]||0)+(r[k]||0)}
@@ -2415,7 +2506,7 @@ async function exportExcel(tabs){
 async function setPayrollStatus(n,status){
   const c=S.period.cuts[n-1], k=n===1?'k1':'k2', all=computePayroll(), items=all.filter(x=>!x[k].off);
   const doc=status==='APPROVED'
-    ?{status,approved_by:actor(),approved_at:nowISO(),pay_start:c.payStart,pay_end:c.payEnd,att_start:c.start,att_end:c.end,totals:{employees:items.length,gross:r2(items.reduce((a,x)=>a+x[k].gross,0)),net:r2(items.reduce((a,x)=>a+x[k].net,0))}}
+    ?{status,approved_by:actor(),approved_at:nowISO(),absent_through:absentThrough(c),pay_start:c.payStart,pay_end:c.payEnd,att_start:c.start,att_end:c.end,totals:{employees:items.length,gross:r2(items.reduce((a,x)=>a+x[k].gross,0)),net:r2(items.reduce((a,x)=>a+x[k].net,0))}}
     :{status:'DRAFT',reopened_by:actor(),reopened_at:nowISO()};
   try{await Store.set(cp('payroll/')+c.key,doc);logAction(status==='APPROVED'?'APPROVE':'REOPEN','payroll',c.key,status==='APPROVED'?`${n===1?'1st':'2nd'} cut-off ${fmtRange(c.payStart,c.payEnd)}: net ${peso(doc.totals.net)} for ${doc.totals.employees} employees`:`${n===1?'1st':'2nd'} cut-off reopened`);toast(status==='APPROVED'?'Cut-off approved':'Cut-off reopened');await afterPayrollStatus(n,c,status,all)}
   catch(e){writeError(e)}
@@ -2757,9 +2848,9 @@ const actions={
   dtrFilter(el){S.ui.dtrFilter=el.dataset.v;S.ui.openRow=null;scheduleRender()},
   toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;render()},
   bulkApprove(el){bulkApprove(el)},
-  importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;scheduleRender()},
+  importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;S.ui.importNote='';scheduleRender()},
   impEdit(el){const x=(S.ui.importRows||[])[Number(el.dataset.i)];if(x){x.editing=true;scheduleRender()}},
-  clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.portalText='';S.ui.portalSyncMsg='';S.ui.portalInfo='';S.ui.portalError='';S.ui.portalSkipped=[];S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
+  clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.importNote='';S.ui.portalText='';S.ui.portalSyncMsg='';S.ui.portalInfo='';S.ui.portalError='';S.ui.portalSkipped=[];S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
   parsePaste(){const t=$('#pasteArea').value;S.ui.pasteText=t;try{let objs=parsePasted(t);if(!objs.length)throw new Error('No DTR rows found under the header. Each row needs a first name, a yyyy-mm-dd date and the times.');try{S.ui.importRows=rowsFromObjects(objs)}catch(err){if(!/Missing column/.test(err.message))throw err;objs=parsePasted(t,true);if(!objs.length)throw err;S.ui.importRows=rowsFromObjects(objs)}S.ui.importResult=null;render()}catch(e){toast(e.message,true)}},
   copyExtractor(){try{navigator.clipboard.writeText(PORTAL_EXTRACTOR).then(()=>toast('Extractor script copied'),()=>toast('Could not copy automatically.',true))}catch(e){toast('Could not copy automatically.',true)}},
   parsePortal(){parsePortal()},
