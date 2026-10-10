@@ -17,6 +17,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-check-compat.js"></script>
 <script src="config.js"></script>
 <style>
@@ -386,7 +387,7 @@ const DEFAULTS={
   phic_rate:0.05, phic_floor:10000, phic_ceiling:100000, phic_employee_share:0.5,
   hdmf_ee:200, hdmf_er:200,
   sss_ee_rate:0.05, sss_er_rate:0.10, sss_reg_cap:20000, sss_min_msc:5000, sss_max_msc:35000, ec_threshold:15000, ec_low:10, ec_high:30,
-  hol_rh_prem:1.0, hol_snw_prem:0.30, rd_prem:0.30,
+  hol_rh_prem:1.0, hol_snw_prem:0.30, rd_prem:0.30, hol_snw_rd_prem:0.50, dole_from:'2026-10-11',
   holidays:[], departments:DEFAULT_DEPARTMENTS.slice()
 };
 /* Companies. Each company has its own employees, attendance, payroll, advances, deadlines, settings and activity log.
@@ -442,7 +443,7 @@ function roleDefaults(r){const o={};for(const[k]of PERMS)o[k]=CAN[k].includes(r)
 function withDeps(map){const o={...map};for(const[k,,,deps]of PERMS)if(o[k]&&deps)for(const d of deps)o[d]=true;return o}
 function roleAccess(r){const st=(S.roleAccess||{})[r];return st?{...roleDefaults(r),...st}:roleDefaults(r)}
 const NAV=[
-  ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],
+  ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],['imports','Import history','importDtr'],
   ['employees','Employees','viewEmployees'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['advances','Company advances','viewPayroll'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
@@ -591,7 +592,8 @@ const Remote={
   set(path,d){return retry(()=>this.db.doc(path).set(d))},
   update(path,d){return retry(()=>this.db.doc(path).update(d))},
   del(path){return retry(()=>this.db.doc(path).delete())},
-  async getAll(col){const q=await retry(()=>this.db.collection(col).get());return q.docs.map(d=>[d.id,JSON.parse(JSON.stringify(d.data()))])}
+  async getAll(col){const q=await retry(()=>this.db.collection(col).get());return q.docs.map(d=>[d.id,JSON.parse(JSON.stringify(d.data()))])},
+  async query(col,filters){let q=this.db.collection(col);for(const f of filters)q=q.where(f[0],f[1],f[2]);const s=await retry(()=>q.get());return s.docs.map(d=>({...JSON.parse(JSON.stringify(d.data())),_id:d.id}))}
 };
 const LKEY='prime-laundry-payroll-v1';
 const Local={
@@ -607,7 +609,8 @@ const Local={
   async set(path,d){this.data[path]=JSON.parse(JSON.stringify(d));this.save();this.notify()},
   async update(path,d){if(!this.data[path])throw{code:'invalid_argument'};this.data[path]={...this.data[path],...JSON.parse(JSON.stringify(d))};this.save();this.notify()},
   async del(path){delete this.data[path];this.save();this.notify()},
-  async getAll(col){const out=[];for(const[p,v]of Object.entries(this.data)){const i=p.lastIndexOf('/');if(p.slice(0,i)===col)out.push([p.slice(i+1),JSON.parse(JSON.stringify(v))])}return out}
+  async getAll(col){const out=[];for(const[p,v]of Object.entries(this.data)){const i=p.lastIndexOf('/');if(p.slice(0,i)===col)out.push([p.slice(i+1),JSON.parse(JSON.stringify(v))])}return out},
+  async query(col,filters){const out=[];for(const[p,v]of Object.entries(this.data)){const i=p.lastIndexOf('/');if(p.slice(0,i)!==col)continue;if(filters.every(f=>this.cmp(v[f[0]],f[1],f[2])))out.push({...JSON.parse(JSON.stringify(v)),_id:p.slice(i+1)})}return out}
 };
 let Store=Local;
 
@@ -718,10 +721,14 @@ function cutCalc(e,rows,cutoff){
   const st=S.settings,hol=holidayMap(),today=todayISO(),hpd=Number(st.hours_per_day);
   const otMult=c=>c==='REG'?st.ot_reg:(c==='RH'?st.ot_rh:st.ot_snw);
   const ndBase=c=>c==='REG'?st.nd_base_reg:(c==='RH'?st.nd_base_rh:st.nd_base_snw);
+  const doleFrom=String(st.dole_from||'2026-10-11');
+  const dayKind=(cls,d)=>{const rest=dow(d)===Number(st.rest_day);return cls==='RH'?(rest?'RHRD':'RH'):(cls==='SNW'?(rest?'SNWRD':'SNW'):cls)};
+  const dayMult=k=>({REG:1,RD:1+Number(st.rd_prem),SNW:1+Number(st.hol_snw_prem),SNWRD:1+Number(st.hol_snw_rd_prem),RH:1+Number(st.hol_rh_prem),RHRD:(1+Number(st.hol_rh_prem))*(1+Number(st.rd_prem))})[k]||1;
+  const ndBase2=k=>({REG:Number(st.nd_base_reg),RD:Number(st.nd_base_snw),SNW:Number(st.nd_base_snw),SNWRD:1+Number(st.hol_snw_rd_prem),RH:Number(st.nd_base_rh),RHRD:Number(st.nd_base_rh)*(1+Number(st.rd_prem))})[k]||1;
   const mr=numOrNull(e.monthly_rate),dr=numOrNull(e.daily_rate);
   const daily=dr!=null?dr:(mr!=null?mr*12/st.divisor:0), monthly=mr!=null?mr:daily*st.divisor/12, hourly=daily/hpd;
   const isMonthly=e.pay_basis!=='Daily';
-  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0};
+  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,payDays:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0};
   const byDate={};
   for(const r of rows){
     byDate[r.work_date]=r;
@@ -729,13 +736,34 @@ function cutCalc(e,rows,cutoff){
     t.late+=c.late;t.ut+=c.ut;t.absent+=c.absent;t.offset+=c.offset;t.ot+=c.otPaid;t.nd+=c.nd;
     if(c.status==='P')t.present+=1;if(c.status==='HD')t.present+=0.5;
     if(c.otPending)t.pendingOt++;if(c.status==='CHK')t.chk++;if(r._auto&&c.status==='A')t.noRec++;if((r.review_status||'FOR REVIEW')!=='APPROVED')t.review++;
-    t.otPay+=hourly*(c.otPaid/60)*otMult(c.dayClass);
-    t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase(c.dayClass);
-    if(c.status==='P'){ // premium for work on holidays / rest days (first 8 hours; beyond that is overtime)
-      if(c.dayClass==='RH'){t.hol+=daily*st.hol_rh_prem;t.holDays++}
-      else if(c.dayClass==='SNW'){t.hol+=daily*st.hol_snw_prem;t.holDays++}
-      else if(c.dayClass==='RD'){t.hol+=daily*(isMonthly?1+Number(st.rd_prem):Number(st.rd_prem));t.holDays++}
+    if(r.work_date<doleFrom){ // rules used before the DOLE update (kept so approved cut-offs don't change)
+      if(c.status==='P')t.payDays+=1;if(c.status==='HD')t.payDays+=0.5;
+      t.otPay+=hourly*(c.otPaid/60)*otMult(c.dayClass);
+      t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase(c.dayClass);
+      if(c.status==='P'){
+        if(c.dayClass==='RH'){t.hol+=daily*st.hol_rh_prem;t.holDays++}
+        else if(c.dayClass==='SNW'){t.hol+=daily*st.hol_snw_prem;t.holDays++}
+        else if(c.dayClass==='RD'){t.hol+=daily*(isMonthly?1+Number(st.rd_prem):Number(st.rd_prem));t.holDays++}
+      }
+      continue;
     }
+    /* DOLE rules. Day rate (first 8 hours): regular day 100%, rest day 130%, special day 130%, special day on a rest day 150%,
+       regular holiday 200%, regular holiday on a rest day 260%. Overtime = hourly rate × day rate × 130% (regular day: × OT regular).
+       Night differential = 10% of the hourly rate of that day. Premiums follow the hours actually worked (up to 8). */
+    const kind=dayKind(c.dayClass,r.work_date),m=dayMult(kind);
+    t.otPay+=kind==='REG'?hourly*(c.otPaid/60)*Number(st.ot_reg):hourly*(c.otPaid/60)*m*((kind==='RH'||kind==='RHRD')?Number(st.ot_rh):Number(st.ot_snw));
+    t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase2(kind);
+    if(kind==='REG'||c.status!=='P'){if(c.status==='P')t.payDays+=1;if(c.status==='HD')t.payDays+=0.5;continue}
+    const hrs=Math.min(Math.max(0,c.worked),hpd*60)/60, frac=hrs/hpd;
+    if(isMonthly){
+      // The monthly salary already pays regular holidays and special days (100%), but not rest days.
+      t.hol+=hourly*hrs*(m-((kind==='RH'||kind==='SNW')?1:0));
+    }else{
+      t.payDays+=frac; // the 100% part of the hours worked
+      t.hol+=hourly*hrs*(m-1);
+      if(kind==='RH')t.hol+=daily*(1-frac); // regular holiday pay for the hours not worked
+    }
+    t.holDays++;
   }
   let missing=0;
   for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
@@ -744,7 +772,7 @@ function cutCalc(e,rows,cutoff){
     if(!isRest&&!hol[d]&&!byDate[d])missing++;
   }
   const absentNet=Math.max(0,t.absent-t.offset/(hpd*60));
-  const half=r2(monthly/2), basic=isMonthly?(cutoff.n===1?half:r2(monthly-half)):daily*t.present;
+  const half=r2(monthly/2), basic=isMonthly?(cutoff.n===1?half:r2(monthly-half)):daily*t.payDays;
   const lateUt=daily/(hpd*60)*(t.late+t.ut);
   const absence=isMonthly?daily*absentNet:0;
   const netLA=Math.max(0,basic-lateUt-absence);
@@ -1133,10 +1161,10 @@ async function findAccount(email){
 }
 function lockState(){try{return JSON.parse(localStorage.getItem(LOCK_KEY)||'{}')||{}}catch(e){return{}}}
 function setLock(v){try{localStorage.setItem(LOCK_KEY,JSON.stringify(v))}catch(e){}}
-function saveSession(email){try{sessionStorage.setItem(SESSION_KEY,JSON.stringify({email,exp:Date.now()+IDLE_MS}))}catch(e){}}
+function saveSession(email,how){try{const o=JSON.parse(sessionStorage.getItem(SESSION_KEY)||'null')||{};sessionStorage.setItem(SESSION_KEY,JSON.stringify({email,how:how||o.how||'legacy',exp:Date.now()+IDLE_MS}))}catch(e){}}
 function readSession(){try{const v=JSON.parse(sessionStorage.getItem(SESSION_KEY)||'null');return v&&v.exp>Date.now()?v:null}catch(e){return null}}
 function clearSession(){try{sessionStorage.removeItem(SESSION_KEY)}catch(e){}}
-async function signIn(email,pw){
+async function legacySignIn(email,pw){
   const lk=lockState();
   if(lk.until&&lk.until>Date.now())throw new Error(`Too many attempts. Try again in ${Math.ceil((lk.until-Date.now())/60000)} minute(s).`);
   const a=await findAccount(email);
@@ -1149,16 +1177,135 @@ async function signIn(email,pw){
     setLock({tries});
     throw new Error(a&&a.active===false&&ok?'This account is disabled. Ask the administrator to reactivate it.':`Incorrect email or password. ${MAX_TRIES-tries} attempt(s) left.`);
   }
+  enterApp(a,'legacy');
+}
+/* Firebase Authentication (online database). Every payroll account (accounts/<email>) is linked to one Firebase
+   login through its uid, and the Firestore rules only let linked, active accounts read or write payroll data.
+   Accounts without a Firebase login yet keep the old sign-in only until the new Firestore rules are published. */
+let AUTH=null,creatorApp=null;
+const fbMode=()=>!!AUTH&&S.mode==='shared';
+const permDenied=e=>/permission/i.test(String(e&&(e.code||e.message)||''));
+async function legacyPwOk(a,pw){return !!(a&&a.hash&&a.salt&&pw&&ctEq(await pbkdf2(pw,a.salt,a.iter||210000),a.hash))}
+async function readAcct(email){
+  try{return{doc:await Store.get('accounts/'+acctId(email)),denied:false}}
+  catch(e){return{doc:null,denied:permDenied(e)}}
+}
+function usableAcct(d,email){if(!d||d.moved_to||d.deleted)return null;const id=acctId(d.email||email);return{...d,email:id,builtin:id===BOOT_ACCOUNT.email||!!d.main}}
+const plainAcct=a=>{const d=JSON.parse(JSON.stringify(a||{}));for(const k of['hash','salt','iter','builtin','_id'])delete d[k];return d};
+function failTry(msg){
+  const lk=lockState(),tries=(lk.tries||0)+1;
+  if(tries>=MAX_TRIES){setLock({tries:0,until:Date.now()+LOCK_MS});return new Error('Too many attempts. Sign-in is paused for 5 minutes.')}
+  setLock({tries});return new Error(msg||`Incorrect email or password. ${MAX_TRIES-tries} attempt(s) left.`);
+}
+function enterApp(a,how,quiet){
   setLock({});
   const acc=publicAccount(a),cos=companiesOf(acc);
   if(!cos.length)throw new Error('This account has not been given access to any company yet. Ask the administrator.');
-  S.account=acc;S.company=pickCompany(acc.email,cos);S.settings=coDefaults();syncDepartments();saveSession(S.account.email);
-  logAction('LOGIN','account',S.account.email,'Signed in');
+  S.account=acc;S.legacy=fbMode()&&how==='legacy';S.mustChange=null;
+  S.company=pickCompany(acc.email,cos);S.settings=coDefaults();syncDepartments();saveSession(S.account.email,how);
+  if(!quiet)logAction('LOGIN','account',S.account.email,S.legacy?'Signed in (old sign-in)':'Signed in');
   startData();
+}
+/* Saves the Firebase uid on the payroll account and removes the old password hash. */
+async function linkAccount(a,uid,extra){
+  const id=acctId(a.email),boot=id===BOOT_ACCOUNT.email;
+  const base=boot?{full_name:a.full_name||BOOT_ACCOUNT.full_name,role:'ADMIN',main:true,companies:ALL_CO.slice(),active:true,department:null}:{};
+  await Store.set('accounts/'+id,{...plainAcct(a),...base,email:id,uid,must_change:false,linked_at:nowISO(),updated_at:nowISO(),...(extra||{})});
+}
+async function signIn(email,pw){
+  const lk=lockState();
+  if(lk.until&&lk.until>Date.now())throw new Error(`Too many attempts. Try again in ${Math.ceil((lk.until-Date.now())/60000)} minute(s).`);
+  if(!fbMode())return legacySignIn(email,pw);
+  email=acctId(email);
+  let cred=null,err=null;
+  try{cred=await AUTH.signInWithEmailAndPassword(email,pw)}catch(e){err=e}
+  if(cred)return afterFirebaseSignIn(cred.user,pw);
+  const code=String(err&&err.code||'');
+  if(/too-many-requests/.test(code))throw new Error('Too many attempts for this email. Wait a few minutes, or ask the administrator.');
+  if(/network-request-failed/.test(code))throw new Error('No internet connection. Check the connection and try again.');
+  if(!/user-not-found|wrong-password|invalid-credential|invalid-login-credentials|invalid-email|user-disabled/.test(code))throw new Error('Sign-in failed ('+(code||(err&&err.message)||'unknown')+'). Try again.');
+  // No Firebase login with this password. Accounts not moved yet use the old sign-in (only while the old rules are in place).
+  const r=await readAcct(email);
+  if(r.denied)throw failTry('Incorrect email or password. If you haven’t received your new login (temporary password) yet, ask the administrator.');
+  const a=r.doc?usableAcct(r.doc,email):(email===BOOT_ACCOUNT.email?{...BOOT_ACCOUNT}:null);
+  if(!a||a.uid||!(await legacyPwOk(a,pw)))throw failTry();
+  if(a.active===false)throw new Error('This account is disabled. Ask the administrator to reactivate it.');
+  if(a.role==='ADMIN'){
+    // An administrator moves to the Firebase sign-in by himself and keeps the same password.
+    S.legacyOk={email,at:Date.now()};
+    try{cred=await AUTH.createUserWithEmailAndPassword(email,pw)}
+    catch(e){
+      if(/email-already-in-use/.test(String(e.code)))throw new Error('This email already has a Firebase login (for example from the Cash Tracker). Sign in again with THAT login’s password to link it to your payroll account.');
+      throw new Error('Could not create your new login ('+(e.code||e.message)+'). Try again.');
+    }
+    try{await linkAccount(a,cred.user.uid)}catch(e){try{await AUTH.signOut()}catch(x){}throw new Error('Could not save your new login. Try again.')}
+    S.legacyOk=null;
+    return afterFirebaseSignIn(cred.user);
+  }
+  enterApp(a,'legacy');
+}
+/* Runs after a successful Firebase sign-in (or when the page reloads with a Firebase session). */
+async function afterFirebaseSignIn(user,pw,quiet){
+  const email=acctId(user.email);
+  const r=await readAcct(email);
+  let a=r.doc?usableAcct(r.doc,email):null;
+  if(!a&&!r.doc&&!r.denied&&email===BOOT_ACCOUNT.email)a={...BOOT_ACCOUNT};
+  if(a&&a.uid&&a.uid===user.uid){
+    if(a.active===false){await AUTH.signOut();throw new Error('This account is disabled. Ask the administrator to reactivate it.')}
+    if(a.must_change){setLock({});S.account=null;S.mustChange={email,a};return}
+    return enterApp(a,'firebase',quiet);
+  }
+  if(a&&a.uid&&a.uid!==user.uid){await AUTH.signOut();throw new Error('This login is not the one linked to your payroll account. Ask the administrator.')}
+  // This Firebase login is not linked to the payroll account yet. The old payroll password proves it is the same person.
+  if(a&&!a.uid&&((await legacyPwOk(a,pw))||(S.legacyOk&&S.legacyOk.email===email&&Date.now()-S.legacyOk.at<15*60000))){
+    try{await linkAccount(a,user.uid);S.legacyOk=null;return afterFirebaseSignIn(user,null,quiet)}catch(e){/* rules already locked: ask the administrator below */}
+  }
+  if(a||r.denied){try{await Store.set('pay_link_requests/'+user.uid,{uid:user.uid,email:user.email,requested_at:nowISO()})}catch(e){}}
+  try{await AUTH.signOut()}catch(e){}
+  throw new Error(a?'Your login is waiting for the administrator’s approval. Ask them to open User accounts → Login requests and approve it, then sign in again.':(r.denied?'This login can’t open the payroll yet: it may be waiting for approval, disabled or removed. Ask the administrator (User accounts → Login requests).':'There is no payroll account for this email. Ask the administrator.'));
+}
+function pageMustChange(){
+  const m=S.mustChange;
+  return `<div class="login-wrap"><div class="login-card">
+    <h1>Set your own password</h1><p class="muted" style="margin:0">You signed in as <b>${h(m.email)}</b> with a temporary password. Choose your own password to continue.</p>
+    <form data-form="mustpw">
+      ${S.ui.loginErr?`<div class="login-err" role="alert">${h(S.ui.loginErr)}</div>`:''}
+      <label class="f">New password<input name="pw" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label class="f">Confirm new password<input name="pw2" type="password" autocomplete="new-password" required></label>
+      <p class="muted small" style="margin:0">At least 8 characters with a letter and a number.</p>
+      <button class="btn primary" ${S.ui.loginBusy?'disabled':''} style="justify-content:center;padding:11px">${S.ui.loginBusy?'Saving…':'Save and continue'}</button>
+      <button type="button" class="btn" data-act="signOut" style="justify-content:center">Cancel</button>
+    </form></div></div>`;
+}
+async function saveMustPw(f){
+  const fd=new FormData(f),pw=String(fd.get('pw')||''),m=S.mustChange,u=AUTH&&AUTH.currentUser;
+  if(!m||!u){S.mustChange=null;render();return}
+  if(pw!==fd.get('pw2')){S.ui.loginErr='The passwords don’t match.';render();return}
+  if(!pwOk(pw)){S.ui.loginErr='Password needs at least 8 characters with a letter and a number.';render();return}
+  S.ui.loginBusy=true;S.ui.loginErr='';render();
+  try{
+    await u.updatePassword(pw);
+    await Store.update('accounts/'+acctId(m.email),{must_change:false,pw_changed_at:nowISO()});
+    S.ui.loginBusy=false;enterApp({...m.a,must_change:false},'firebase');
+    logAction('CHANGE_PASSWORD','account',m.email,'Temporary password replaced');toast('Password saved');
+  }catch(e){
+    S.ui.loginBusy=false;
+    S.ui.loginErr=/requires-recent-login/.test(String(e.code))?'Please sign in again with the temporary password, then set your password right away.':'Could not save the password ('+(e.code||e.message)+').';
+    if(/requires-recent-login/.test(String(e.code)))signOut();
+  }
+  render();
+}
+async function forgotPw(){
+  const em=acctId(($('#loginEmail')||{}).value||'');
+  if(!fbMode()){toast('Ask the administrator to reset your password.');return}
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)){toast('Type your email first, then press Forgot password.',true);return}
+  try{await AUTH.sendPasswordResetEmail(em)}catch(e){}
+  S.ui.loginErr='';toast('If this email has a login and receives mail, a reset link was sent. Otherwise ask the administrator for a temporary password.');
 }
 function signOut(reason){
   if(S.account)logAction('LOGOUT','account',S.account.email,reason||'Signed out');
-  clearSession();S.account=null;S.viewAs=null;stopData();closeDlg();S.company=null;
+  if(AUTH&&AUTH.currentUser)AUTH.signOut().catch(()=>{});
+  clearSession();S.account=null;S.viewAs=null;S.legacy=false;S.mustChange=null;stopData();closeDlg();S.company=null;
   S.route='dashboard';history.replaceState(null,'','#dashboard');
   render();if(reason)toast(reason);
 }
@@ -1218,6 +1365,7 @@ let toastTimer;
 function toast(msg,bad){const t=$('#toast');t.textContent=msg;t.className='toast show'+(bad?' bad':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.className='toast',bad?6000:3200)}
 function writeError(e){
   const c=errCode(e);
+  if(c==='invalid_argument'&&fbMode()){toast(S.legacy?'This change was refused: the old sign-in no longer works. Ask the administrator for your new login.':'This change was refused by the database rules. Sign out and in again, or ask the administrator.',true);return}
   if(c==='invalid_argument'){S.readOnly=true;toast('This change was refused. You may only have view access to this page — ask the owner to make you a Contributor.',true)}
   else if(c==='quota_exceeded')toast('Storage is full. Remove old records before adding more.',true);
   else toast('Could not save right now. Check your connection and try again.',true);
@@ -1299,15 +1447,17 @@ function render(){
   if(S.mode==='loading'){$('#view').innerHTML='<div class="loading">Loading…</div>';return}
   if(S.mode==='setup'){document.body.classList.add('signed-out');$('#view').innerHTML=pageSetup();return}
   document.body.classList.toggle('signed-out',!S.account);
+  if(!S.account&&S.mustChange){renderBrand();$('#view').innerHTML=pageMustChange();return}
   if(!S.account){renderBrand();$('#view').innerHTML=pageLogin();const em=$('#loginEmail');if(em&&!em.value)em.focus();return}
   renderChrome();
   const r=role();
   let html='';
   if(S.mode==='local')html+=`<div class="banner info">Data is saved in this browser only. To share one record across HR, payroll and department heads, the site needs a shared database behind it.</div>`;
+  if(S.legacy)html+=`<div class="banner warn">You signed in with the old sign-in. Ask the administrator for your new login (a temporary password) — the old sign-in will stop working soon.</div>`;
   if(S.viewAs)html+=`<div class="banner warn">Previewing as ${h(ROLES[S.viewAs.role])}${S.viewAs.dept?' · '+h(S.viewAs.dept):''}. <span class="spacer"></span><button class="btn sm" data-act="stopPreview">Stop preview</button></div>`;
   if(S.readOnly)html+=`<div class="banner bad">Your changes can't be saved because you have view-only access to this page. Ask the owner to share it with you as a Contributor.</div>`;
   if(r==='NONE'){html+=pageNoAccess();$('#view').innerHTML=html;return}
-  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,employees:pageEmployees,payroll:pagePayroll,records:pageRecords,advances:pageAdvances,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
+  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,records:pageRecords,advances:pageAdvances,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
   const navItem=NAV.find(n=>n[0]===S.route);
   if(navItem&&navItem[2]&&!can(navItem[2])){html+=`<div class="empty"><b>This section isn't available for your role.</b>Use the tabs above to continue.</div>`}
   else html+=page();
@@ -1346,7 +1496,7 @@ function pageLogin(){
       <label class="f">Password<span class="pw"><input id="loginPw" name="password" type="password" autocomplete="current-password" required><button type="button" class="btn" data-act="togglePw" aria-label="Show password">Show</button></span></label>
       <button class="btn primary" ${locked||S.ui.loginBusy?'disabled':''} style="justify-content:center;padding:11px">${S.ui.loginBusy?'Checking…':'Sign in'}</button>
     </form>
-    <p class="muted small" style="margin:14px 0 0">Sessions end after 30 minutes without activity. Forgot your password? Ask the administrator to reset it.</p>
+    <p class="muted small" style="margin:14px 0 0">Sessions end after 30 minutes without activity. ${fbMode()?'<a href="#" data-act="forgotPw">Forgot password?</a> If your email can’t receive mail, ask the administrator for a temporary password.':'Forgot your password? Ask the administrator to reset it.'}</p>
   </div></div>`;
 }
 
@@ -1755,6 +1905,171 @@ const canPick=x=>x.match==='OK'||x.match==='CONFIRM';
    'diff'  saved with different times, or corrected by hand: left as is unless the row is ticked on purpose
    'new'   not saved yet */
 const sameT=(a,b)=>toMin(a)===toMin(b);
+/* ---------------- Import history ----------------
+   Every import is saved as a record (imports/<id>) with the rows it wrote (import_rows/<id>_<n>), and each
+   attendance day it wrote carries import_id / import_name. A day that went to the wrong employee can be moved
+   to the right one: the right employee gets the times, and the wrong employee gets back what they had before. */
+const IMP_CHUNK=1500;
+async function saveImportRows(id,rows){for(let k=0;k*IMP_CHUNK<rows.length;k++)await Store.set(cp('import_rows/')+id+'_'+k,{import_id:id,part:k,rows:rows.slice(k*IMP_CHUNK,(k+1)*IMP_CHUNK)})}
+const IMP_SRC={upload:'File',paste:'Pasted',portal:'Portal'};
+async function loadImportList(){
+  S.ui.impLoading=true;
+  try{const rows=await Store.getAll(cp('imports'));S.ui.impList=rows.map(([id,d])=>({...d,id})).sort((a,b)=>String(b.at).localeCompare(String(a.at)))}
+  catch(e){S.ui.impList=[];toast('Could not load the import history.',true)}
+  S.ui.impLoading=false;scheduleRender();
+}
+/* Imports made before the history existed: grouped from this payroll month's attendance (same source and minute). */
+function legacyImports(){
+  const m=new Map();
+  for(const r of S.dtr){
+    if(r.import_id||!r.imported_at||!['upload','paste','portal'].includes(r.source))continue;
+    const key='legacy:'+r.source+'|'+String(r.imported_at).slice(0,16);
+    if(!m.has(key))m.set(key,{id:key,legacy:true,at:r.imported_at,src:r.source,file:'Before import history',rowsList:[]});
+    m.get(key).rowsList.push(r);
+  }
+  return [...m.values()].map(b=>({...b,rows:b.rowsList.length,names:new Set(b.rowsList.map(r=>r.employee_id)).size})).sort((a,b)=>String(b.at).localeCompare(String(a.at)));
+}
+async function ihOpen(id){
+  S.ui.impOpen=id;S.ui.impBatch=null;scheduleRender();
+  try{
+    let meta,rows;
+    if(id.startsWith('legacy:')){
+      const b=legacyImports().find(x=>x.id===id);if(!b){toast('That import is no longer in this payroll month.',true);S.ui.impOpen=null;scheduleRender();return}
+      meta=b;rows=b.rowsList.map(r=>({n:empName(empById(r.employee_id)||{first_name:String(r.employee_id)}),e:r.employee_id,d:r.work_date,i:r.time_in||null,o:r.time_out||null,a:'legacy',at:r.imported_at,src:r.source}));
+    }else{
+      meta=await Store.get(cp('imports/')+id);if(!meta)throw new Error('missing');
+      rows=[];for(let k=0;k<(meta.parts||1);k++){const p=await Store.get(cp('import_rows/')+id+'_'+k);if(p&&p.rows)rows.push(...p.rows)}
+    }
+    rows.sort((a,b)=>normName(a.n).localeCompare(normName(b.n))||String(a.d).localeCompare(String(b.d)));
+    const docs={};
+    if(meta.legacy){for(const r of S.dtr)docs[r._id]=r}
+    else for(const d of await Store.query(cp('dtr'),[['import_id','==',id]]))docs[d._id]=d;
+    S.ui.impBatch={meta:{...meta,id},rows,docs};
+  }catch(e){console.warn(e);toast('Could not open this import.',true);S.ui.impOpen=null}
+  scheduleRender();
+}
+/* Current state of one imported day. */
+function ihState(b,r){
+  if(r.removed)return{k:'removed',t:'Removed',ok:false};
+  const cur=b.docs[r.e+'_'+r.d];
+  if(!cur)return{k:'gone',t:'Not in attendance anymore',ok:false};
+  if(b.meta.legacy){if(cur.import_id||String(cur.imported_at).slice(0,16)!==String(b.meta.at).slice(0,16)||cur.source!==b.meta.src)return{k:'changed',t:'Changed later',ok:false}}
+  else if(cur.import_id!==b.meta.id)return{k:'changed',t:'Changed by a later import or edit',ok:false};
+  if((cur.time_in||null)!==(r.i||null)||(cur.time_out||null)!==(r.o||null))return{k:'edited',t:'Times corrected after import',ok:true,cur};
+  return{k:'ok',t:'In attendance',ok:true,cur};
+}
+function ihGroups(b){
+  const g=new Map();
+  b.rows.forEach((r,i)=>{const key=b.meta.legacy?String(r.e):normName(r.n)+'|'+r.e;if(!g.has(key))g.set(key,{name:r.n,e:r.e,idx:[]});g.get(key).idx.push(i)});
+  return [...g.values()];
+}
+function ihGroupIdx(gi){const b=S.ui.impBatch;if(!b)return[];const g=ihGroups(b)[gi];return g?g.idx:[]}
+function pageImports(){
+  const u=S.ui;
+  if(u.impOpen)return ihBatchPage();
+  if(!u.impList&&!u.impLoading)loadImportList();
+  const list=u.impList||[],legacy=legacyImports();
+  let html=`<div class="row"><div><h1>Import history</h1><p class="sub">Every DTR import into ${h(curCo().name)}. Open one to see who each name in the file was matched to, and move days that went to the wrong employee.</p></div><span class="spacer"></span><button class="btn" data-act="ihReload">Refresh</button></div>`;
+  const tbl=(rows,empty)=>rows.length?`<div class="tablewrap"><table><thead><tr><th>Imported</th><th>By</th><th>Source</th><th class="n">Days</th><th class="n">Names</th><th class="n">Fixes</th><th></th></tr></thead><tbody>
+    ${rows.map(b=>`<tr class="click" data-act="ihOpen" data-id="${h(b.id)}"><td><b>${h(fmtStamp(b.at))}</b></td><td>${h(b.by?personName(b.by):'—')}</td><td>${h(IMP_SRC[b.src]||b.src||'')}${b.file?` · <span class="muted small">${h(b.file)}</span>`:''}</td><td class="n">${b.rows||0}</td><td class="n">${b.names||0}</td><td class="n">${b.fixes||0}</td><td><button class="btn sm">Open</button></td></tr>`).join('')}
+    </tbody></table></div>`:`<div class="empty">${empty}</div>`;
+  html+=`<div class="panel"><h2>Imports</h2>${u.impLoading&&!u.impList?'<div class="loading">Loading…</div>':tbl(list,'No imports recorded yet. The history starts with the next import.')}</div>`;
+  if(legacy.length)html+=`<div class="panel"><h2>Earlier imports in ${h(fmtMonth(S.period.ym))}</h2><p class="muted small">Imported before the history was kept, so the name written in the file isn’t known. Days are grouped by employee.</p>${tbl(legacy,'')}</div>`;
+  return html;
+}
+function ihBatchPage(){
+  const b=S.ui.impBatch;
+  if(!b)return `<div class="row"><button class="btn" data-act="ihBack">← Import history</button></div><div class="loading">Loading…</div>`;
+  const m=b.meta,canFix=can('importDtr')&&!S.readOnly;
+  const emps=[...S.employees].filter(e=>e.active!==false).sort((a,c)=>empName(a).localeCompare(empName(c)));
+  const empOpts=(skip)=>emps.filter(e=>String(e.id)!==String(skip)).map(e=>`<option value="${e.id}">${h(empName(e))}${e.department?' · '+h(e.department):''}</option>`).join('');
+  const groups=ihGroups(b);
+  let html=`<div class="row"><button class="btn" data-act="ihBack">← Import history</button><span class="spacer"></span></div>
+  <div class="panel"><h1 style="margin:0">Import of ${h(fmtStamp(m.at))}</h1><p class="sub" style="margin:4px 0 0">${h(IMP_SRC[m.src]||m.src||'')}${m.file?' · '+h(m.file):''}${m.by?' · by '+h(personName(m.by)):''} · ${b.rows.length} days · ${groups.length} ${m.legacy?'employees':'names'}</p>
+  <p class="muted small" style="margin:8px 0 0">${m.legacy?'Moving a day takes it away from this employee completely (this import may have replaced what they had that day). ':'Moving a day gives the times to the chosen employee and gives the first employee back what they had before this import. '}Days in an approved cut-off can’t be changed. Every fix can be undone from the Activity log.</p></div>`;
+  html+=groups.map((g,gi)=>{
+    const e=empById(g.e),sts=g.idx.map(i=>ihState(b,b.rows[i])),okN=sts.filter(s=>s.ok).length;
+    const head=`${m.legacy?'':`<b>“${h(g.name)}”</b> → `}<b>${h(e?empName(e):'Employee '+g.e)}</b>${e&&e.department?` <span class="muted small">${h(e.department)}</span>`:''} · ${g.idx.length} ${g.idx.length===1?'day':'days'}${okN<g.idx.length?` <span class="chip warn">${g.idx.length-okN} not movable</span>`:''}`;
+    const rows=g.idx.map((i,j)=>{const r=b.rows[i],s=sts[j];return `<tr><td>${h(fmtD(r.d))} <span class="muted small">${h(WD[dow(r.d)])}</span></td><td class="num">${h(r.i||'—')}</td><td class="num">${h(r.o||'—')}</td><td>${s.ok?`<span class="chip ${s.k==='ok'?'ok':'warn'}">${h(s.t)}</span>`:`<span class="chip">${h(s.t)}</span>`}${r.moved_from?` <span class="muted small">moved from ${h(empName(empById(r.moved_from)||{first_name:String(r.moved_from)}))}</span>`:''}</td>
+      <td style="white-space:nowrap">${canFix&&s.ok?`<select data-change="ihMoveRow" data-i="${i}" aria-label="Move this day to"><option value="">Move to…</option>${empOpts(r.e)}</select> <button class="btn sm" data-act="ihRemoveRow" data-i="${i}">Remove</button>`:''}</td></tr>`}).join('');
+    return `<details class="panel" style="padding:12px 16px"><summary style="cursor:pointer">${head}</summary>
+      ${canFix&&okN?`<div class="row" style="margin:10px 0"><label class="f" style="max-width:340px">Move all ${okN} ${okN===1?'day':'days'} to<select data-change="ihMoveGroup" data-g="${gi}"><option value="">Choose employee…</option>${empOpts(g.e)}</select></label><span class="spacer"></span><button class="btn danger sm" data-act="ihRemoveGroup" data-g="${gi}">Remove these days</button></div>`:''}
+      <div class="tablewrap"><table><thead><tr><th>Date</th><th>Time in</th><th>Time out</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  }).join('');
+  return html;
+}
+/* Gives the wrong employee back what they had before the import (or removes the day if they had nothing). */
+async function ihRestoreOld(jr,r,cur){
+  const path=cp('dtr/')+r.e+'_'+r.d;
+  if(r.a==='update'||r.a==='fill'){
+    await jr.update(path,{time_in:r.pi||null,time_out:r.po||null,source:r.ps||'manual',import_id:r.pid||null,import_name:r.pn||null,corrected:false,...(r.pr||{})},cur);
+  }else await jr.del(path,cur);
+}
+async function ihLockedFn(){
+  const cache={};
+  return async d=>{const k=cutoffFor(d).key;if(!(k in cache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);cache[k]=!!(doc&&doc.status==='APPROVED')}return cache[k]};
+}
+async function ihSaveBatch(b,fixed){
+  if(b.meta.legacy)return;
+  await saveImportRows(b.meta.id,b.rows);
+  await Store.update(cp('imports/')+b.meta.id,{fixes:(b.meta.fixes||0)+fixed,fixed_at:nowISO(),fixed_by:actor()});
+}
+async function ihMove(idxs,toEid){
+  const b=S.ui.impBatch,to=empById(toEid);if(!b||!to||!idxs.length)return;
+  const list=idxs.map(i=>[i,b.rows[i]]).filter(([i,r])=>String(r.e)!==String(toEid)&&ihState(b,r).ok);
+  if(!list.length){toast('Nothing to move.',true);return}
+  const from=empById(list[0][1].e);
+  if(!(await confirmDlg('Move these days?',`${list.length} ${list.length===1?'day':'days'}${b.meta.legacy?'':` named “${list[0][1].n}”`}\nfrom ${from?empName(from):'—'}\nto ${empName(to)}\n\n${b.meta.legacy?from?empName(from)+' loses these days completely.':'':(from?empName(from):'The first employee')+' gets back what they had before this import.'} The moved days go back to “For review”.`,'Move')))return;
+  const jr=journal(),locked=await ihLockedFn(),skipped=[];let moved=0;
+  toast(`Moving ${list.length} ${list.length===1?'day':'days'}…`);
+  for(const[i,r]of list){
+    try{
+      if(await locked(r.d)){skipped.push(`${fmtD(r.d)}: cut-off approved`);continue}
+      const fromPath=cp('dtr/')+r.e+'_'+r.d,toPath=cp('dtr/')+toEid+'_'+r.d;
+      const cur=await Store.get(fromPath);
+      const st=ihState({...b,docs:{...b.docs,[r.e+'_'+r.d]:cur}},r);
+      if(!st.ok){skipped.push(`${fmtD(r.d)}: ${st.t.toLowerCase()}`);continue}
+      const dest=await Store.get(toPath);
+      if(dest&&(dest.time_in||dest.time_out)){skipped.push(`${fmtD(r.d)}: ${empName(to)} already has time that day`);continue}
+      const fresh={review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null,ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,status_override:null};
+      const carry={time_in:cur.time_in||null,time_out:cur.time_out||null,source:cur.source||'upload',imported_at:cur.imported_at||nowISO(),import_id:b.meta.legacy?null:b.meta.id,import_name:b.meta.legacy?null:(r.n||''),corrected:!!cur.corrected};
+      if(dest)await jr.update(toPath,{...carry,...fresh},dest);
+      else await jr.set(toPath,{employee_id:toEid,work_date:r.d,...carry,...fresh,remarks:''},null);
+      await ihRestoreOld(jr,r,cur);
+      const before={pr:dest&&dest.source===NO_RECORD?{review_status:dest.review_status||'FOR REVIEW',absent_approval:dest.absent_approval||'PENDING',reviewed_by:dest.reviewed_by||null,reviewed_at:dest.reviewed_at||null}:null,a:dest?'update':'new',pi:dest?dest.time_in||null:null,po:dest?dest.time_out||null:null,ps:dest?dest.source||null:null,pid:dest?dest.import_id||null:null,pn:dest?dest.import_name||null:null};
+      b.rows[i]={...r,...before,a:b.meta.legacy?'legacy':before.a,e:toEid,moved_from:r.e,moved_at:nowISO(),moved_by:actor(),i:carry.time_in,o:carry.time_out};
+      moved++;
+    }catch(e){console.warn(e);skipped.push(`${fmtD(r.d)}: could not save`);if(errCode(e)==='invalid_argument'){writeError(e);break}}
+  }
+  if(moved){
+    try{await ihSaveBatch(b,moved)}catch(e){console.warn(e)}
+    logAction('IMPORT_FIX','dtr',null,`${moved} imported ${moved===1?'day':'days'}${b.meta.legacy?'':` (“${list[0][1].n}”)`} moved from ${from?empName(from):'?'} to ${empName(to)} — import of ${fmtStamp(b.meta.at)}`,jr);
+  }
+  toast(skipped.length?`${moved} moved. Not moved: ${skipped.slice(0,4).join('; ')}${skipped.length>4?` and ${skipped.length-4} more`:''}`:`${moved} ${moved===1?'day':'days'} moved to ${empName(to)}`,!!skipped.length);
+  if(b.meta.legacy)await sleep(500);
+  await ihOpen(b.meta.id);
+}
+async function ihRemove(idxs){
+  const b=S.ui.impBatch;if(!b||!idxs.length)return;
+  const list=idxs.map(i=>[i,b.rows[i]]).filter(([i,r])=>ihState(b,r).ok);
+  if(!list.length){toast('Nothing to remove.',true);return}
+  const who=empById(list[0][1].e);
+  if(!(await confirmDlg('Remove these days?',`${list.length} imported ${list.length===1?'day':'days'} of ${who?empName(who):'this employee'} will be taken out of the attendance.${b.meta.legacy?'':'\nIf the employee had a record before this import, it comes back.'}`,'Remove',true)))return;
+  const jr=journal(),locked=await ihLockedFn(),skipped=[];let n=0;
+  for(const[i,r]of list){
+    try{
+      if(await locked(r.d)){skipped.push(`${fmtD(r.d)}: cut-off approved`);continue}
+      const cur=await Store.get(cp('dtr/')+r.e+'_'+r.d);
+      const st=ihState({...b,docs:{...b.docs,[r.e+'_'+r.d]:cur}},r);
+      if(!st.ok){skipped.push(`${fmtD(r.d)}: ${st.t.toLowerCase()}`);continue}
+      await ihRestoreOld(jr,r,cur);
+      b.rows[i]={...r,removed:true,removed_at:nowISO(),removed_by:actor()};n++;
+    }catch(e){console.warn(e);skipped.push(`${fmtD(r.d)}: could not save`);if(errCode(e)==='invalid_argument'){writeError(e);break}}
+  }
+  if(n){try{await ihSaveBatch(b,n)}catch(e){console.warn(e)}logAction('IMPORT_FIX','dtr',who?who.id:null,`${n} imported ${n===1?'day':'days'} of ${who?empName(who):'?'} removed — import of ${fmtStamp(b.meta.at)}`,jr)}
+  toast(skipped.length?`${n} removed. Not removed: ${skipped.slice(0,4).join('; ')}`:`${n} ${n===1?'day':'days'} removed`,!!skipped.length);
+  await ihOpen(b.meta.id);
+}
 function importState(x,ex){
   if(!ex)return 'new';
   if(ex.source===NO_RECORD&&!ex.time_in&&!ex.time_out)return (x.time_in||x.time_out)?'fill':'same';
@@ -2212,6 +2527,7 @@ function tableToObjects(grid){
 }
 async function handleFile(input){
   const f=input.files&&input.files[0];if(!f)return;
+  S.ui.importFile=f.name;
   try{
     let objs;
     if(/\.(xlsx|xls)$/i.test(f.name)){
@@ -2232,6 +2548,7 @@ async function doImport(mode){
   const isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
   const loaded=new Map(S.dtr.map(r=>[r._id,r]));
   let saved=0,failed=0,locked=0,dup=0,i=0,lastErr=null;const done=new Set(),jr=journal();
+  const batchId='imp_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),hist=[];
   const src=S.ui.importTab==='portal'?'portal':S.ui.importTab==='paste'?'paste':'upload', co=curCo().short;
   for(const x of rows){
     i++;
@@ -2243,14 +2560,19 @@ async function doImport(mode){
       const st=importState(x,existing);
       if(st==='same'){dup++;done.add(x);continue}
       if(st==='diff'&&x.dup!=='diff'){x.dup='diff';x.sel=false;x.exIn=existing.time_in||null;x.exOut=existing.time_out||null;continue} // changed since the preview: leave it for HR to decide
+      const tag={import_id:batchId,import_name:String(x.src||x.name||'')};
       if(existing){
-        const patch=st==='fill'?{time_in:existing.time_in||x.time_in,time_out:existing.time_out||x.time_out,source:src,imported_at:nowISO()}
-          :{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO(),corrected:false};
+        const patch=st==='fill'?{time_in:existing.time_in||x.time_in,time_out:existing.time_out||x.time_out,source:src,imported_at:nowISO(),...tag}
+          :{time_in:x.time_in,time_out:x.time_out,source:src,imported_at:nowISO(),corrected:false,...tag};
         if(existing.source===NO_RECORD)Object.assign(patch,{review_status:'FOR REVIEW',absent_approval:'PENDING',reviewed_by:null,reviewed_at:null});
         await jr.update(cp('dtr/')+id,patch,existing);
+        hist.push({n:tag.import_name,e:x.employee_id,d:x.date,i:patch.time_in||null,o:patch.time_out||null,a:st==='fill'?'fill':'update',pi:existing.time_in||null,po:existing.time_out||null,ps:existing.source||null,pid:existing.import_id||null,pn:existing.import_name||null,...(existing.source===NO_RECORD?{pr:{review_status:existing.review_status||'FOR REVIEW',absent_approval:existing.absent_approval||'PENDING',reviewed_by:existing.reviewed_by||null,reviewed_at:existing.reviewed_at||null}}:{})});
       }
-      else await jr.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
-        ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
+      else{
+        await jr.set(cp('dtr/')+id,{employee_id:x.employee_id,work_date:x.date,time_in:x.time_in,time_out:x.time_out,status_override:null,source:src,imported_at:nowISO(),
+          ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null,...tag},null);
+        hist.push({n:tag.import_name,e:x.employee_id,d:x.date,i:x.time_in||null,o:x.time_out||null,a:'new'});
+      }
       saved++;done.add(x);
     }catch(e){failed++;lastErr=e;if(errCode(e)==='invalid_argument'||errCode(e)==='quota_exceeded')break}
     if(i%4===0||i===rows.length){S.ui.importProgress=i/rows.length;const bar=document.querySelector('.progress i');if(bar)bar.style.width=Math.round(S.ui.importProgress*100)+'%'}
@@ -2259,6 +2581,12 @@ async function doImport(mode){
   const remaining=all.filter(x=>!done.has(x));remaining._checked=true;remaining._dupes=(all._dupes||0)+dup;
   S.ui.importBusy=false;S.ui.importRows=remaining.length?remaining:null;S.ui.importResult={saved,failed,locked,dup,left:remaining.length,co};
   logAction('IMPORT','dtr',null,`${saved} rows imported into ${co} (${src}, ${mode==='all'?'all matched':'selected rows'}); ${dup} already imported, skipped; ${locked} locked; ${remaining.length} not imported; ${failed} failed`,jr);
+  if(hist.length){
+    const file=src==='upload'?(S.ui.importFile||'File'):(src==='paste'?'Pasted text':'Portal sync');
+    try{await saveImportRows(batchId,hist);await Store.set(cp('imports/')+batchId,{id:batchId,at:nowISO(),by:actor(),src,file,co,saved,dup,locked,failed,rows:hist.length,names:new Set(hist.map(r=>normName(r.n))).size,parts:Math.ceil(hist.length/IMP_CHUNK),fixes:0})}
+    catch(e){console.warn('import history',e)}
+    S.ui.impList=null;
+  }
   if(lastErr)writeError(lastErr);
   scheduleRender();
 }
@@ -2383,7 +2711,7 @@ function pagePayroll(){
   ${items.map(x=>{const r=rowOf(x);return`<tr class="click" data-act="payslip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td class="stick"><b>${h(empName(x.e))}</b>${!x.hasRate?' <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' <span class="chip acc" title="Included in BIR Purposes">BIR</span>':''}${tk(x).pendingOt?' <span class="chip warn" title="Pending OT">OT?</span>':''}${(tab==='M'?(x.k1.edited||x.k2.edited):r.edited)?' <span class="chip acc" title="Amounts edited manually">Edited</span>':''}${r.net<0?' <span class="chip bad">Negative net</span>':''}</td><td>${h(x.e.department)}</td>
   ${cols.map(([k,,isNeg])=>`<td class="n">${k==='net'?'<b>'+amt(r[k])+'</b>':(isNeg?neg(r[k]):amt(r[k]))}</td>`).join('')}</tr>`}).join('')}
   </tbody><tfoot><tr><td></td><td class="stick">Total</td><td></td>${cols.map(c=>`<td class="n">${amt(tot[c[0]])}</td>`).join('')}</tr></tfoot></table></div>
-  <p class="muted small">Monthly-paid staff receive half the monthly rate each cut-off (staff set to “Once a month” receive the whole month on one cut-off); daily-paid staff are paid for days present. Holiday pay: unworked regular holidays are paid to daily-paid staff; work on a regular holiday adds ${Math.round(S.settings.hol_rh_prem*100)}%, special days ${Math.round(S.settings.hol_snw_prem*100)}%, rest days ${Math.round(S.settings.rd_prem*100)}% (monthly-paid: ${Math.round((1+Number(S.settings.rd_prem))*100)}%). SSS, PhilHealth, Pag-IBIG and withholding tax are computed on the whole month and deducted on the 2nd cut-off, only for employees in BIR Purposes.</p>`;
+  <p class="muted small">Monthly-paid staff receive half the monthly rate each cut-off (staff set to “Once a month” receive the whole month on one cut-off); daily-paid staff are paid for days present. Holiday pay (DOLE, work from ${h(fmtDY(String(S.settings.dole_from||'2026-10-11')))}): unworked regular holiday 100% for daily-paid (monthly-paid: already in the salary); work for the first 8 hours: regular holiday 200%, regular holiday on a rest day 260%, special day 130%, special day on a rest day 150%, rest day 130%; overtime is 130% of that day’s rate (260%, 338%, 169%, 195%, 169%); night differential is 10% of that day’s hourly rate. Premiums follow the hours actually worked, up to 8. SSS, PhilHealth, Pag-IBIG and withholding tax are computed on the whole month and deducted on the 2nd cut-off, only for employees in BIR Purposes.</p>`;
   return html;
 }
 function pageBir(items){
@@ -2433,7 +2761,7 @@ function payslipHtml(x,tab){
     <div class="stat"><b style="font-size:18px">${fmtMin(t.ot)}</b><span>Approved OT</span></div>
   </div>
   <table><thead><tr><th>Earnings</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line(e.pay_basis==='Daily'?`Salary (${t.present} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
+  ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
   ${line('Company advances',r.adv)}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
@@ -2638,9 +2966,10 @@ function pageSettings(){
     <label class="f">Rest day<select name="rest_day" ${dis}>${WD.map((w,i)=>`<option value="${i}" ${Number(st.rest_day)===i?'selected':''}>${w}</option>`).join('')}</select></label>
     ${n('divisor','Working-days divisor',1)}${n('hours_per_day','Hours per day',1)}${t('nd_start','Night diff starts')}${t('nd_end','Night diff ends')}
   </div><h2 style="margin-top:18px">Rates</h2><div class="grid">
-    ${n('ot_reg','OT regular ×')}${n('ot_snw','OT rest day / special ×')}${n('ot_rh','OT regular holiday ×')}${n('nd_pct','Night diff rate (0.10 = 10%)')}
+    ${n('ot_reg','OT regular ×')}${n('ot_snw','OT rest day / special (× that day’s rate)')}${n('ot_rh','OT regular holiday (× holiday rate)')}${n('nd_pct','Night diff rate (0.10 = 10%)')}
     ${n('nd_base_reg','ND basis regular ×')}${n('nd_base_snw','ND basis RD/special ×')}${n('nd_base_rh','ND basis reg. holiday ×')}
-    ${n('hol_rh_prem','Regular holiday work premium (1.0 = +100%)')}${n('hol_snw_prem','Special day work premium')}${n('rd_prem','Rest day work premium')}
+    ${n('hol_rh_prem','Regular holiday work premium (1.0 = +100%)')}${n('hol_snw_prem','Special day work premium')}${n('rd_prem','Rest day work premium')}${n('hol_snw_rd_prem','Special day on a rest day premium (0.50 = +50%)')}
+    <label class="f">DOLE holiday rules from (work date)<input name="dole_from" type="date" value="${h(st.dole_from||'2026-10-11')}" ${dis}></label>
   </div><h2 style="margin-top:18px">Government contributions</h2><p class="muted small">From the payroll file's SSS table: MSC in ₱500 bands; regular SS up to the cap, the excess goes to the provident fund (MPF).</p><div class="grid">
     ${n('sss_ee_rate','SSS employee rate')}${n('sss_er_rate','SSS employer rate')}${n('sss_reg_cap','SSS regular MSC cap')}${n('sss_min_msc','SSS minimum MSC')}${n('sss_max_msc','SSS maximum MSC')}
     ${n('ec_threshold','EC: MSC threshold')}${n('ec_low','EC below threshold (₱)')}${n('ec_high','EC at/above threshold (₱)')}
@@ -2700,7 +3029,7 @@ function pageUsers(){
     <label class="f">Full name<input name="full_name" required value="${h(ed?ed.full_name||'':'')}"></label>
     <label class="f">Role<select name="role" ${ed&&ed.builtin?'disabled':''}>${opt([['DEPT_HEAD','Department head'],['HR','HR'],['PAYROLL','Payroll'],['ADMIN','Admin']],ed?ed.role:'DEPT_HEAD')}</select></label>
     <label class="f">Department (heads only)<select name="department">${opt([['','Not applicable'],...[...new Set([...DEPARTMENTS,...(ed&&ed.department?[ed.department]:[])])].map(d=>[d,d])],ed?ed.department:'')}</select></label>
-    <label class="f">${ed?'New password (leave blank to keep)':'Password'}<input name="password" type="password" minlength="8" autocomplete="new-password" ${ed?'':'required'}></label>
+    ${fbMode()?loginField(ed):`<label class="f">${ed?'New password (leave blank to keep)':'Password'}<input name="password" type="password" minlength="8" autocomplete="new-password" ${ed?'':'required'}></label>`}
     <label class="f">Status<select name="active" ${ed&&ed.builtin?'disabled':''}>${opt([['YES','Active'],['NO','Disabled']],ed&&ed.active===false?'NO':'YES')}</select></label>
   </div>
   <fieldset class="co-pick"><legend>Companies this account can open</legend>
@@ -2709,12 +3038,13 @@ function pageUsers(){
   </fieldset>
   ${ed&&ed.builtin?'':`<div style="margin-top:14px"><label class="f" style="max-width:320px">Access<select name="access_mode" data-change="accessMode"><option value="role" ${ed&&ed.custom?'':'selected'}>Same as role (set under “Access by role”)</option><option value="custom" ${ed&&ed.custom?'selected':''}>Custom for this person</option></select></label>
     <div id="customAccess" style="margin-top:10px;${ed&&ed.custom?'':'display:none'}">${permChecklist('p_',ed&&ed.custom&&ed.perms?{...roleDefaults(ed.role),...ed.perms}:roleAccess(ed?ed.role:'DEPT_HEAD'))}</div></div>`}
-  <p class="muted small">Passwords need at least 8 characters with a letter and a number. They are stored as salted hashes only.</p>
+  <p class="muted small">${fbMode()?'Sign-in uses Firebase logins. Passwords are kept by Firebase, never in the payroll database.':'Passwords need at least 8 characters with a letter and a number. They are stored as salted hashes only.'}</p>
   <div class="row">${ed&&!ed.builtin&&!(S.account&&ed.email===S.account.email)?`<button type="button" class="btn danger" data-act="deleteAcct" data-id="${h(ed.email)}">Delete account</button>`:''}${ed&&ed.builtin?'<span class="muted small">The main admin account can’t be deleted.</span>':''}${ed&&!ed.builtin&&S.account&&ed.email===S.account.email?'<span class="muted small">You can’t delete the account you’re signed in with.</span>':''}<span class="spacer"></span><button type="button" class="btn" data-act="cancelAcct">Cancel</button><button class="btn primary">Save account</button></div></form>`;
   if(mine.length>1)html+=`<div class="row" style="margin:0 0 10px"><label class="f" style="max-width:340px">Show accounts for<select data-change="acctCo"><option value="">All my companies</option>${mine.map(id=>`<option value="${id}" ${fco===id?'selected':''}>${h(coById(id).name)}</option>`).join('')}</select></label></div>`;
-  html+=`<div class="tablewrap"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Department</th><th>Companies</th><th>Access</th><th>Status</th><th>Updated</th></tr></thead><tbody>
-  ${accts.map(a=>`<tr class="click" data-act="editAcct" data-id="${h(a.email)}"><td><b>${h(a.email)}</b>${a.builtin?' <span class="chip acc">Main admin</span>':''}${S.account&&a.email===S.account.email?' <span class="chip">You</span>':''}</td><td>${h(a.full_name||'')}</td><td>${h(ROLES[a.role]||a.role)}</td><td>${h(a.department||'')}</td><td>${h(coNames(companiesOf(a)))}</td><td>${a.role==='ADMIN'?'<span class="chip acc">Full</span>':(a.custom?'<span class="chip warn">Custom</span>':'<span class="muted small">Role</span>')}</td><td>${a.active===false?'<span class="chip bad">Disabled</span>':'<span class="chip ok">Active</span>'}</td><td>${h(a.updated_at?fmtStamp(a.updated_at):'—')}</td></tr>`).join('')}
+  html+=`<div class="tablewrap"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Department</th><th>Companies</th><th>Access</th><th>Status</th>${fbMode()?'<th>Sign-in</th>':''}<th>Updated</th></tr></thead><tbody>
+  ${accts.map(a=>`<tr class="click" data-act="editAcct" data-id="${h(a.email)}"><td><b>${h(a.email)}</b>${a.builtin?' <span class="chip acc">Main admin</span>':''}${S.account&&a.email===S.account.email?' <span class="chip">You</span>':''}</td><td>${h(a.full_name||'')}</td><td>${h(ROLES[a.role]||a.role)}</td><td>${h(a.department||'')}</td><td>${h(coNames(companiesOf(a)))}</td><td>${a.role==='ADMIN'?'<span class="chip acc">Full</span>':(a.custom?'<span class="chip warn">Custom</span>':'<span class="muted small">Role</span>')}</td><td>${a.active===false?'<span class="chip bad">Disabled</span>':'<span class="chip ok">Active</span>'}</td>${fbMode()?`<td>${loginCell(a)}</td>`:''}<td>${h(a.updated_at?fmtStamp(a.updated_at):'—')}</td></tr>`).join('')}
   </tbody></table></div>`;
+  html+=fbPanels();
   if(getCfg())html+=`<div class="panel" style="margin-top:16px"><h2>Connect your team</h2><p class="muted small">Send this link to HR, Payroll and department heads. Opening it connects their browser to your online database automatically; they then sign in with their own account. Keep it private.</p><div class="row"><input readonly value="${h(shareLink())}" style="flex:1;min-width:240px" onclick="this.select()"><button class="btn primary" data-act="copyLink">Copy link</button></div></div>`;
   html+=accessMatrix();
   const hist=(S.accountDocs||[]).filter(d=>d.deleted||d.moved_to).sort((a,b)=>String(b.deleted_at||b.moved_at||'').localeCompare(String(a.deleted_at||a.moved_at||'')));
@@ -2739,6 +3069,7 @@ async function saveAcct(form){
   const old=(S.accountDocs||[]).find(d=>d.email===email);
   const taken=allAccounts().some(a=>a.email===email)||!!old||(email===BOOT_ACCOUNT.email&&oldEmail!==BOOT_ACCOUNT.email);
   if((!ed||changed)&&taken){toast(old&&old.deleted?'This email belongs to a deleted account. Restore it under Account history instead.':(old&&old.moved_to?'This email was used before and is kept for the activity trail. Use a different email.':'An account with this email already exists.'),true);return}
+  if(fbMode()&&changed&&S.account&&oldEmail===S.account.email){toast('You can’t change the email you are signed in with. Ask another administrator, or add a new account with the new email.',true);return}
   if(changed&&!(await confirmDlg('Change sign-in email?',`From ${oldEmail}\nTo ${email}\n\n${S.account&&oldEmail===S.account.email?'You':'This person'} will sign in with the new email from now on. The old email stops working, but its history stays in the Activity log.`,'Change email')))return;
   const roleV=ed&&ed.builtin?'ADMIN':fd.get('role'), dep=fd.get('department')||null, pw=fd.get('password')||'';
   if(roleV==='DEPT_HEAD'&&!dep){toast('Choose the department this head manages.',true);return}
@@ -2749,13 +3080,18 @@ async function saveAcct(form){
     cos=ALL_CO.filter(id=>mine.includes(id)?fd.get('co_'+id)==='on':prev.includes(id));
     if(!cos.length){toast('Tick at least one company this account can open.',true);return}
   }
-  if(pw&&!pwOk(pw)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
-  if(!ed&&!pw){toast('Set a password for the new account.',true);return}
+  if(!fbMode()&&pw&&!pwOk(pw)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
+  if(!fbMode()&&!ed&&!pw){toast('Set a password for the new account.',true);return}
   const doc={email,full_name:String(fd.get('full_name')||'').trim(),role:roleV,department:roleV==='DEPT_HEAD'?dep:null,
     active:ed&&ed.builtin?true:fd.get('active')!=='NO',main:!!(ed&&ed.builtin),companies:cos,updated_at:nowISO()};
   if(!(ed&&ed.builtin)&&roleV!=='ADMIN'&&fd.get('access_mode')==='custom'){const m={};for(const[k]of PERMS)m[k]=fd.get('p_'+k)==='on';doc.custom=true;doc.perms=withDeps(m)}
   else{doc.custom=false;doc.perms=null}
-  if(pw)Object.assign(doc,await makeHash(pw));else{doc.salt=ed.salt;doc.iter=ed.iter;doc.hash=ed.hash}
+  if(fbMode()){
+    // Firebase logins: keep the link of an unchanged account; a new account or a new email gets its own login below.
+    if(ed&&!changed){doc.uid=ed.uid||null;doc.must_change=!!ed.must_change;if(ed.linked_at)doc.linked_at=ed.linked_at;if(!ed.uid&&ed.hash){doc.salt=ed.salt;doc.iter=ed.iter;doc.hash=ed.hash}}
+    else doc.uid=null;
+  }
+  else if(pw)Object.assign(doc,await makeHash(pw));else{doc.salt=ed.salt;doc.iter=ed.iter;doc.hash=ed.hash}
   try{
     await Store.set('accounts/'+email,doc);
     if(changed){
@@ -2769,6 +3105,7 @@ async function saveAcct(form){
     }
     logAction(ed?'UPDATE_USER':'CREATE_USER','account',email,`${ROLES[roleV]}${doc.department?' · '+doc.department:''}${pw?' · password set':''}${doc.active?'':' · disabled'} · companies: ${coNames(cos)}${doc.custom?' · custom access: '+PERMS.filter(p=>doc.perms[p[0]]).map(p=>p[1]).join(', '):' · access same as role'}`);
     S.ui.acctForm=false;S.ui.acctEdit=null;toast(changed?'Email changed and account saved':'Account saved');scheduleRender();
+    if(fbMode()&&(!ed||changed))setTimeout(()=>makeLogin(email,true),400);
   }catch(e){acctWriteError(e)}
 }
 async function deleteAcct(email){
@@ -2817,8 +3154,106 @@ async function restoreAcct(email){
   catch(e){acctWriteError(e)}
 }
 function acctWriteError(e){
+  if(fbMode()&&errCode(e)==='invalid_argument'){toast('Refused by the database rules. Only an active administrator on the new sign-in can change accounts.',true);return}
   if(errCode(e)==='invalid_argument')toast('Accounts can only be saved by the owner of this page (or an Editor). Open it from the owner’s Claude account.',true);
   else writeError(e);
+}
+/* ---------- Firebase logins (admin) ---------- */
+function restoreAcctDoc(path,doc){
+  return Store.get(path).catch(()=>null).then(cur=>{
+    if(!cur||!cur.uid)return doc;
+    const d=plainAcct(doc);d.uid=cur.uid;d.must_change=!!cur.must_change;if(cur.linked_at)d.linked_at=cur.linked_at;return d;
+  });
+}
+function creatorAuth(){
+  if(!creatorApp){creatorApp=firebase.initializeApp(getCfg(),'pl-login-maker');try{creatorApp.auth().setPersistence(firebase.auth.Auth.Persistence.NONE).catch(()=>{})}catch(e){}}
+  return creatorApp.auth();
+}
+function tempPassword(){const L='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz',D='23456789',r=crypto.getRandomValues(new Uint32Array(11));let s='';for(let i=0;i<11;i++)s+=i<8?L[r[i]%L.length]:D[r[i]%D.length];return s.slice(0,4)+'-'+s.slice(4,8)+'-'+s.slice(8)}
+const loginState=a=>!a.uid?'none':(a.must_change?'temp':'ok');
+function loginCell(a){const s=loginState(a);return s==='ok'?'<span class="chip ok">New sign-in</span>':(s==='temp'?'<span class="chip warn">Temporary password</span>':'<span class="chip bad">Old sign-in</span>')}
+function loginField(ed){
+  const st='display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted);font-weight:600';
+  if(!ed)return `<div style="${st}">Sign-in<span class="muted small" style="font-weight:400">A temporary password is made when you save. Give it to the person — they choose their own password at their first sign-in.</span></div>`;
+  const s=loginState(ed),id=h(ed.email);
+  return `<div style="${st}">Sign-in<span>${loginCell(ed)}</span><span class="row" style="gap:6px">${s==='none'?`<button type="button" class="btn sm primary" data-act="makeLogin" data-id="${id}">Make temporary password</button>`:`<button type="button" class="btn sm" data-act="resetLogin" data-id="${id}">New temporary password</button><button type="button" class="btn sm" data-act="sendReset" data-id="${id}">Send reset email</button>`}</span></div>`;
+}
+async function makeLogin(email,skipAsk){
+  if(!fbMode()||role()!=='ADMIN'||S.viewAs)return;
+  email=acctId(email);
+  let cur=null;try{cur=await Store.get('accounts/'+email)}catch(e){}
+  if(!cur&&email===BOOT_ACCOUNT.email)cur={...BOOT_ACCOUNT};
+  if(!cur||cur.deleted||cur.moved_to){toast('Save the account first.',true);return}
+  if(cur.uid&&!skipAsk&&!(await confirmDlg('Replace this login?',`${email} already has a login. Continue only if you deleted it in the Firebase console first (Authentication → Users).`,'Continue')))return;
+  const pw=tempPassword();let uid=null;
+  try{const c=await creatorAuth().createUserWithEmailAndPassword(email,pw);uid=c.user.uid;try{await creatorAuth().signOut()}catch(e){}}
+  catch(e){
+    if(/email-already-in-use/.test(String(e.code))){existingLoginHelp(email);return}
+    toast('Could not make the login ('+(e.code||e.message)+').',true);return;
+  }
+  try{
+    const boot=email===BOOT_ACCOUNT.email?{role:'ADMIN',main:true,companies:ALL_CO.slice(),active:true,department:null,full_name:cur.full_name||BOOT_ACCOUNT.full_name}:{};
+    await Store.set('accounts/'+email,{...plainAcct(cur),...boot,email,uid,must_change:true,login_made_at:nowISO(),login_made_by:actor(),updated_at:nowISO()});
+  }catch(e){acctWriteError(e);return}
+  logAction('CREATE_LOGIN','account',email,'Temporary password made');
+  openDlg('Temporary password',`<p style="margin-top:0">Give this to <b>${h(cur.full_name||email)}</b>. They sign in with it once, then choose their own password.</p>
+    <div class="panel" style="text-align:center"><div class="muted small">${h(email)}</div><div id="tempPw" class="num" style="font-size:22px;font-weight:800;letter-spacing:1px;margin-top:6px;user-select:all">${h(pw)}</div></div>
+    <p class="muted small">This password is shown only now. If it gets lost, make a new one.</p>`,`<button class="btn" data-act="copyTemp">Copy</button><button class="btn primary" data-act="closeDlg">Done</button>`);
+}
+function existingLoginHelp(email){
+  openDlg('This email already has a login',`<p style="margin-top:0"><b>${h(email)}</b> already has a Firebase login (for example from the Cash Tracker, or one made before).</p>
+   <ol class="small" style="padding-left:18px;line-height:1.7">
+    <li><b>Keep that login and password:</b> ask the person to sign in to the payroll with it. A request then appears under <b>Login requests</b> on this page — approve it.</li>
+    <li><b>Give a new temporary password instead:</b> Firebase console → <b>Authentication → Users</b> → find ${h(email)} → ⋮ → <b>Delete account</b>. Then press <b>Make temporary password</b> again. If this email is also used for the Cash Tracker, its Cash Tracker password is replaced too.</li>
+   </ol>`,`<button class="btn primary" data-act="closeDlg">OK</button>`);
+}
+function resetLogin(email){
+  openDlg('New temporary password',`<p style="margin-top:0">Firebase keeps one login per email, so the current login of <b>${h(email)}</b> has to be removed first.</p>
+   <ol class="small" style="padding-left:18px;line-height:1.7"><li>Open the Firebase console → <b>Authentication → Users</b>.</li><li>Find <b>${h(email)}</b> → ⋮ → <b>Delete account</b>.</li><li>Come back here and press <b>Make temporary password</b>.</li></ol>
+   <p class="muted small">If the person can open mail at this address, <b>Send reset email</b> is simpler: they set a new password from the link.</p>`,
+   `<button class="btn" data-act="closeDlg">Cancel</button><button class="btn primary" data-act="makeLogin" data-id="${h(email)}" data-skip="1">Make temporary password</button>`);
+}
+async function sendReset(email){
+  if(!(await confirmDlg('Send a reset email?',`A password reset link will be sent to ${email}. This only helps if the person can open mail at this address.`,'Send')))return;
+  try{await AUTH.sendPasswordResetEmail(email);logAction('RESET_EMAIL','account',email,'Password reset email sent');toast('Reset email sent')}catch(e){toast('Could not send ('+(e.code||e.message)+').',true)}
+}
+async function approveLink(uid){
+  const r=(S.linkReqs||[]).find(x=>x._id===uid);if(!r)return;
+  const email=acctId(r.email);let cur=null;try{cur=await Store.get('accounts/'+email)}catch(e){}
+  if(!cur&&email===BOOT_ACCOUNT.email)cur={...BOOT_ACCOUNT};
+  if(!cur||cur.deleted||cur.moved_to){toast(`No payroll account uses ${email}. Add the account first, then approve.`,true);return}
+  if(!(await confirmDlg('Approve this login?',`${cur.full_name||email} (${email}) will sign in to the payroll with the password they already use for this Firebase login.${cur.uid?'\n\nThis replaces the login linked now.':''}\n\nApprove only if this person asked for it.`,'Approve')))return;
+  try{await linkAccount({...cur,email},uid,{linked_by:actor()});await Store.del('pay_link_requests/'+uid)}catch(e){acctWriteError(e);return}
+  logAction('LINK_LOGIN','account',email,'Existing Firebase login approved');toast('Login approved');
+}
+async function rejectLink(uid){
+  if(!(await confirmDlg('Remove this request?','The person will not get access with this login.','Remove',true)))return;
+  try{await Store.del('pay_link_requests/'+uid);toast('Request removed')}catch(e){acctWriteError(e)}
+}
+async function clearHashes(){
+  if(!(await confirmDlg('Remove old passwords?','The old passwords kept in the database are deleted. Anyone still on the old sign-in can’t sign in until you make a temporary password for them.','Remove',true)))return;
+  let n=0;
+  try{for(const[id,d]of await Store.getAll('accounts')){if(d.hash||d.salt||d.iter){await Store.set('accounts/'+id,plainAcct(d));n++}}}catch(e){acctWriteError(e);return}
+  logAction('CLEAR_OLD_PASSWORDS','account',null,`${n} old password hashes removed`);toast(`${n} old passwords removed`);
+}
+function fbPanels(){
+  if(!fbMode()||role()!=='ADMIN'||S.viewAs)return'';
+  const all=allAccounts(),act=all.filter(a=>a.active!==false);
+  const none=act.filter(a=>!a.uid),temp=act.filter(a=>a.uid&&a.must_change),ok=act.filter(a=>a.uid&&!a.must_change);
+  const hashes=(S.accountDocs||[]).filter(d=>d.has_hash).length;
+  const reqs=S.linkReqs||[];
+  let html='';
+  if(reqs.length)html+=`<div class="panel" style="margin-top:16px"><h2>Login requests · ${reqs.length}</h2><p class="muted small">These people signed in with a Firebase login that isn’t linked to their payroll account yet (for example the login they use for the Cash Tracker). Approve only people you expect.</p>
+    <div class="tablewrap"><table><thead><tr><th>Email</th><th>Payroll account</th><th>Requested</th><th></th></tr></thead><tbody>
+    ${reqs.map(r=>{const a=all.find(x=>x.email===acctId(r.email));return`<tr><td><b>${h(r.email)}</b></td><td>${a?h(a.full_name||a.email)+' · '+h(ROLES[a.role]||a.role):'<span class="chip bad">No payroll account</span>'}</td><td>${h(r.requested_at?fmtStamp(r.requested_at):'—')}</td><td style="white-space:nowrap"><button class="btn sm primary" data-act="approveLink" data-id="${h(r._id)}" ${a?'':'disabled'}>Approve</button> <button class="btn sm" data-act="rejectLink" data-id="${h(r._id)}">Remove</button></td></tr>`}).join('')}
+    </tbody></table></div></div>`;
+  const ready=!none.length&&!hashes;
+  html+=`<div class="panel" style="margin-top:16px"><h2>New sign-in (Firebase)</h2>
+    <p class="muted small">Everyone needs a new login before the database is locked. Make a temporary password for each person still on the old sign-in; they choose their own password at their first sign-in.</p>
+    <div class="row" style="gap:22px;flex-wrap:wrap"><div><b>${ok.length}</b> <span class="muted small">on the new sign-in</span></div><div><b>${temp.length}</b> <span class="muted small">temporary password not changed yet</span></div><div><b>${none.length}</b> <span class="muted small">still on the old sign-in</span></div><div><b>${hashes}</b> <span class="muted small">old passwords stored</span></div></div>
+    ${none.length?`<div class="tablewrap" style="margin-top:10px"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th></th></tr></thead><tbody>${none.map(a=>`<tr><td><b>${h(a.email)}</b></td><td>${h(a.full_name||'')}</td><td>${h(ROLES[a.role]||a.role)}</td><td><button class="btn sm primary" data-act="makeLogin" data-id="${h(a.email)}">Make temporary password</button></td></tr>`).join('')}</tbody></table></div>`:''}
+    <div class="row" style="margin-top:10px">${hashes?'<button class="btn" data-act="clearHashes">Remove old passwords</button>':''}<span class="spacer"></span>${ready?'<span class="chip ok">Ready — publish the new Firestore rules</span>':'<span class="muted small">Publish the new Firestore rules only when this shows Ready.</span>'}</div></div>`;
+  return html;
 }
 function changePwDialog(){
   openDlg('Change password',`<form data-form="pw" class="grid" style="grid-template-columns:1fr">
@@ -2832,6 +3267,14 @@ async function savePw(form){
   const fd=new FormData(form),cur=fd.get('cur'),next=fd.get('next');
   if(next!==fd.get('confirm')){toast('The new passwords don’t match.',true);return}
   if(!pwOk(next)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
+  if(fbMode()){
+    if(S.legacy){toast('Ask the administrator for your new login first.',true);return}
+    const u=AUTH.currentUser;if(!u){signOut('Please sign in again.');return}
+    try{await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email,cur))}catch(e){toast(/too-many/.test(String(e.code))?'Too many attempts. Try again later.':'Current password is incorrect.',true);return}
+    try{await u.updatePassword(next)}catch(e){toast('Could not change the password ('+(e.code||e.message)+').',true);return}
+    try{await Store.update('accounts/'+acctId(S.account.email),{must_change:false,pw_changed_at:nowISO()})}catch(e){}
+    logAction('CHANGE_PASSWORD','account',S.account.email,'');closeDlg();toast('Password changed');return;
+  }
   const a=await findAccount(S.account.email);
   if(!a||!ctEq(await pbkdf2(cur,a.salt,a.iter||210000),a.hash)){toast('Current password is incorrect.',true);return}
   const doc={email:a.email,full_name:a.full_name,role:a.role,department:a.department||null,active:a.active!==false,main:!!a.builtin,custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null,updated_at:nowISO(),...(await makeHash(next))};
@@ -2944,7 +3387,20 @@ const actions={
   editAcct(el){S.ui.acctForm=true;S.ui.acctEdit=el.dataset.id;render();window.scrollTo({top:0,behavior:'smooth'})},
   cancelAcct(){S.ui.acctForm=false;S.ui.acctEdit=null;render()},
   deleteAcct(el){deleteAcct(el.dataset.id)},
-  restoreAcct(el){restoreAcct(el.dataset.id)}
+  restoreAcct(el){restoreAcct(el.dataset.id)},
+  forgotPw(){forgotPw()},
+  ihOpen(el){ihOpen(el.dataset.id)},
+  ihBack(){S.ui.impOpen=null;S.ui.impBatch=null;scheduleRender()},
+  ihReload(){S.ui.impList=null;scheduleRender()},
+  ihRemoveGroup(el){ihRemove(ihGroupIdx(Number(el.dataset.g)))},
+  ihRemoveRow(el){ihRemove([Number(el.dataset.i)])},
+  makeLogin(el){closeDlg();makeLogin(el.dataset.id,!!el.dataset.skip)},
+  resetLogin(el){resetLogin(el.dataset.id)},
+  sendReset(el){sendReset(el.dataset.id)},
+  approveLink(el){approveLink(el.dataset.id)},
+  rejectLink(el){rejectLink(el.dataset.id)},
+  clearHashes(){clearHashes()},
+  copyTemp(){const t=$('#tempPw');if(t)navigator.clipboard.writeText(t.textContent).then(()=>toast('Copied'),()=>toast('Select and copy it manually.',true))}
 };
 document.addEventListener('click',e=>{const el=e.target.closest('[data-act]');if(!el)return;const fn=actions[el.dataset.act];if(fn){e.preventDefault();fn(el,e)}});
 document.addEventListener('change',async e=>{
@@ -2957,6 +3413,8 @@ document.addEventListener('change',async e=>{
   else if(k==='fileIn')handleFile(el);
   else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
   else if(k==='impAssign')impAssign(Number(el.dataset.i),el.value);
+  else if(k==='ihMoveGroup'){const v=el.value;el.value='';if(v)ihMove(ihGroupIdx(Number(el.dataset.g)),Number(v))}
+  else if(k==='ihMoveRow'){const v=el.value;el.value='';if(v)ihMove([Number(el.dataset.i)],Number(v))}
   else if(k==='impSel'||k==='impSelAll'){
     const rows=S.ui.importRows||[];
     if(k==='impSel'){const x=rows[Number(el.dataset.i)];if(x&&canPick(x))x.sel=el.checked}
@@ -3003,6 +3461,7 @@ document.addEventListener('submit',e=>{
   if(k==='roleAccess'){saveRoleAccess(f);return}
   if(k==='dept'){addDepartment(f);return}
   if(k==='pw'){savePw(f);return}
+  if(k==='mustpw'){saveMustPw(f);return}
   if(!S.account)return;
   if(k==='dtr')saveDtr(f);else if(k==='emp')saveEmp(f);else if(k==='single')saveSingle(f);else if(k==='settings')saveSettings(f);
   else if(k==='holiday'){const fd=new FormData(f),date=fd.get('date');if(!date)return;const list=(S.settings.holidays||[]).filter(x=>x.date!==date).concat({date,type:fd.get('type'),name:String(fd.get('name')||'').trim()});saveHolidays(list,'Holiday added')}
@@ -3049,14 +3508,15 @@ function startData(){
     scheduleRender();
   },onSubErr));
   unsubBase.push(Store.watchCollection('accounts',[],rows=>{
-    S.accountDocs=rows.map(r=>({email:r.email||r._id,full_name:r.full_name||'',role:r.role,department:r.department||null,moved_to:r.moved_to||null,moved_at:r.moved_at||null,moved_by:r.moved_by||null,deleted:!!r.deleted,deleted_at:r.deleted_at||null,deleted_by:r.deleted_by||null}));
-    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,main:!!r.main,custom:!!r.custom,perms:r.perms||null,companies:Array.isArray(r.companies)?r.companies:null}));
+    S.accountDocs=rows.map(r=>({email:r.email||r._id,full_name:r.full_name||'',role:r.role,department:r.department||null,moved_to:r.moved_to||null,moved_at:r.moved_at||null,moved_by:r.moved_by||null,deleted:!!r.deleted,deleted_at:r.deleted_at||null,deleted_by:r.deleted_by||null,has_hash:!!(r.hash||r.salt)}));
+    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,uid:r.uid||null,must_change:!!r.must_change,linked_at:r.linked_at||null,main:!!r.main,custom:!!r.custom,perms:r.perms||null,companies:Array.isArray(r.companies)?r.companies:null}));
     const me=S.account&&S.accounts.find(a=>a.email===S.account.email);
     if(S.account&&!me&&!(acctId(S.account.email)===BOOT_ACCOUNT.email&&!(S.accountDocs||[]).some(d=>d.email===BOOT_ACCOUNT.email))){
       const em=S.account.email;findAccount(em).then(a=>{if(S.account&&S.account.email===em&&!a)signOut('Your account was removed or its sign-in email was changed. Please sign in again.')});
     }
     if(S.account&&me){
       if(me.active===false){signOut('Your account was disabled.');return}
+      if(fbMode()&&!S.legacy&&AUTH.currentUser&&me.uid!==AUTH.currentUser.uid){signOut('Your login was changed by the administrator. Please sign in again.');return}
       const nowCos=companiesOf(me);
       if(JSON.stringify(nowCos)!==JSON.stringify(myCompanies())){
         S.account={...S.account,companies:me.companies||null};brandSig='';
@@ -3068,6 +3528,7 @@ function startData(){
     }
     scheduleRender();
   },onSubErr));
+  if(fbMode()&&S.account&&S.account.role==='ADMIN')unsubBase.push(Store.watchCollection('pay_link_requests',[],rows=>{S.linkReqs=rows;scheduleRender()},()=>{}));
   unsubBase.push(Store.watchDoc('settings/access',d=>{S.roleAccess=(d&&d.roles)||{};scheduleRender()},onSubErr));
   unsubBase.push(Store.watchCollection(cp('advance_ledger'),[],rows=>{S.ledger=rows;S.ledgerErr='';scheduleRender()},e=>{S.ledgerErr=e&&e.message||String(e);onSubErr(e);scheduleRender()}));
   unsubBase.push(Store.watchCollection(cp('deadlines'),[],rows=>{const m={};for(const r of rows)m[r._id]=r;S.deadlines=m;scheduleRender()},onSubErr));
@@ -3077,7 +3538,7 @@ function startData(){
 function stopData(){
   for(const u of unsubBase)try{u()}catch(e){}unsubBase=[];
   if(unsubDtr){unsubDtr();unsubDtr=null}for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];if(unsubAudit){unsubAudit();unsubAudit=null}
-  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};
+  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
   Object.assign(S.ui,{recKey:null,recData:null,recErr:'',recList:null,recListLoaded:false,recListBusy:false,recLoading:null,advForm:false,advEdit:null,advEmp:null,advConfirm:null});
 }
 
@@ -3132,7 +3593,7 @@ async function restoreFromFile(input){
   if(!ok)return;
   let done=0,failed=0;const total=items.length;toast(`Restoring ${total} records…`);
   const queue=[...items];
-  const worker=async()=>{while(queue.length){const[path,doc]=queue.shift();try{await Store.set(path,doc)}catch(e){failed++}done++;if(done%25===0)toast(`Restoring… ${done}/${total}`)}};
+  const worker=async()=>{while(queue.length){const[path,doc]=queue.shift();try{await Store.set(path,fbMode()&&path.startsWith('accounts/')?await restoreAcctDoc(path,doc):doc)}catch(e){failed++}done++;if(done%25===0)toast(`Restoring… ${done}/${total}`)}};
   await Promise.all(Array.from({length:6},worker));
   logAction('RESTORE','system',null,`${total-failed} of ${total} records restored from backup dated ${file.created_at||'?'}`);
   toast(failed?`Restored with ${failed} failures. Try again.`:`Restore complete: ${total} records`,!!failed);
@@ -3179,11 +3640,17 @@ async function boot(){
   let db=null;
   takeCfgFromLink();
   const fc=getCfg();
-  if(fc&&window.firebase){try{firebase.initializeApp(fc);try{if(firebase.appCheck&&fc.projectId==='database-55b53')firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider('6LdyWeYtAAAAAAsoZzyTKM_zoKGjrKNBUyjEO2Eg'),true)}catch(e){console.warn('App Check',e)}db=firebase.firestore();Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
+  if(fc&&window.firebase){try{firebase.initializeApp(fc);try{if(firebase.appCheck&&fc.projectId==='database-55b53')firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider('6LdyWeYtAAAAAAsoZzyTKM_zoKGjrKNBUyjEO2Eg'),true)}catch(e){console.warn('App Check',e)}try{if(firebase.auth){AUTH=firebase.auth();AUTH.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(()=>{})}}catch(e){console.warn('Auth',e);AUTH=null}db=firebase.firestore();Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
   else if(window.claude&&typeof window.claude.use==='function'){try{db=await window.claude.use('db')}catch(e){db=null}}
   if(db){Remote.db=db;Store=Remote;S.mode='shared';if(!fc){try{S.downloads=await window.claude.use('downloads')}catch(e){}}}
   else if(sessionStorage.getItem('pl-local-ok')||localStorage.getItem('pl-local-ok')){Local.load();Store=Local;S.mode='local'}
   else{S.mode='setup';render();return}
+  if(fbMode()){
+    const user=await new Promise(res=>{const un=AUTH.onAuthStateChanged(u=>{un();res(u)})});
+    if(user){try{await afterFirebaseSignIn(user,null,true)}catch(e){S.ui.loginErr=e.message||''}}
+    else{const sess=readSession();if(sess&&sess.how==='legacy'){const r=await readAcct(sess.email);const a=r.doc?usableAcct(r.doc,sess.email):(!r.denied&&acctId(sess.email)===BOOT_ACCOUNT.email?{...BOOT_ACCOUNT}:null);if(a&&!a.uid&&a.active!==false){try{enterApp(a,'legacy',true)}catch(e){clearSession()}}else clearSession()}else clearSession()}
+    render();return;
+  }
   const sess=readSession();
   if(sess){const a=await findAccount(sess.email);const acc=a&&a.active!==false?publicAccount(a):null,cos=companiesOf(acc);if(acc&&cos.length){S.account=acc;S.company=pickCompany(acc.email,cos);S.settings=coDefaults();syncDepartments();saveSession(S.account.email);startData()}else clearSession()}
   render();
