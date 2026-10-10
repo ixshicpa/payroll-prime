@@ -388,6 +388,7 @@ const DEFAULTS={
   hdmf_ee:200, hdmf_er:200,
   sss_ee_rate:0.05, sss_er_rate:0.10, sss_reg_cap:20000, sss_min_msc:5000, sss_max_msc:35000, ec_threshold:15000, ec_low:10, ec_high:30,
   hol_rh_prem:1.0, hol_snw_prem:0.30, rd_prem:0.30, hol_snw_rd_prem:0.50, dole_from:'2026-10-11',
+  sss_basis:'basic,less,hol,allowTax', phic_basis:'basic', hdmf_basis:'basic', tax_basis:'basic,less,hol,allowTax', hdmf_mode:'fixed', hdmf_max_salary:10000,
   holidays:[], departments:DEFAULT_DEPARTMENTS.slice()
 };
 /* Companies. Each company has its own employees, attendance, payroll, advances, deadlines, settings and activity log.
@@ -803,6 +804,20 @@ function zeroCut(a){const o={...a,t:{},missing:0,absentNet:0,off:true};for(const
 const payFreq=e=>e&&(e.pay_frequency==='first'||e.pay_frequency==='second')?e.pay_frequency:'both';
 const payItems=(items,tab)=>tab==='1'||tab==='2'?items.filter(x=>!x['k'+tab].off):items;
 /* Whole payroll month: both cut-offs, government contributions (deducted on the 2nd cut-off) and BIR figures. */
+/* Government contributions: which parts of gross earnings make up the basis (Settings → Basis of government contributions). */
+const GOV_ITEMS=[
+  ['basic','Basic salary','Monthly-paid: the monthly rate (half per cut-off). Daily-paid: daily rate × days paid.'],
+  ['less','Less late, undertime and absences','Deducted from the basic salary.'],
+  ['hol','Holiday and rest day pay','Holiday pay and holiday / rest day premiums.'],
+  ['ot','Overtime pay',''],
+  ['nd','Night differential',''],
+  ['allowTax','Taxable allowance','Allowances marked taxable on the employee.'],
+  ['allowNon','Non-taxable allowance','Other allowances.']
+];
+const GOV_GROUPS=[['sss','SSS'],['phic','PhilHealth'],['hdmf','Pag-IBIG'],['tax','Withholding tax']];
+const govKeys=g=>String(S.settings[g+'_basis']??DEFAULTS[g+'_basis']??'').split(',').map(x=>x.trim()).filter(Boolean);
+const govBasisOf=(g,parts)=>Math.max(0,r2(govKeys(g).reduce((a,k)=>a+(Number(parts[k])||0),0)));
+const govLabel=g=>{const k=govKeys(g);return k.length?GOV_ITEMS.filter(i=>k.includes(i[0])).map(i=>i[0]==='less'?'less late/absences':i[1].toLowerCase()).join(' + '):'nothing selected'};
 function computePayroll(){
   const st=S.settings,P=S.period;
   const byEmp={};for(const r of dtrAll())(byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r);
@@ -815,15 +830,17 @@ function computePayroll(){
     k1=applyEdit(e,k1,1);k2=applyEdit(e,k2,2);
     const hasRate=numOrNull(e.monthly_rate)!=null||numOrNull(e.daily_rate)!=null;
     const bir=hasRate&&e.deducted_government!==false;
-    const compBasis=r2(k1.govBasis+k2.govBasis);
-    const phicBasis=e.pay_basis!=='Daily'?k1.monthly:r2(k1.basic+k2.basic);
+    const ks=f=>r2((Number(k1[f])||0)+(Number(k2[f])||0));
+    const parts={basic:ks('basic'),less:-r2(ks('lateUt')+ks('absence')),hol:ks('hol'),ot:ks('otPay'),nd:ks('ndPay'),allowTax:ks('taxAllow'),allowNon:r2(ks('allowance')-ks('taxAllow'))};
+    const compBasis=govBasisOf('sss',parts),phicBasis=govBasisOf('phic',parts),hdmfBasis=govBasisOf('hdmf',parts),taxComp=govBasisOf('tax',parts);
     const sss=bir?sssCalc(compBasis):sssCalc(0);
     const phicEe=bir?r2(Math.min(Math.max(phicBasis,st.phic_floor),st.phic_ceiling)*st.phic_rate*st.phic_employee_share):0;
     const phicEr=bir?r2(Math.min(Math.max(phicBasis,st.phic_floor),st.phic_ceiling)*st.phic_rate)-phicEe:0;
-    const hdmfEe=bir?Number(st.hdmf_ee):0, hdmfEr=bir?Number(st.hdmf_er):0;
+    let hdmfEe=bir?Number(st.hdmf_ee):0, hdmfEr=bir?Number(st.hdmf_er):0;
+    if(bir&&st.hdmf_mode==='percent'){const b=Math.min(hdmfBasis,Number(st.hdmf_max_salary)||10000);hdmfEe=r2(b*(hdmfBasis<=1500?0.01:0.02));hdmfEr=r2(b*0.02)}
     const sssEeTot=r2(sss.ee+sss.mpfEe), contribEe=r2(sssEeTot+phicEe+hdmfEe);
     const mwe=e.subject_tax===false;
-    const taxable=bir&&!mwe?Math.max(0,r2(compBasis-contribEe)):0;
+    const taxable=bir&&!mwe?Math.max(0,r2(taxComp-contribEe)):0;
     const tax=bir&&!mwe?monthlyTax(taxable):0;
     const taxType=!bir?'':(mwe?'T1':(tax>0?'T3':'T2'));
     const led=(S.ledger||[]).filter(a=>String(a.employee_id)===String(e.id));
@@ -846,8 +863,8 @@ function computePayroll(){
       sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net,advBal:(freq==='first'?k1:k2).advBal};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
     return {e,freq,raw,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
-      birRow:{basic:mo.basic,lateAbs:r2(mo.lateUt+mo.absence),netLA:mo.netLA,hol:mo.hol,taxAllow:r2(k1.taxAllow+k2.taxAllow),ntAllow:r2(mo.allowance-k1.taxAllow-k2.taxAllow),otnd:r2(mo.otPay+mo.ndPay),comp:compBasis,phicBasis,
-        msc:sss.msc,sssEr:sss.er,sssEe:sss.ee,ec:sss.ec,mpfEr:sss.mpfEr,mpfEe:sss.mpfEe,phicEr,phicEe,hdmfEr,hdmfEe,contribEe,netContrib:r2(compBasis-contribEe),taxable,tax,taxType}};
+      birRow:{basic:mo.basic,lateAbs:r2(mo.lateUt+mo.absence),netLA:mo.netLA,hol:mo.hol,taxAllow:r2(k1.taxAllow+k2.taxAllow),ntAllow:r2(mo.allowance-k1.taxAllow-k2.taxAllow),otnd:r2(mo.otPay+mo.ndPay),comp:compBasis,phicBasis,hdmfBasis,taxComp,gross:mo.gross,parts,
+        msc:sss.msc,sssEr:sss.er,sssEe:sss.ee,ec:sss.ec,mpfEr:sss.mpfEr,mpfEe:sss.mpfEe,phicEr,phicEe,hdmfEr,hdmfEe,contribEe,netContrib:r2(taxComp-contribEe),taxable,tax,taxType}};
   });
 }
 
@@ -2716,23 +2733,28 @@ function pagePayroll(){
 }
 function pageBir(items){
   const L=items.filter(x=>x.bir), st=S.settings;
-  let html=`<div class="banner info">Employees subject to government deductions (set per employee under Employees). Monthly figures for ${h(fmtMonth(S.period.ym))} · attendance ${h(fmtRange(S.period.start,S.period.end))}. The compensation basis for SSS and tax excludes overtime and night differential, as in the payroll file.</div>`;
+  let html=`<div class="banner info">Employees subject to government deductions (set per employee under Employees). Monthly figures for ${h(fmtMonth(S.period.ym))} · attendance ${h(fmtRange(S.period.start,S.period.end))}. Basis — SSS: ${h(govLabel('sss'))}; PhilHealth: ${h(govLabel('phic'))}; Pag-IBIG: ${st.hdmf_mode==='percent'?h(govLabel('hdmf')):'fixed amount'}; withholding tax: ${h(govLabel('tax'))} (change under Settings → Basis of government contributions).</div>`;
   if(!L.length)return html+'<div class="panel empty"><b>No employees are included in BIR Purposes.</b>Tick “Include in BIR Purposes” on an employee to add them.</div>';
-  const cols=[['basic','Basic salary'],['lateAbs','Late & absences',1],['netLA','Net of L&A'],['hol','Holiday / RD'],['taxAllow','Taxable allowance'],['comp','Compensation'],['sssEr','SSS ER'],['sssEe','SSS EE'],['ec','EC'],['mpfEr','MPF ER'],['mpfEe','MPF EE'],['phicEr','PHIC ER'],['phicEe','PHIC EE'],['hdmfEr','HDMF ER'],['hdmfEe','HDMF EE'],['netContrib','Net of contributions'],['tax','W/tax (1601-C)']];
+  const cols=[['basic','Basic salary'],['lateAbs','Late & absences',1],['netLA','Net of L&A'],['hol','Holiday / RD'],['taxAllow','Taxable allowance'],['comp','SSS basis'],['sssEr','SSS ER'],['sssEe','SSS EE'],['ec','EC'],['mpfEr','MPF ER'],['mpfEe','MPF EE'],['phicBasis','PHIC basis'],['phicEr','PHIC ER'],['phicEe','PHIC EE'],['hdmfEr','HDMF ER'],['hdmfEe','HDMF EE'],['taxComp','Tax basis'],['netContrib','Net of contributions'],['tax','W/tax (1601-C)']];
   const tot={};for(const x of L)for(const[k]of cols)tot[k]=(tot[k]||0)+(x.birRow[k]||0);
   const sum=f=>L.reduce((a,x)=>a+(x.birRow[f]||0),0);
   const pay={sss:sum('sssEr')+sum('sssEe'),mpf:sum('mpfEr')+sum('mpfEe'),ec:sum('ec'),phic:sum('phicEr')+sum('phicEe'),hdmf:sum('hdmfEr')+sum('hdmfEe'),tax:sum('tax')};
   const payTot=Object.values(pay).reduce((a,b)=>a+b,0), er=sum('sssEr')+sum('mpfEr')+sum('ec')+sum('phicEr')+sum('hdmfEr');
-  html+=`<div class="stats"><div class="stat"><b>${L.length}</b><span>Employees covered</span></div><div class="stat"><b class="money">${peso(sum('comp')+sum('otnd')+sum('ntAllow'))}</b><span>Total compensation</span></div><div class="stat"><b class="money">${peso(er)}</b><span>Employer share</span></div><div class="stat hl"><b class="money">${peso(payTot)}</b><span>Total to remit</span></div></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${L.length}</b><span>Employees covered</span></div><div class="stat"><b class="money">${peso(sum('gross'))}</b><span>Total compensation</span></div><div class="stat"><b class="money">${peso(er)}</b><span>Employer share</span></div><div class="stat hl"><b class="money">${peso(payTot)}</b><span>Total to remit</span></div></div>`;
   html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Type</th><th class="n">MSC</th>${cols.map(c=>`<th class="n">${c[1]}</th>`).join('')}</tr></thead><tbody>
   ${L.map(x=>`<tr class="click" data-act="payslip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td class="stick"><b>${h(empName(x.e))}</b></td><td><span class="chip ${x.birRow.taxType==='T3'?'warn':''}" title="${x.birRow.taxType==='T1'?'Minimum wage earner — tax exempt':x.birRow.taxType==='T2'?'Taxable, below the withholding threshold':'Subject to withholding (1601-C)'}">${x.birRow.taxType}</span></td><td class="n">${amt(x.birRow.msc)}</td>
   ${cols.map(([k,,isNeg])=>`<td class="n">${isNeg?neg(x.birRow[k]):amt(x.birRow[k])}</td>`).join('')}</tr>`).join('')}
   </tbody><tfoot><tr><td></td><td class="stick">Total</td><td></td><td></td>${cols.map(c=>`<td class="n">${amt(tot[c[0]])}</td>`).join('')}</tr></tfoot></table></div>
   <p class="muted small">T1 = minimum wage earner (tax exempt) · T2 = taxable but below the withholding threshold · T3 = tax withheld.</p>`;
   // 1601-C style summary
-  let mwe=0,otnd=0,ntA=0,contrib=0,taxable=0;
-  for(const x of L){const b=x.birRow;otnd+=b.otnd;ntA+=b.ntAllow;contrib+=b.contribEe;if(x.mwe)mwe+=b.comp-b.contribEe;else taxable+=b.comp-b.contribEe}
-  const total=mwe+otnd+ntA+contrib+taxable;
+  let mwe=0,otnd=0,ntA=0,other=0,contrib=0,taxable=0,total=0;
+  const inT=k=>govKeys('tax').includes(k);
+  for(const x of L){
+    const b=x.birRow,p=b.parts||{};total+=b.gross||0;contrib+=b.contribEe;
+    if(x.mwe){mwe+=(b.gross||0)-b.contribEe;continue}
+    const exO=(inT('ot')?0:p.ot||0)+(inT('nd')?0:p.nd||0),exA=(inT('allowNon')?0:p.allowNon||0)+(inT('allowTax')?0:p.allowTax||0);
+    otnd+=exO;ntA+=exA;other+=(b.gross||0)-b.taxComp-exO-exA;taxable+=Math.max(0,b.taxComp-b.contribEe);
+  }
   const ln=(l,v,b)=>`<tr${b?' class="tot"':''}><td>${l}</td><td class="n">${amt(v)}</td></tr>`;
   html+=`<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:16px">
   <div class="panel slip"><h2>Remittances payable</h2><table><tbody>
@@ -2740,8 +2762,8 @@ function pageBir(items){
     ${ln(`PhilHealth (ER ${amt(sum('phicEr'))} + EE ${amt(sum('phicEe'))})`,pay.phic)}${ln(`Pag-IBIG (ER ${amt(sum('hdmfEr'))} + EE ${amt(sum('hdmfEe'))})`,pay.hdmf)}${ln('Withholding tax on compensation (1601-C)',pay.tax)}${ln('Total',payTot,1)}
   </tbody></table></div>
   <div class="panel slip"><h2>Compensation summary (1601-C)</h2><table><tbody>
-    ${ln('Total amount of compensation',total)}${ln('Less non-taxable: pay of minimum wage earners',mwe)}${ln('Less non-taxable: overtime and night differential',otnd)}${ln('Less non-taxable: non-taxable allowances',ntA)}${ln('Less non-taxable: SSS, PhilHealth, Pag-IBIG (employee share)',contrib)}
-    ${ln('Total non-taxable compensation',mwe+otnd+ntA+contrib)}${ln('Net taxable compensation',taxable,1)}${ln('Total taxes withheld',pay.tax,1)}
+    ${ln('Total amount of compensation',total)}${ln('Less non-taxable: pay of minimum wage earners',mwe)}${ln('Less non-taxable: overtime and night differential not in the tax basis',otnd)}${ln('Less non-taxable: allowances not in the tax basis',ntA)}${Math.abs(other)>=0.05?ln('Less: other pay not in the tax basis',other):''}${ln('Less non-taxable: SSS, PhilHealth, Pag-IBIG (employee share)',contrib)}
+    ${ln('Total non-taxable compensation',mwe+otnd+ntA+(Math.abs(other)>=0.05?other:0)+contrib)}${ln('Net taxable compensation',taxable,1)}${ln('Total taxes withheld',pay.tax,1)}
   </tbody></table></div></div>`;
   return html;
 }
@@ -2782,9 +2804,9 @@ function sectionData(tab,items){
   hdr.push(`${SECTION_NAME[tab]}${c&&c.n===2?' · government contributions and withholding tax deducted':''}${tab==='BIR'?' · employees subject to government deductions':''}`);
   let head,rows,tot,extra=[];
   if(tab==='BIR'){
-    const L=items.filter(x=>x.bir),k=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicEr','phicEe','hdmfEr','hdmfEe','netContrib','tax'];
-    head=['EE No','Employee','Department','Tax Type','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Taxable Allowance','Compensation','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PHIC ER','PHIC EE','HDMF ER','HDMF EE','Net of Contributions','Withholding Tax (1601-C)'];
-    rows=L.map(x=>[x.e.id,empName(x.e),x.e.department,x.birRow.taxType,...k.map(f=>x.birRow[f])]);
+    const L=items.filter(x=>x.bir),k=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfEr','hdmfEe','taxComp','netContrib','tax'];
+    head=['EE No','Employee','Department','Tax Type','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Taxable Allowance','SSS Basis','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PhilHealth Basis','PHIC ER','PHIC EE','HDMF ER','HDMF EE','Tax Basis','Net of Contributions','Withholding Tax (1601-C)'];
+    rows=L.map(x=>[x.e.id,empName(x.e),x.e.department,x.birRow.taxType,...k.map(f=>x.birRow[f]??(f==='taxComp'?x.birRow.comp:''))]);
     tot=['','TOTAL','','',...k.map((f,i)=>f==='msc'?'':r2(L.reduce((a,x)=>a+(x.birRow[f]||0),0)))];
     const sm=f=>r2(L.reduce((a,x)=>a+(x.birRow[f]||0),0));
     extra=[[],['REMITTANCES PAYABLE'],['SSS regular (ER + EE)',r2(sm('sssEr')+sm('sssEe'))],['SSS provident fund / MPF (ER + EE)',r2(sm('mpfEr')+sm('mpfEe'))],['SSS EC (employer)',sm('ec')],['PhilHealth (ER + EE)',r2(sm('phicEr')+sm('phicEe'))],['Pag-IBIG (ER + EE)',r2(sm('hdmfEr')+sm('hdmfEe'))],['Withholding tax (1601-C)',sm('tax')],['Total',r2(sm('sssEr')+sm('sssEe')+sm('mpfEr')+sm('mpfEe')+sm('ec')+sm('phicEr')+sm('phicEe')+sm('hdmfEr')+sm('hdmfEe')+sm('tax'))]];
@@ -2970,15 +2992,43 @@ function pageSettings(){
     ${n('nd_base_reg','ND basis regular ×')}${n('nd_base_snw','ND basis RD/special ×')}${n('nd_base_rh','ND basis reg. holiday ×')}
     ${n('hol_rh_prem','Regular holiday work premium (1.0 = +100%)')}${n('hol_snw_prem','Special day work premium')}${n('rd_prem','Rest day work premium')}${n('hol_snw_rd_prem','Special day on a rest day premium (0.50 = +50%)')}
     <label class="f">DOLE holiday rules from (work date)<input name="dole_from" type="date" value="${h(st.dole_from||'2026-10-11')}" ${dis}></label>
-  </div><h2 style="margin-top:18px">Government contributions</h2><p class="muted small">From the payroll file's SSS table: MSC in ₱500 bands; regular SS up to the cap, the excess goes to the provident fund (MPF).</p><div class="grid">
+  </div>${govBasisPanel(dis)}<h2 style="margin-top:18px">Government contributions</h2><p class="muted small">From the payroll file's SSS table: MSC in ₱500 bands; regular SS up to the cap, the excess goes to the provident fund (MPF).</p><div class="grid">
     ${n('sss_ee_rate','SSS employee rate')}${n('sss_er_rate','SSS employer rate')}${n('sss_reg_cap','SSS regular MSC cap')}${n('sss_min_msc','SSS minimum MSC')}${n('sss_max_msc','SSS maximum MSC')}
     ${n('ec_threshold','EC: MSC threshold')}${n('ec_low','EC below threshold (₱)')}${n('ec_high','EC at/above threshold (₱)')}
     ${n('phic_rate','PhilHealth premium rate')}${n('phic_employee_share','PhilHealth employee share')}${n('phic_floor','PhilHealth floor')}${n('phic_ceiling','PhilHealth ceiling')}${n('hdmf_ee','Pag-IBIG employee (₱)')}${n('hdmf_er','Pag-IBIG employer (₱)')}
   </div>${edit?'<div class="row" style="margin-top:14px"><button class="btn primary">Save settings</button></div>':''}</form>`;
 }
+function govBasisPanel(dis){
+  let items=[];try{items=computePayroll()}catch(e){}
+  const withPay=items.filter(x=>x.birRow&&x.birRow.gross>0);
+  const pick=withPay.find(x=>String(x.e.id)===String(S.ui.basisEmp))||withPay[0]||null;
+  const p=pick?pick.birRow.parts:null;
+  const row=([k,l,d])=>`<tr><td><b>${h(l)}</b>${d?`<div class="muted small">${h(d)}</div>`:''}</td><td class="n">${p?(k==='less'?neg(-p[k]):amt(p[k])):'—'}</td>
+    ${GOV_GROUPS.map(([g])=>`<td style="text-align:center"><input type="checkbox" data-basis="${g}" data-k="${k}" name="b_${g}_${k}" ${govKeys(g).includes(k)?'checked':''} ${dis} aria-label="${h(l)} in ${g} basis"></td>`).join('')}</tr>`;
+  const tot=g=>p?amt(govBasisOf(g,p)):'—';
+  return `<h2 style="margin-top:18px">Basis of government contributions</h2>
+  <p class="muted small">Tick which parts of the gross earnings are counted for each contribution. The amounts show one employee’s earnings for ${h(fmtMonth(S.period.ym))}${pick?'':' (no payroll computed yet)'}; the bottom row is the basis that results.</p>
+  ${withPay.length?`<label class="f" style="max-width:340px">Sample employee<select data-change="basisEmp">${withPay.map(x=>`<option value="${x.e.id}" ${x===pick?'selected':''}>${h(empName(x.e))}</option>`).join('')}</select></label>`:''}
+  <div class="tablewrap" data-noresp style="margin-top:10px"><table id="basisTbl"><thead><tr><th>Gross earnings</th><th class="n">Amount</th>${GOV_GROUPS.map(([,l])=>`<th style="text-align:center">${h(l)}</th>`).join('')}</tr></thead>
+  <tbody>${GOV_ITEMS.map(row).join('')}</tbody>
+  <tfoot><tr><td><b>Basis</b></td><td class="n">${p?amt(pick.birRow.gross):'—'} <span class="muted small">gross</span></td>${GOV_GROUPS.map(([g])=>`<td style="text-align:center" data-basis-total="${g}"><b>${tot(g)}</b></td>`).join('')}</tr></tfoot></table></div>
+  <div class="grid" style="margin-top:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+    <label class="f">Pag-IBIG amount<select name="hdmf_mode" ${dis}><option value="fixed" ${S.settings.hdmf_mode!=='percent'?'selected':''}>Fixed amounts (Pag-IBIG employee / employer below)</option><option value="percent" ${S.settings.hdmf_mode==='percent'?'selected':''}>2% of the Pag-IBIG basis (1% employee if ₱1,500 or less)</option></select></label>
+    <label class="f">Pag-IBIG maximum fund salary (₱)<input name="hdmf_max_salary" type="number" step="0.01" min="0" value="${h(S.settings.hdmf_max_salary??10000)}" ${dis}></label>
+  </div>
+  <p class="muted small">PhilHealth still applies its floor and ceiling, and SSS its salary credit table. Minimum wage earners stay tax-exempt. Changes apply to payroll that is not yet saved in Payroll records.</p>`;
+}
+function basisPreview(){
+  const tbl=$('#basisTbl');if(!tbl)return;
+  const items=computePayroll(),x=items.find(i=>String(i.e.id)===String(S.ui.basisEmp))||items.find(i=>i.birRow&&i.birRow.gross>0);if(!x)return;
+  const p=x.birRow.parts;
+  for(const[g]of GOV_GROUPS){const keys=[...tbl.querySelectorAll(`input[data-basis="${g}"]:checked`)].map(i=>i.dataset.k);const v=Math.max(0,r2(keys.reduce((a,k)=>a+(Number(p[k])||0),0)));const c=tbl.querySelector(`[data-basis-total="${g}"]`);if(c)c.innerHTML=`<b>${amt(v)}</b>`}
+}
 async function saveSettings(form){
   const fd=new FormData(form),next={...S.settings};
-  for(const[k,v]of fd.entries()){if(typeof DEFAULTS[k]==='number'){const x=Number(v);if(isNaN(x)){toast(`“${k}” must be a number.`,true);return}next[k]=x}else next[k]=String(v)}
+  for(const[k,v]of fd.entries()){if(k.startsWith('b_'))continue;if(typeof DEFAULTS[k]==='number'){const x=Number(v);if(isNaN(x)){toast(`“${k}” must be a number.`,true);return}next[k]=x}else next[k]=String(v)}
+  if(form.querySelector('[data-basis]:not(:disabled)'))for(const[g]of GOV_GROUPS)next[g+'_basis']=GOV_ITEMS.filter(([k])=>fd.get(`b_${g}_${k}`)==='on').map(([k])=>k).join(',');
+  if(!String(next.sss_basis||'').includes('basic')&&!(await confirmDlg('SSS basis without basic salary?','The basic salary is not ticked for SSS. Save anyway?','Save')))return;
   if(next.cutoff_day<2||next.cutoff_day>28){toast('The attendance month start day must be between 2 and 28.',true);return}
   if(next.cut1_end<1||next.cut1_end>=next.cutoff_day-1){toast('The 1st cut-off end day must be before the attendance month start day.',true);return}
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=next[k];
@@ -3404,6 +3454,7 @@ const actions={
 };
 document.addEventListener('click',e=>{const el=e.target.closest('[data-act]');if(!el)return;const fn=actions[el.dataset.act];if(fn){e.preventDefault();fn(el,e)}});
 document.addEventListener('change',async e=>{
+  if(e.target.matches&&e.target.matches('input[data-basis]')){basisPreview();return}
   const el=e.target.closest('[data-change]');if(!el)return;
   const k=el.dataset.change;
   if(k==='dtrDept'){S.ui.dtrDept=el.value;S.ui.openRow=null;render()}
@@ -3413,6 +3464,7 @@ document.addEventListener('change',async e=>{
   else if(k==='fileIn')handleFile(el);
   else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
   else if(k==='impAssign')impAssign(Number(el.dataset.i),el.value);
+  else if(k==='basisEmp'){S.ui.basisEmp=el.value;render()}
   else if(k==='ihMoveGroup'){const v=el.value;el.value='';if(v)ihMove(ihGroupIdx(Number(el.dataset.g)),Number(v))}
   else if(k==='ihMoveRow'){const v=el.value;el.value='';if(v)ihMove([Number(el.dataset.i)],Number(v))}
   else if(k==='impSel'||k==='impSelAll'){
