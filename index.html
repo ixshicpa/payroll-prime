@@ -136,6 +136,8 @@ textarea{width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:
 label.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);font-weight:600}
 label.f > input,label.f > select,label.f > textarea{color:var(--ink);font-weight:400;font-size:15px}
 input.t24{font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.mtab td input{width:100%;min-width:84px}.mtab td input[type=date]{min-width:140px}.mtab td{vertical-align:middle}
+.mfill{margin-top:12px}.mfill summary{cursor:pointer;font-weight:600}
 label.chk{display:flex;gap:8px;align-items:center;font-size:14px}
 .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
 .grid .wide{grid-column:1/-1}
@@ -1450,7 +1452,7 @@ function switchCompany(id){
   const ym=S.period&&S.period.ym;
   S.company=id;rememberCompany(S.account.email,id);
   S.settings=coDefaults();syncDepartments();S.viewAs=null;closeDlg();
-  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null,otherCo:null,dtrSelMode:false,dtrSel:new Set()});
+  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,multi:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null,otherCo:null,dtrSelMode:false,dtrSel:new Set()});
   S.auditMonth=todayISO().slice(0,7);
   startData();
   if(ym&&ym!==S.period.ym){S.period=monthPeriods(ym);watchPeriod()}
@@ -1872,7 +1874,7 @@ function pageImport(){
   const u=S.ui;
   let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched by first name <b>only to employees registered under ${h(curCo().name)}</b> — the company selected at the top — so people in other companies who share a first name are never mixed up. Add a Company column if one file covers several companies; rows for other companies are left out.</p>`;
   if(S.readOnly)return html+'<div class="empty"><b>View-only access.</b></div>';
-  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
+  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry'],['multi','Multiple days']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
   if(u.importNote&&!u.importRows)html+=`<div class="banner ok">${h(u.importNote)}<span class="spacer"></span><button class="btn sm" data-act="clearImport">OK</button></div>`;
   if(u.importResult){
     const R=u.importResult;
@@ -1882,6 +1884,8 @@ function pageImport(){
     html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect time card exports can be uploaded as they are.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
   } else if(u.importTab==='portal'){
     html+=portalPanel();
+  } else if(u.importTab==='multi'){
+    html+=multiPanel();
   } else if(u.importTab==='paste'){
     html+=`<div class="panel"><h2>Paste DTR rows</h2><p class="muted small">Paste under the header row, or paste your own copy with its header — copying straight from Excel works. Dates are read as yyyy-mm-dd (for example 2026-10-01). Times use the 24-hour clock, e.g. 07:55 and 17:10; AM/PM entries are converted automatically.</p><textarea id="pasteArea" rows="10" spellcheck="false" placeholder="JUNE&#9;2026-10-01&#9;07:55&#9;17:10"></textarea><div class="row" style="margin-top:10px"><button class="btn primary" data-act="parsePaste">Check rows</button></div></div>`;
   } else {
@@ -1894,7 +1898,7 @@ function pageImport(){
       <label class="f wide">Remarks<input name="remarks" placeholder="Why this entry is added manually"></label>
     </div><div class="row" style="margin-top:12px"><button class="btn primary">Save entry</button></div></form>`;
   }
-  if(u.importRows&&u.importTab!=='single'){
+  if(u.importRows&&u.importTab!=='single'&&u.importTab!=='multi'){
     if(u.otherCo===null)loadOtherCompanies();
     if(!u.importRows._checked){checkImportRows();return html+'<div class="panel"><div class="loading">Checking which days are already imported…</div></div>'}
     const rows=u.importRows, ok=rows.filter(x=>x.match==='OK'&&x.dup!=='diff'), diffN=rows.filter(x=>canPick(x)&&x.dup==='diff').length, conf=rows.filter(x=>x.match==='CONFIRM'), bad=rows.filter(x=>!canPick(x)).length;
@@ -2626,6 +2630,169 @@ async function saveSingle(form){
   }catch(e){writeError(e)}
 }
 
+/* ---------- Multiple days for one employee ----------
+   Same as Single entry (source 'manual'), but for many days at once. The rows live in S.ui.multi
+   and are kept in sync as you type, so a screen refresh never loses what was entered. */
+const mBlank=()=>({d:'',i:'',o:'',r:''});
+function multiState(){
+  if(!S.ui.multi){const c=cutoffFor(todayISO());S.ui.multi={eid:'',rem:'',rows:[mBlank()],from:c.start,to:c.end>todayISO()?todayISO():c.end,fi:'',fo:'',skipRest:true,skipHol:true,busy:false}}
+  return S.ui.multi;
+}
+function multiPanel(){
+  const m=multiState(),st=S.settings,hol=holidayMap();
+  const emps=[...S.employees].sort((a,b)=>a.id-b.id);
+  const have=new Map(S.dtr.map(r=>[String(r.employee_id)+'_'+r.work_date,r]));
+  const count=new Map();for(const r of m.rows)if(r.d)count.set(r.d,(count.get(r.d)||0)+1);
+  const nDays=m.rows.filter(r=>r.d).length,dis=m.busy?'disabled':'';
+  const t=(k,v,extra)=>`<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" value="${h(v||'')}" ${extra} ${dis}>`;
+  const status=r=>{
+    if(!r.d)return '';
+    const bits=[WD[dow(r.d)]];
+    if(dow(r.d)===Number(st.rest_day))bits.push('rest day');
+    if(hol[r.d])bits.push('holiday');
+    if(count.get(r.d)>1)bits.push('<span class="chip bad">listed twice</span>');
+    else if(m.eid){const ex=have.get(String(m.eid)+'_'+r.d);
+      if(ex&&ex.source===NO_RECORD&&!ex.time_in&&!ex.time_out)bits.push('<span class="chip">absent now</span>');
+      else if(ex&&(ex.time_in||ex.time_out)){const sm=(ex.time_in||'')===(parseTime(r.i)||'')&&(ex.time_out||'')===(parseTime(r.o)||'');
+        bits.push(sm?'<span class="chip">already saved, same times</span>':`<span class="chip warn">saved ${h(ex.time_in||'—')}–${h(ex.time_out||'—')} · will be replaced</span>`)}
+      else if(r.d>=S.period.start&&r.d<=S.period.end)bits.push('<span class="chip ok">new</span>');}
+    return bits.map(b=>b.startsWith('<')?b:h(b)).join(' · ');
+  };
+  return `<div class="panel" id="multiForm"><h2>Add several days for one employee</h2>
+    <p class="muted small" style="margin:0 0 10px">Choose the employee, then enter one row per day — add the days one by one, or fill a range of dates in one go and adjust the times per day. Times use the 24-hour clock (08:00, 17:30); entries like 5:30 PM or 1730 are converted. Days already saved for this employee are replaced with the times entered here, and days in an approved cut-off are skipped.</p>
+    <div class="grid">
+      <label class="f">Employee<select data-m="eid" ${dis}><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}" ${String(m.eid)===String(e.id)?'selected':''}>#${e.id} · ${h(empName(e))}</option>`).join('')}</select></label>
+      <label class="f wide">Remarks for all days <span class="muted small">(a row's own remark takes its place)</span><input data-m="rem" value="${h(m.rem)}" placeholder="Why these entries are added manually" ${dis}></label>
+    </div>
+    <details class="mfill" ${nDays?'':'open'}><summary>Fill a range of dates</summary>
+      <div class="grid" style="margin-top:10px">
+        <label class="f">From<input type="date" data-m="from" value="${h(m.from)}" ${dis}></label>
+        <label class="f">To<input type="date" data-m="to" value="${h(m.to)}" ${dis}></label>
+        <label class="f">Time in${t('fi',m.fi,'data-m="fi"')}</label>
+        <label class="f">Time out${t('fo',m.fo,'data-m="fo"')}</label>
+      </div>
+      <div class="row" style="margin-top:10px;gap:16px;flex-wrap:wrap">
+        <label class="chk small"><input type="checkbox" data-m="skipRest" ${m.skipRest?'checked':''} ${dis}> Skip rest day (${h(WD[Number(st.rest_day)]||'')})</label>
+        <label class="chk small"><input type="checkbox" data-m="skipHol" ${m.skipHol?'checked':''} ${dis}> Skip holidays</label>
+        <span class="spacer"></span><button class="btn" data-act="mFill" ${dis}>Add these dates</button>
+      </div>
+    </details>
+    <div class="tablewrap mtab" style="margin-top:12px"><table><thead><tr><th>Date</th><th>Time in</th><th>Time out</th><th>Remarks</th><th>Day</th><th></th></tr></thead><tbody>
+      ${m.rows.map((r,i)=>`<tr><td><input type="date" data-mr="d" data-i="${i}" value="${h(r.d)}" aria-label="Date, row ${i+1}" ${dis}></td>
+        <td>${t('i',r.i,`data-mr="i" data-i="${i}" aria-label="Time in, row ${i+1}"`)}</td>
+        <td>${t('o',r.o,`data-mr="o" data-i="${i}" aria-label="Time out, row ${i+1}"`)}</td>
+        <td><input data-mr="r" data-i="${i}" value="${h(r.r)}" placeholder="${m.rem?'Same as above':'Optional'}" aria-label="Remarks, row ${i+1}" ${dis}></td>
+        <td class="small">${status(r)}</td>
+        <td><button class="btn sm" data-act="mDel" data-i="${i}" aria-label="Remove row ${i+1}" ${dis}>Remove</button></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:8px"><button class="btn" data-act="mAdd" ${dis}>Add a day</button><button class="btn" data-act="mClear" ${dis}>Clear rows</button><span class="spacer"></span>
+      <button class="btn primary" data-act="mSave" ${dis||(nDays&&m.eid?'':'disabled')}>${m.busy?'Saving…':`Save ${nDays} ${nDays===1?'day':'days'}`}</button></div>
+  </div>`;
+}
+/* Keeps S.ui.multi in step with what is typed. */
+function mSync(el){
+  const m=S.ui.multi;if(!m||!el||!el.dataset)return false;
+  if(el.dataset.mr!=null){const r=m.rows[Number(el.dataset.i)];if(r){r[el.dataset.mr]=el.value;return true}}
+  else if(el.dataset.m!=null){m[el.dataset.m]=el.type==='checkbox'?el.checked:el.value;return true}
+  return false;
+}
+function mSyncAll(){const f=$('#multiForm');if(f)for(const el of f.querySelectorAll('[data-mr],[data-m]'))mSync(el)}
+const mSaveBtn=()=>{const m=S.ui.multi,b=document.querySelector('[data-act="mSave"]');if(!m||!b||m.busy)return;const n=m.rows.filter(r=>r.d).length;b.textContent=`Save ${n} ${n===1?'day':'days'}`;b.disabled=!(n&&m.eid)};
+document.addEventListener('input',e=>{if(mSync(e.target))mSaveBtn()});
+document.addEventListener('change',e=>{if(mSync(e.target)){mSaveBtn();if(e.target.dataset.m==='eid')render();else if(e.target.dataset.mr==='d')scheduleRender()}});
+document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24'))setTimeout(()=>mSync(i),0)});
+function mAdd(){
+  const m=multiState();mSyncAll();
+  const last=[...m.rows].reverse().find(r=>r.d);
+  m.rows=m.rows.filter((r,i)=>r.d||r.i||r.o||r.r||i<m.rows.length-1);
+  m.rows.push({d:last?addDays(last.d,1):'',i:last?last.i:'',o:last?last.o:'',r:''});
+  render();
+  const ins=document.querySelectorAll('#multiForm input[data-mr="d"]');if(ins.length)ins[ins.length-1].focus();
+}
+function mDel(i){const m=multiState();mSyncAll();m.rows.splice(i,1);if(!m.rows.length)m.rows.push(mBlank());render()}
+function mClear(){const m=multiState();m.rows=[mBlank()];render()}
+function mFill(){
+  const m=multiState();mSyncAll();
+  if(!m.from||!m.to){toast('Choose the first and last date.',true);return}
+  if(m.from>m.to){toast('The first date is after the last date.',true);return}
+  if(daysBetween(m.from,m.to)>62){toast('Fill up to two months at a time.',true);return}
+  const fi=m.fi?parseTime(m.fi):'',fo=m.fo?parseTime(m.fo):'';
+  if(m.fi&&!fi){toast(`“${m.fi}” isn’t a valid time. Use 24-hour HH:MM, e.g. 08:00.`,true);return}
+  if(m.fo&&!fo){toast(`“${m.fo}” isn’t a valid time. Use 24-hour HH:MM, e.g. 17:00.`,true);return}
+  m.fi=fi;m.fo=fo;
+  const hol=holidayMap(),rest=Number(S.settings.rest_day),listed=new Set(m.rows.map(r=>r.d).filter(Boolean)),add=[];
+  for(let d=m.from;d<=m.to;d=addDays(d,1)){
+    if(m.skipRest&&dow(d)===rest)continue;
+    if(m.skipHol&&hol[d])continue;
+    if(!listed.has(d))add.push({d,i:fi,o:fo,r:''});
+  }
+  if(!add.length){toast('Those dates are already listed.',true);return}
+  m.rows=m.rows.filter(r=>r.d||r.i||r.o||r.r).concat(add).sort((a,b)=>(a.d||'9999').localeCompare(b.d||'9999'));
+  toast(`${add.length} ${add.length===1?'day':'days'} added — adjust the times, then save.`);
+  render();
+}
+async function saveMulti(){
+  const m=multiState();mSyncAll();if(m.busy)return;
+  const eid=Number(m.eid),emp=empById(eid);
+  if(!eid||!emp){toast('Choose an employee first.',true);return}
+  const list=[],seen=new Set();
+  for(const[n,r]of m.rows.entries()){
+    if(!(r.d||r.i||r.o||r.r))continue;
+    const where=r.d?fmtD(r.d):`Row ${n+1}`;
+    if(!r.d){toast(`${where} has no date.`,true);return}
+    const ti=r.i?parseTime(r.i):null,to=r.o?parseTime(r.o):null;
+    if(r.i&&!ti){toast(`${where}: “${r.i}” isn’t a valid time. Use 24-hour HH:MM, e.g. 08:00.`,true);return}
+    if(r.o&&!to){toast(`${where}: “${r.o}” isn’t a valid time. Use 24-hour HH:MM, e.g. 17:30.`,true);return}
+    if(!ti&&!to){toast(`${where} has no time in or time out. Add a time or remove the row.`,true);return}
+    if(seen.has(r.d)){toast(`${where} is listed twice. Keep one row per day.`,true);return}
+    seen.add(r.d);r.i=ti||'';r.o=to||'';
+    list.push({d:r.d,ti,to,rem:String(r.r||m.rem||'').trim()});
+  }
+  if(!list.length){toast('Add at least one day.',true);return}
+  list.sort((a,b)=>a.d.localeCompare(b.d));
+  m.busy=true;render();
+  const finish=()=>{m.busy=false;render()};
+  try{
+    const lockCache={},isLocked=async d=>{const k=cutoffFor(d).key;if(!(k in lockCache)){const doc=await Store.get(cp('payroll/')+k).catch(()=>null);lockCache[k]=!!(doc&&doc.status==='APPROVED')}return lockCache[k]};
+    const locked=[],todo=[];
+    for(const x of list){if(await isLocked(x.d))locked.push(x);else todo.push(x)}
+    const exs=await Promise.all(todo.map(x=>Store.get(cp('dtr/')+eid+'_'+x.d)));
+    todo.forEach((x,k)=>x.ex=exs[k]);
+    const eq=(a,b)=>(a||null)===(b||null);
+    const same=todo.filter(x=>x.ex&&x.ex.source!==NO_RECORD&&eq(x.ex.time_in,x.ti)&&eq(x.ex.time_out,x.to)&&(!x.rem||x.rem===(x.ex.remarks||'')));
+    const write=todo.filter(x=>!same.includes(x));
+    const repl=write.filter(x=>x.ex&&(x.ex.time_in||x.ex.time_out));
+    if(!write.length){finish();toast(`Nothing to save.${same.length?` ${same.length} already saved with the same times.`:''}${locked.length?` ${locked.length} in an approved cut-off.`:''}`,true);return}
+    if(repl.length){
+      const lines=repl.slice(0,12).map(x=>`${fmtD(x.d)}: ${x.ex.time_in||'—'}–${x.ex.time_out||'—'}  →  ${x.ti||'—'}–${x.to||'—'}`).join('\n');
+      if(!(await confirmDlg('Replace saved times?',`${empName(emp)} already has times saved on ${repl.length} of these days:\n\n${lines}${repl.length>12?`\n…and ${repl.length-12} more`:''}\n\nThey will be replaced with the times entered here.`,'Replace and save'))){finish();return}
+    }
+    const jr=journal();let saved=0,failed=0,lastErr=null;
+    for(const x of write){
+      const id=`${eid}_${x.d}`,ex=x.ex;
+      try{
+        if(ex){
+          const patch={time_in:x.ti,time_out:x.to,source:'manual',imported_at:nowISO(),remarks:x.rem||ex.remarks||''};
+          if(ex.source===NO_RECORD)Object.assign(patch,{review_status:'FOR REVIEW',absent_approval:'PENDING',reviewed_by:null,reviewed_at:null});
+          await jr.update(cp('dtr/')+id,patch,ex);
+        }else await jr.set(cp('dtr/')+id,{employee_id:eid,work_date:x.d,time_in:x.ti,time_out:x.to,status_override:null,source:'manual',imported_at:nowISO(),ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:x.rem,review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null},null);
+        saved++;x.ok=true;
+      }catch(e){failed++;lastErr=e;if(errCode(e)==='invalid_argument'||errCode(e)==='quota_exceeded')break}
+    }
+    if(saved){
+      const done=write.filter(x=>x.ok);
+      logAction('MANUAL_ENTRY','dtr',eid,`${empName(emp)} · ${saved} ${saved===1?'day':'days'} added manually: ${done.map(x=>`${x.d} ${x.ti||'—'}–${x.to||'—'}`).join(', ')}${m.rem?' — '+m.rem:''}`,jr);
+    }
+    // Keep only the rows that were not saved (locked or failed) so they can be checked again.
+    const keep=new Set([...locked,...write.filter(x=>!x.ok)].map(x=>x.d));
+    m.rows=m.rows.filter(r=>r.d&&keep.has(r.d));if(!m.rows.length)m.rows=[mBlank()];
+    m.busy=false;render();
+    const extra=[same.length?`${same.length} already saved with the same times`:'',locked.length?`${locked.length} skipped — cut-off approved and locked (${locked.slice(0,3).map(x=>fmtD(x.d)).join(', ')}${locked.length>3?'…':''})`:'',failed?`${failed} failed to save`:''].filter(Boolean).join('; ');
+    toast(`${saved} ${saved===1?'day':'days'} saved for ${empName(emp)}.${extra?' '+extra+'.':''}`,!!(locked.length||failed));
+    if(lastErr)writeError(lastErr);
+  }catch(e){finish();writeError(e)}
+}
+
 /* ---------- Employees ---------- */
 function pageEmployees(){
   const edit=can('editEmployees')&&!S.readOnly, u=S.ui;
@@ -3348,6 +3515,7 @@ const actions={
   toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;render()},
   bulkApprove(el){bulkApprove(el)},
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;S.ui.importNote='';scheduleRender()},
+  mAdd(){mAdd()},mDel(el){mDel(Number(el.dataset.i))},mClear(){mClear()},mFill(){mFill()},mSave(){saveMulti()},
   impEdit(el){const x=(S.ui.importRows||[])[Number(el.dataset.i)];if(x){x.editing=true;scheduleRender()}},
   clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.importNote='';S.ui.portalText='';S.ui.portalSyncMsg='';S.ui.portalInfo='';S.ui.portalError='';S.ui.portalSkipped=[];S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
   parsePaste(){const t=$('#pasteArea').value;S.ui.pasteText=t;try{let objs=parsePasted(t);if(!objs.length)throw new Error('No DTR rows found under the header. Each row needs a first name, a yyyy-mm-dd date and the times.');try{S.ui.importRows=rowsFromObjects(objs)}catch(err){if(!/Missing column/.test(err.message))throw err;objs=parsePasted(t,true);if(!objs.length)throw err;S.ui.importRows=rowsFromObjects(objs)}S.ui.importResult=null;render()}catch(e){toast(e.message,true)}},
