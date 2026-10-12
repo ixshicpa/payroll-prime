@@ -174,6 +174,16 @@ th.stick{background:var(--surface-2);z-index:2}
 .dtr-row .rv{text-align:right}
 /* Select mode (delete several attendance records) */
 .dtr-row.sel{grid-template-columns:28px minmax(160px,1.4fr) 110px 1.6fr 96px}
+.empgroup{margin:0 0 8px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.empgroup .emp-head{border-top:0}
+.empgroup .emp-head[aria-expanded="true"]{background:var(--surface-2);border-bottom:1px solid var(--line)}
+.empgroup .dtr{border:0;border-radius:0}
+.es-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}
+.es-stat{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.es-stat b{display:block;font-size:17px;font-variant-numeric:tabular-nums}
+.es-stat b small{font-size:12px;font-weight:600;color:var(--muted)}
+.es-stat span{font-size:12px;color:var(--muted)}
+.es-stat.bad b{color:var(--bad,#b42318)}.es-stat.warn b{color:var(--warn,#b54708)}.es-stat.ok b{color:var(--ok,#067647)}
 .dtr-row.sel.on{background:var(--accent-soft)}
 .dtr-row.sel.lk{cursor:not-allowed;opacity:.6}
 .dtr-row .pick{display:flex;align-items:center;justify-content:center}
@@ -623,7 +633,7 @@ const S={
   employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
-  ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
+  ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
 };
 const role=()=>S.viewAs?S.viewAs.role:(S.account?S.account.role:'NONE');
 /* A department head can manage up to 2 departments: department (main) + department2 (optional). */
@@ -1452,7 +1462,7 @@ function switchCompany(id){
   const ym=S.period&&S.period.ym;
   S.company=id;rememberCompany(S.account.email,id);
   S.settings=coDefaults();syncDepartments();S.viewAs=null;closeDlg();
-  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,multi:null,payslip:null,dtrDept:'',acctForm:false,acctEdit:null,otherCo:null,dtrSelMode:false,dtrSel:new Set()});
+  Object.assign(S.ui,{openRow:null,empEdit:null,empForm:false,importRows:null,importResult:null,multi:null,dtrEmp:'',dtrEmpOpen:new Set(),payslip:null,dtrDept:'',acctForm:false,acctEdit:null,otherCo:null,dtrSelMode:false,dtrSel:new Set()});
   S.auditMonth=todayISO().slice(0,7);
   startData();
   if(ym&&ym!==S.period.ym){S.period=monthPeriods(ym);watchPeriod()}
@@ -1691,14 +1701,19 @@ function pageDtr(){
   if(f.dtrCut){const c=S.period.cuts[f.dtrCut-1];rows=rows.filter(x=>x.work_date>=c.start&&x.work_date<=c.end)}
   if(f.dtrDept&&(!isHead||depts().includes(f.dtrDept)))rows=rows.filter(x=>{const e=empById(x.employee_id);return e&&e.department===f.dtrDept});
   if(f.dtrSearch){const q=f.dtrSearch.toUpperCase();rows=rows.filter(x=>empName(empById(x.employee_id)).toUpperCase().includes(q))}
-  const withCalc=rows.map(x=>({r:x,e:empById(x.employee_id),c:calcEntry(x,empById(x.employee_id))}));
+  if(f.dtrView==='emp'&&f.dtrSearch)f.dtrSearch=''; // the employee picker replaces the name search here
+  let withCalc=rows.map(x=>({r:x,e:empById(x.employee_id),c:calcEntry(x,empById(x.employee_id))}));
+  const allCalc=withCalc;
+  if(f.dtrView==='emp'&&f.dtrEmp)withCalc=withCalc.filter(o=>String(o.r.employee_id)===String(f.dtrEmp));
   const filt={all:()=>true,review:o=>(o.r.review_status||'FOR REVIEW')==='FOR REVIEW',issue:o=>o.r.review_status==='WITH ISSUE',approved:o=>o.r.review_status==='APPROVED',
     ot:o=>o.c.otActual>=S.settings.min_ot,absent:o=>o.c.status==='A'||o.c.status==='HD',exceptions:o=>o.c.status==='A'||o.c.status==='CHK'||o.c.late>0||o.c.ut>0||o.c.otPending};
   const list=withCalc.filter(filt[f.dtrFilter]||filt.all).sort((a,b)=>b.r.work_date.localeCompare(a.r.work_date)||(a.e?.surname||'').localeCompare(b.e?.surname||''));
   const groups={};for(const o of list)(groups[o.r.work_date]=groups[o.r.work_date]||[]).push(o);
   const reviewable=list.filter(o=>(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
   const segs=[['all','All'],['review','For review'],['exceptions','Exceptions'],['absent','Absent'],['ot','Overtime'],['issue','With issue'],['approved','Approved']];
-  let html=`<h1>Attendance</h1><p class="sub">${isHead?`Showing ${h(dept())} only.`:'Tap a row to review overtime, absences and remarks.'} attendance ${h(fmtRange(S.period.start,S.period.end))}.</p>`;
+  const byEmp=f.dtrView==='emp';
+  let html=`<div class="row" style="align-items:flex-end"><div><h1>Attendance</h1><p class="sub">${isHead?`Showing ${h(dept())} only.`:'Tap a row to review overtime, absences and remarks.'} attendance ${h(fmtRange(S.period.start,S.period.end))}.</p></div><span class="spacer"></span>
+    <div class="seg" role="group" aria-label="View" style="margin-bottom:12px">${[['date','By date'],['emp','By employee']].map(([k,l])=>`<button data-act="dtrView" data-v="${k}" aria-pressed="${(f.dtrView||'date')===k}">${l}</button>`).join('')}</div></div>`;
   if(isHead){const c=activeCut();if(S.deadlines[c.key]&&inPeriod(c)){const p=pendingOf(cutRows(c,depts()));html+=`<div class="banner ${deadlineMs(c)<Date.now()?'bad':(p?'warn':'ok')}">${cutName(c)} approvals due ${h(fmtDT(S.deadlines[c.key].at))} · ${countdownHtml(c)} · ${p} ${p===1?'record':'records'} left to review.</div>`}}
   const lk=S.period.cuts.filter(c=>cutLocked(c.n));
   const nr=withCalc.filter(o=>o.r._auto&&(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
@@ -1708,7 +1723,7 @@ function pageDtr(){
     <select data-change="dtrCut" aria-label="Cut-off"><option value="0">Whole month</option>${S.period.cuts.map(c=>`<option value="${c.n}" ${f.dtrCut===c.n?'selected':''}>${c.n===1?'1st':'2nd'} cut-off · ${h(fmtD(c.start))}–${h(fmtD(c.end))}</option>`).join('')}</select>
     <div class="seg" role="group" aria-label="Filter">${segs.map(([k,l])=>`<button data-act="dtrFilter" data-v="${k}" aria-pressed="${f.dtrFilter===k}">${l}</button>`).join('')}</div>
     ${!isHead||depts().length>1?`<select data-change="dtrDept" aria-label="Department"><option value="">${isHead?'Both departments':'All departments'}</option>${(isHead?depts():DEPARTMENTS).map(d=>`<option ${f.dtrDept===d?'selected':''}>${h(d)}</option>`).join('')}</select>`:''}
-    <input type="search" placeholder="Search name" value="${h(f.dtrSearch)}" data-change="dtrSearch" aria-label="Search name" style="width:160px">
+    ${byEmp?dtrEmpSelect(allCalc):`<input type="search" placeholder="Search name" value="${h(f.dtrSearch)}" data-change="dtrSearch" aria-label="Search name" style="width:160px">`}
     <span class="spacer"></span>
     ${canAppr&&reviewable&&!f.dtrSelMode?`<button class="btn ok" data-act="bulkApprove">Mark ${reviewable} shown as approved</button>`:''}
     ${canDelDtr()&&list.length&&!f.dtrSelMode?`<button class="btn danger" data-act="dtrSelMode">Select to delete</button>`:''}
@@ -1724,6 +1739,7 @@ function pageDtr(){
     html+=`<div class="panel empty"><b>${rows.length?'No records match this filter.':'No attendance for this pay period yet.'}</b>${!rows.length&&can('importDtr')?'<a class="btn primary" href="#import" style="margin-top:10px">Import DTR</a>':(!rows.length?'HR will import it from the timekeeping app.':'')}</div>`;
     return html;
   }
+  if(byEmp)return html+dtrByEmployee(list,canAppr);
   for(const d of Object.keys(groups)){
     html+=`<section class="daygroup"><div class="dayhead">${WD[dow(d)]}, ${h(fmtDY(d))}</div><div class="dtr">`;
     for(const o of groups[d])html+=(f.dtrSelMode&&canDelDtr())?dtrSelRow(o):dtrRow(o,canAppr);
@@ -1745,11 +1761,11 @@ function dtrChips(o){
   if(o.r.remarks)ch.push(`<span class="chip" title="${h(o.r.remarks)}">Note</span>`);
   return ch.join('');
 }
-function dtrRow(o,canAppr){
+function dtrRow(o,canAppr,byDate){
   const id=o.r._id, open=S.ui.openRow===id, rs=o.r.review_status||'FOR REVIEW';
   const rsCls=rs==='APPROVED'?'ok':(rs==='WITH ISSUE'?'bad':'warn');
   let html=`<button class="dtr-row" data-act="toggleRow" data-id="${h(id)}" aria-expanded="${open}">
-    <span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')}${o.e&&o.e.position?' · '+h(o.e.position):''}</span></span>
+    ${byDate?`<span class="nm"><b>${h(fmtDY(o.r.work_date))}</b><span>${WD[dow(o.r.work_date)]}</span></span>`:`<span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')}${o.e&&o.e.position?' · '+h(o.e.position):''}</span></span>`}
     <span class="tm">${h(o.r.time_in||'—')} – ${h(o.r.time_out||'—')}</span>
     <span class="chips">${dtrChips(o)}</span>
     <span class="rv"><span class="chip ${rsCls}">${h(rs==='FOR REVIEW'?'For review':(rs==='WITH ISSUE'?'With issue':'Approved'))}</span></span>
@@ -1757,13 +1773,64 @@ function dtrRow(o,canAppr){
   if(open)html+=dtrEditor(o,canAppr);
   return html;
 }
+/* ---------- Attendance by employee ----------
+   Same records and filters as the date view, grouped per employee with a summary of the period. */
+function dtrEmpSelect(all){
+  const m=new Map();for(const o of all)if(o.e&&!m.has(String(o.e.id)))m.set(String(o.e.id),o.e);
+  if(S.ui.dtrEmp&&!m.has(String(S.ui.dtrEmp))){const e=empById(S.ui.dtrEmp);if(e)m.set(String(e.id),e)}
+  const emps=[...m.values()].sort((a,b)=>empName(a).localeCompare(empName(b)));
+  return `<select data-change="dtrEmp" aria-label="Employee" style="max-width:260px"><option value="">All employees (${emps.length})</option>${emps.map(e=>`<option value="${e.id}" ${String(S.ui.dtrEmp)===String(e.id)?'selected':''}>${h(empName(e))}</option>`).join('')}</select>`;
+}
+function dtrEmpSummary(items){
+  const t={days:0,present:0,half:0,absent:0,chk:0,late:0,lateN:0,ut:0,utN:0,ot:0,otOk:0,otPend:0,worked:0,review:0,issue:0};
+  const minOt=S.settings.min_ot;
+  for(const o of items){
+    const c=o.c,rs=o.r.review_status||'FOR REVIEW';t.days++;
+    if(c.status==='P')t.present++;else if(c.status==='HD')t.half++;else if(c.status==='A')t.absent++;else if(c.status==='CHK')t.chk++;
+    if(c.late){t.late+=c.late;t.lateN++}
+    if(c.ut){t.ut+=c.ut;t.utN++}
+    if(c.otActual>=minOt){t.ot+=c.otActual;const a=o.r.ot_approval||'PENDING';if(a==='YES')t.otOk+=c.otActual;else if(a!=='NO')t.otPend+=c.otActual}
+    t.worked+=c.worked||0;
+    if(rs==='FOR REVIEW')t.review++;else if(rs==='WITH ISSUE')t.issue++;
+  }
+  return t;
+}
+function dtrEmpStats(t){
+  const st=(v,l,cls)=>`<div class="es-stat ${cls||''}"><b>${v}</b><span>${l}</span></div>`;
+  return `<div class="es-stats">${st(t.present+(t.half?` <small>+${t.half} half</small>`:''),'Days present','')}${st(t.absent,'Absent',t.absent?'bad':'')}${t.chk?st(t.chk,'Missing punch','bad'):''}
+    ${st(t.lateN?fmtMin(t.late):'0','Late'+(t.lateN?` · ${t.lateN}×`:''),t.lateN?'warn':'')}${st(t.utN?fmtMin(t.ut):'0','Undertime'+(t.utN?` · ${t.utN}×`:''),t.utN?'warn':'')}
+    ${st(t.ot?fmtMin(t.ot):'0','Overtime'+(t.ot?` · ${fmtMin(t.otOk)} approved`:''),t.otPend?'warn':'')}${st(fmtMin(t.worked),'Hours worked','')}
+    ${st(t.review,'For review',t.review?'warn':'ok')}${t.issue?st(t.issue,'With issue','bad'):''}</div>`;
+}
+function dtrByEmployee(list,canAppr){
+  const f=S.ui,sel=f.dtrSelMode&&canDelDtr();
+  const g=new Map();
+  for(const o of list){const k=String(o.r.employee_id);if(!g.has(k))g.set(k,{e:o.e,id:k,items:[]});g.get(k).items.push(o)}
+  const groups=[...g.values()].sort((a,b)=>empName(a.e).localeCompare(empName(b.e)));
+  for(const x of groups)x.items.sort((a,b)=>a.r.work_date.localeCompare(b.r.work_date));
+  const rowsHtml=x=>`<div class="dtr">${x.items.map(o=>sel?dtrSelRow(o,true):dtrRow(o,canAppr,true)).join('')}</div>`;
+  if(f.dtrEmp){
+    const x=groups[0];if(!x)return '';
+    const e=x.e,t=dtrEmpSummary(x.items);
+    return `<div class="panel" style="padding:14px 16px"><div class="row" style="align-items:flex-start"><div><h2 style="margin:0">${h(empName(e))}</h2><p class="muted small" style="margin:2px 0 0">${h(e?e.department||'':'')}${e&&e.position?' · '+h(e.position):''}${e&&e.branch?' · '+h(e.branch):''} · ${x.items.length} ${x.items.length===1?'day':'days'} shown</p></div><span class="spacer"></span><button class="btn sm" data-act="dtrEmpClear">All employees</button></div>${dtrEmpStats(t)}</div>${rowsHtml(x)}`;
+  }
+  const open=f.dtrEmpOpen||(f.dtrEmpOpen=new Set());
+  return `<p class="muted small" style="margin:0 0 8px">${groups.length} ${groups.length===1?'employee':'employees'} · tap a name to see their days, or pick one employee above.${groups.length>1?` <button class="btn sm" data-act="dtrEmpAll" data-v="${open.size?'0':'1'}">${open.size?'Collapse all':'Expand all'}</button>`:''}</p>`+groups.map(x=>{
+    const t=dtrEmpSummary(x.items),on=open.has(x.id);
+    const flags=[t.absent?`<span class="chip bad">${t.absent} absent</span>`:'',t.chk?`<span class="chip bad">${t.chk} missing punch</span>`:'',t.lateN?`<span class="chip warn">Late ${fmtMin(t.late)}</span>`:'',t.utN?`<span class="chip warn">UT ${fmtMin(t.ut)}</span>`:'',t.ot?`<span class="chip ${t.otPend?'warn':'ok'}">OT ${fmtMin(t.ot)}</span>`:'',t.review?`<span class="chip warn">${t.review} for review</span>`:(t.issue?'':'<span class="chip ok">All reviewed</span>'),t.issue?`<span class="chip bad">${t.issue} with issue</span>`:''].join('');
+    return `<section class="empgroup"><button class="dtr-row emp-head" data-act="dtrEmpToggle" data-id="${h(x.id)}" aria-expanded="${on}">
+      <span class="nm"><b>${on?'▾':'▸'} ${h(empName(x.e))}</b><span>${h(x.e?x.e.department||'':'')} · ${x.items.length} ${x.items.length===1?'day':'days'}</span></span>
+      <span class="tm">${t.present+t.half} present</span><span class="chips">${flags}</span>
+      <span class="rv"><span class="btn sm" data-act="dtrEmpPick" data-id="${h(x.id)}">Open</span></span></button>
+      ${on?rowsHtml(x):''}</section>`}).join('');
+}
 /* Who may delete attendance records: HR and Admin (time correction or DTR import access). Department heads never. */
 function canDelDtr(){return !S.readOnly&&role()!=='DEPT_HEAD'&&(can('editTimes')||can('importDtr'))}
-function dtrSelRow(o){
+function dtrSelRow(o,byDate){
   const id=o.r._id,lk=lockedDate(o.r.work_date)||!!o.r._auto,on=S.ui.dtrSel.has(id)&&!lk;
   return `<label class="dtr-row sel${on?' on':''}${lk?' lk':''}" title="${o.r._auto?'No time record was imported for this day, so there is nothing to delete':(lk?'This cut-off is approved and locked':'')}">
     <span class="pick"><input type="checkbox" data-change="dtrSel" data-id="${h(id)}" ${on?'checked':''} ${lk?'disabled':''} aria-label="Select ${h(empName(o.e))} ${h(o.r.work_date)}"></span>
-    <span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')} · ${h(o.r.source||'—')}</span></span>
+    ${byDate?`<span class="nm"><b>${h(fmtDY(o.r.work_date))}</b><span>${WD[dow(o.r.work_date)]} · ${h(o.r.source||'—')}</span></span>`:`<span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')} · ${h(o.r.source||'—')}</span></span>`}
     <span class="tm">${h(o.r.time_in||'—')} – ${h(o.r.time_out||'—')}</span>
     <span class="chips">${dtrChips(o)}</span>
     <span class="rv">${o.r._auto?'':(lk?'<span class="chip">Locked</span>':'')}</span>
@@ -3512,6 +3579,11 @@ const actions={
   stopPreview(){S.viewAs=null;scheduleRender()},
   startPreview(){const r=$('#pvRole').value;S.viewAs={role:r,dept:r==='DEPT_HEAD'?$('#pvDept').value:null};S.route='dashboard';location.hash='dashboard';scheduleRender()},
   dtrFilter(el){S.ui.dtrFilter=el.dataset.v;S.ui.openRow=null;scheduleRender()},
+  dtrView(el){S.ui.dtrView=el.dataset.v;S.ui.openRow=null;if(el.dataset.v==='emp')S.ui.dtrSearch='';render()},
+  dtrEmpToggle(el,e){if(e&&e.target.closest('[data-act="dtrEmpPick"]'))return;const s=S.ui.dtrEmpOpen||(S.ui.dtrEmpOpen=new Set());s.has(el.dataset.id)?s.delete(el.dataset.id):s.add(el.dataset.id);render()},
+  dtrEmpPick(el){S.ui.dtrEmp=el.dataset.id;S.ui.openRow=null;render();window.scrollTo({top:0})},
+  dtrEmpClear(){S.ui.dtrEmp='';S.ui.openRow=null;render()},
+  dtrEmpAll(el){const s=S.ui.dtrEmpOpen=new Set();if(el.dataset.v==='1')for(const b of document.querySelectorAll('[data-act="dtrEmpToggle"]'))s.add(b.dataset.id);render()},
   toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;render()},
   bulkApprove(el){bulkApprove(el)},
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;S.ui.importNote='';scheduleRender()},
@@ -3635,6 +3707,7 @@ document.addEventListener('change',async e=>{
   else if(k==='accessMode'){const box=$('#customAccess');if(box)box.style.display=el.value==='custom'?'':'none';if(el.value==='custom'&&box){const f=el.closest('form'),r=f.querySelector('select[name=role]');if(r&&!S.ui.acctEdit){const v=roleAccess(r.value);for(const[pk]of PERMS){const c=f.querySelector(`input[name="p_${pk}"]`);if(c)c.checked=!!v[pk]}}}}
   else if(k==='dtrCut'){S.ui.dtrCut=Number(el.value)||0;S.ui.openRow=null;render()}
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
+  else if(k==='dtrEmp'){S.ui.dtrEmp=el.value;S.ui.openRow=null;render()}
   else if(k==='fileIn')handleFile(el);
   else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
   else if(k==='impAssign')impAssign(Number(el.dataset.i),el.value);
