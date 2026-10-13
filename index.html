@@ -687,6 +687,19 @@ const dtrAll=()=>{const a=autoAbsents();return a.length?S.dtr.concat(a):S.dtr};
 const dtrDoc=r=>{const o={...r};delete o._id;delete o._auto;return o};
 
 /* ---------------- Calculations (from the workbook rules) ---------------- */
+/* Overtime to approve: HR or the department head may approve only part of the computed OT.
+   ot_approved_min holds the minutes approved; empty means all of the computed OT. */
+const otCapMin=r=>{const v=r&&r.ot_approved_min;if(v==null||v==='')return null;const n=Number(v);return isFinite(n)&&n>=0?Math.round(n):null};
+const fmtHM=m=>{m=Math.max(0,Math.round(m||0));return Math.floor(m/60)+':'+pad(m%60)};
+/* "2" or "1.5" = hours, "1:30" = hours and minutes, "45m" = minutes. Returns minutes, null when blank, NaN when not readable. */
+function parseOtHours(v){
+  const s=String(v==null?'':v).trim().toLowerCase().replace(/\s+/g,'');if(!s)return null;
+  let m=s.match(/^(\d{1,2}):(\d{1,2})$/);if(m)return +m[2]<60?(+m[1])*60+(+m[2]):NaN;
+  m=s.match(/^(\d+)m(in)?s?$/);if(m)return +m[1];
+  m=s.match(/^(\d+)h(?:(\d{1,2})m?)?$/);if(m)return (+m[1])*60+(+(m[2]||0));
+  m=s.match(/^(\d*\.?\d+)(h|hr|hrs)?$/);if(m)return Math.round(parseFloat(m[1])*60);
+  return NaN;
+}
 function calcEntry(r,emp){
   const st=S.settings, hol=holidayMap();
   let dayClass=dow(r.work_date)===Number(st.rest_day)?'RD':'REG';
@@ -710,11 +723,12 @@ function calcEntry(r,emp){
   }
   else if(status==='CHK'&&tiA!=null&&dayClass==='REG')late=Math.max(0,Math.round(tiA-sIn)-Number(st.grace_min)); // time-out missing (not yet out, or forgot to punch): the late still counts from the time-in
   const otOk=emp?emp.ot_eligible!==false:true;
-  const approvedOt=(otOk&&r.ot_approval==='YES'&&otActual>=Number(st.min_ot))?otActual:0;
+  const otCap=otCapMin(r);
+  const approvedOt=(otOk&&r.ot_approval==='YES'&&otActual>=Number(st.min_ot))?(otCap!=null?Math.min(otActual,otCap):otActual):0;
   const offset=r.offset_ot_to_absent==='YES'?Math.min(approvedOt,Math.max(0,Number(r.offset_minutes)||0)):0;
   const absent=dayClass==='REG'?(status==='A'?1:(status==='HD'?0.5:0)):0;
   const otPending=otOk&&otActual>=Number(st.min_ot)&&(!r.ot_approval||r.ot_approval==='PENDING');
-  return {status,dayClass,late,ut,worked,otActual,otApproved:approvedOt,otPaid:approvedOt-offset,offset,nd,absent,otPending};
+  return {status,dayClass,late,ut,worked,otActual,otCapped:otCap!=null&&approvedOt<otActual&&r.ot_approval==='YES',otApproved:approvedOt,otPaid:approvedOt-offset,offset,nd,absent,otPending};
 }
 /* SSS (2025 table, as in the payroll file): MSC from compensation in ₱500 bands (min 5,000, max 35,000).
    Regular SS on MSC up to 20,000 (ER 10%, EE 5%); the excess is the Mandatory Provident Fund (ER 10%, EE 5%).
@@ -1755,7 +1769,7 @@ function dtrChips(o){
   if(c.dayClass!=='REG'&&c.status!=='RD'&&c.status!=='HOL')ch.push(`<span class="chip acc">${{RD:'Rest day',RH:'Regular holiday',SNW:'Special holiday'}[c.dayClass]}</span>`);
   if(c.late)ch.push(`<span class="chip warn">Late ${fmtMin(c.late)}</span>`);
   if(c.ut)ch.push(`<span class="chip warn">Undertime ${fmtMin(c.ut)}</span>`);
-  if(c.otActual>=st.min_ot){const a=o.r.ot_approval||'PENDING';ch.push(`<span class="chip ${a==='YES'?'ok':(a==='NO'?'':'warn')}">OT ${fmtMin(c.otActual)} · ${a==='YES'?'approved':(a==='NO'?'not approved':'pending')}</span>`)}
+  if(c.otActual>=st.min_ot){const a=o.r.ot_approval||'PENDING';ch.push(`<span class="chip ${a==='YES'?'ok':(a==='NO'?'':'warn')}">OT ${fmtMin(c.otActual)} · ${a==='YES'?(c.otCapped?`${fmtMin(c.otApproved)} approved`:'approved'):(a==='NO'?'not approved':'pending')}</span>`)}
   else if(c.otActual>0)ch.push(`<span class="chip">OT ${fmtMin(c.otActual)} (under ${st.min_ot}m)</span>`);
   if(c.nd)ch.push(`<span class="chip acc">Night ${fmtMin(c.nd)}</span>`);
   if(o.r.remarks)ch.push(`<span class="chip" title="${h(o.r.remarks)}">Note</span>`);
@@ -1789,7 +1803,7 @@ function dtrEmpSummary(items){
     if(c.status==='P')t.present++;else if(c.status==='HD')t.half++;else if(c.status==='A')t.absent++;else if(c.status==='CHK')t.chk++;
     if(c.late){t.late+=c.late;t.lateN++}
     if(c.ut){t.ut+=c.ut;t.utN++}
-    if(c.otActual>=minOt){t.ot+=c.otActual;const a=o.r.ot_approval||'PENDING';if(a==='YES')t.otOk+=c.otActual;else if(a!=='NO')t.otPend+=c.otActual}
+    if(c.otActual>=minOt){t.ot+=c.otActual;const a=o.r.ot_approval||'PENDING';if(a==='YES')t.otOk+=c.otApproved;else if(a!=='NO')t.otPend+=c.otActual}
     t.worked+=c.worked||0;
     if(rs==='FOR REVIEW')t.review++;else if(rs==='WITH ISSUE')t.issue++;
   }
@@ -1872,6 +1886,7 @@ function dtrEditor(o,canAppr){
       <label class="f">Time out<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
+      <label class="f">OT hours to approve <span class="muted small">(blank = all ${fmtHM(c.otActual)})</span><input type="text" name="ot_hours" inputmode="decimal" autocomplete="off" maxlength="6" placeholder="${fmtHM(c.otActual)}" value="${otCapMin(r)!=null?fmtHM(otCapMin(r)):''}" ${dis||(c.otActual<S.settings.min_ot?'disabled':'')} title="Hours of overtime to pay, e.g. 1, 1.5 or 1:30. Leave blank to pay all of the computed overtime."></label>
       <label class="f">Absence${sel('absent_approval',[['PENDING','Pending'],['APPROVED','Approved'],['NOT APPROVED','Not approved']],r.absent_approval||'PENDING')}</label>
       <label class="f">Use OT to offset absences${sel('offset_ot_to_absent',[['NO','No'],['YES','Yes']],r.offset_ot_to_absent||'NO')}</label>
       <label class="f">Offset minutes<input type="number" name="offset_minutes" min="0" step="1" value="${h(r.offset_minutes||0)}" ${dis}></label>
@@ -1894,6 +1909,16 @@ async function saveDtr(form){
   const fd=new FormData(form), patch={};
   const g=k=>fd.get(k);
   if(can('approveDtr')){
+    let otMin=null;
+    if(fd.has('ot_hours')){
+      otMin=parseOtHours(g('ot_hours'));
+      if(Number.isNaN(otMin)){toast('OT hours: enter hours like 1, 1.5 or 1:30 — or leave it blank to approve all the overtime.',true);return}
+      const actual=calcEntry(r,e).otActual;
+      if(otMin!=null&&otMin>actual){toast(`OT hours can’t be more than the computed overtime (${fmtHM(actual)}).`,true);return}
+      if(otMin!=null&&otMin>=actual)otMin=null; // the full amount: keep it blank
+      if(otMin!=null&&(g('ot_approval')||'PENDING')!=='YES'){toast('Set Overtime to “Approve” to approve part of the overtime, or clear the OT hours.',true);return}
+    }else otMin=otCapMin(r);
+    patch.ot_approved_min=(g('ot_approval')||'PENDING')==='YES'?otMin:null;
     Object.assign(patch,{ot_approval:g('ot_approval')||'PENDING',absent_approval:g('absent_approval')||'PENDING',offset_ot_to_absent:g('offset_ot_to_absent')||'NO',
       offset_minutes:Math.max(0,parseInt(g('offset_minutes')||'0',10)||0),remarks:(g('remarks')||'').trim(),review_status:g('review_status')||'FOR REVIEW',reviewed_by:actor(),reviewed_at:nowISO()});
   }
@@ -1913,7 +1938,7 @@ async function saveDtr(form){
       await jr.set(cp('dtr/')+id,{...dtrDoc(r),...patch},null);
     } else await jr.update(cp('dtr/')+id,patch,r);
     S.ui.openRow=null;
-    logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
+    logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}${patch.ot_approved_min!=null?` (${fmtHM(patch.ot_approved_min)} of ${fmtHM(calcEntry(r,e).otActual)} h)`:''}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
     toast('Review saved');scheduleRender();
   }catch(err){writeError(err)}
 }
@@ -2123,7 +2148,7 @@ async function ihMove(idxs,toEid){
       if(!st.ok){skipped.push(`${fmtD(r.d)}: ${st.t.toLowerCase()}`);continue}
       const dest=await Store.get(toPath);
       if(dest&&(dest.time_in||dest.time_out)){skipped.push(`${fmtD(r.d)}: ${empName(to)} already has time that day`);continue}
-      const fresh={review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null,ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,status_override:null};
+      const fresh={review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null,ot_approved_min:null,ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,status_override:null};
       const carry={time_in:cur.time_in||null,time_out:cur.time_out||null,source:cur.source||'upload',imported_at:cur.imported_at||nowISO(),import_id:b.meta.legacy?null:b.meta.id,import_name:b.meta.legacy?null:(r.n||''),corrected:!!cur.corrected};
       if(dest)await jr.update(toPath,{...carry,...fresh},dest);
       else await jr.set(toPath,{employee_id:toEid,work_date:r.d,...carry,...fresh,remarks:''},null);
