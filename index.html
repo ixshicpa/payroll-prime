@@ -137,7 +137,8 @@ label.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mu
 label.f > input,label.f > select,label.f > textarea{color:var(--ink);font-weight:400;font-size:15px}
 input.t24{font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .mtab td input{width:100%;min-width:84px}.mtab td input[type=date]{min-width:140px}.mtab td{vertical-align:middle}
-.mfill{margin-top:12px}.mfill summary{cursor:pointer;font-weight:600}
+.mfill{margin-top:12px}
+table.sch td{padding:4px 8px;vertical-align:middle}table.sch input.t24{width:86px}table.sch tr.unsel{opacity:.55}.mfill summary{cursor:pointer;font-weight:600}
 label.chk{display:flex;gap:8px;align-items:center;font-size:14px}
 .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
 .grid .wide{grid-column:1/-1}
@@ -166,6 +167,14 @@ th.stick{background:var(--surface-2);z-index:2}
 .dtr{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
 .dtr-row{display:grid;grid-template-columns:minmax(160px,1.4fr) 110px 1.6fr 96px;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--line);cursor:pointer;background:none;border-left:0;border-right:0;border-bottom:0;width:100%;text-align:left}
 .dtr-row:first-child{border-top:0}
+.dtr-line{display:grid;grid-template-columns:1fr;border-top:1px solid var(--line)}
+.dtr-line:first-child{border-top:0}
+.dtr-line > .dtr-row{border-top:0}
+.dtr-line.has-qa{grid-template-columns:1fr auto;align-items:center}
+.dtr-qa{display:flex;gap:6px;align-items:center;padding:6px 14px 6px 0;flex-wrap:wrap;justify-content:flex-end}
+.dtr-qa .btn.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.dtr-qa .qa-issue{color:var(--warn)}
+.dtr-qa .qa-sel{font-size:13px;padding:5px 8px;max-width:170px}
 .dtr-row:hover{background:var(--surface-2)}
 .dtr-row .nm b{display:block;font-size:14px}
 .dtr-row .nm span{font-size:12px;color:var(--muted)}
@@ -249,6 +258,9 @@ tr.unsel td{color:var(--muted)}
 .pcard .fig div b{font-variant-numeric:tabular-nums;font-weight:650}
 @media (max-width:720px){
   .dtr-row{grid-template-columns:1fr auto;}
+  .dtr-line.has-qa{grid-template-columns:1fr}
+  .dtr-qa{padding:0 14px 10px;justify-content:flex-start}
+  .dtr-qa .btn,.dtr-qa .qa-sel{flex:1;min-height:40px;max-width:none}
   .dtr-row .chips{grid-column:1/-1}
   .dtr-row .rv{grid-row:1;grid-column:2}
   .dtr-row .tm{grid-column:1}
@@ -460,6 +472,9 @@ const NAV=[
   ['employees','Employees','viewEmployees'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['advances','Company advances','viewPayroll'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
+const ABS_REASONS=[['SL','Sick leave'],['VL','Vacation leave'],['EL','Emergency leave'],['LWOP','Leave without pay'],['AWOL','AWOL / no notice'],['OTHER','Other reason']];
+const absLabel=k=>(ABS_REASONS.find(x=>x[0]===k)||[,''])[1];
+const absApproval=k=>k==='AWOL'?'NOT APPROVED':'APPROVED';
 const STATUS_LABEL={P:'Present',A:'Absent',CHK:'Missing punch',RD:'Rest day',HOL:'Holiday',HD:'Half day'};
 
 /* ---------------- Utilities ---------------- */
@@ -677,8 +692,8 @@ function autoAbsents(){
     const through=cutLocked(c.n)?(S.payDocs[c.n].absent_through||''):absentThrough(c); // payroll approved before this feature: nothing added
     if(!through)continue;
     for(let d=c.start;d<=c.end&&d<=through;d=addDays(d,1)){
-      if(dow(d)===Number(st.rest_day)||hol[d])continue;
-      for(const e of emps)if(!have.has(String(e.id)+'_'+d))rows.push(blankAbsent(e.id,d));
+      if(hol[d])continue;
+      for(const e of emps)if(!isRestDay(e,d)&&!have.has(String(e.id)+'_'+d))rows.push(blankAbsent(e.id,d));
     }
   }
   _autoAbs={key,rows};return rows;
@@ -700,14 +715,25 @@ function parseOtHours(v){
   m=s.match(/^(\d*\.?\d+)(h|hr|hrs)?$/);if(m)return Math.round(parseFloat(m[1])*60);
   return NaN;
 }
+/* Shift per day. The employee's shift (or the company default) applies unless a day has its own entry in
+   employee.day_shifts: { 'yyyy-mm-dd': 'HH:MM-HH:MM' } for a different shift that day, or 'OFF' for a day off.
+   A day with its own shift is a working day even if it falls on the usual rest day. */
+function dayShift(emp,d){
+  const v=emp&&emp.day_shifts&&emp.day_shifts[d];if(!v)return null;
+  if(v==='OFF')return{off:true};
+  const m=String(v).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);return m?{in:m[1],out:m[2]}:null;
+}
+function isRestDay(emp,d){const s=dayShift(emp,d);if(s)return !!s.off;return dow(d)===Number(S.settings.rest_day)}
+function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&!s.off)return{in:s.in,out:s.out,own:true};return{in:(emp&&emp.shift_in)||S.settings.std_in,out:(emp&&emp.shift_out)||S.settings.std_out,own:false}}
 function calcEntry(r,emp){
   const st=S.settings, hol=holidayMap();
-  let dayClass=dow(r.work_date)===Number(st.rest_day)?'RD':'REG';
+  let dayClass=isRestDay(emp,r.work_date)?'RD':'REG';
   if(hol[r.work_date])dayClass=hol[r.work_date];
   const ti=toMin(r.time_in); let to=toMin(r.time_out);
   const status=r.status_override||((ti!=null)!==(to!=null)?'CHK':(ti!=null&&to!=null?'P':(dayClass==='RD'?'RD':(dayClass!=='REG'?'HOL':'A'))));
-  const sIn=toMin((emp&&emp.shift_in)||st.std_in), ndS=toMin(st.nd_start), ndE=toMin(st.nd_end);
-  let sOut=toMin((emp&&emp.shift_out)||st.std_out); if(sOut<=sIn)sOut+=1440;
+  const sh=shiftOf(emp,r.work_date);
+  const sIn=toMin(sh.in), ndS=toMin(st.nd_start), ndE=toMin(st.nd_end);
+  let sOut=toMin(sh.out); if(sOut<=sIn)sOut+=1440;
   let tiA=ti; if(tiA!=null&&sOut>1440&&tiA<sIn-720)tiA+=1440;
   if(tiA!=null&&to!=null&&to<tiA)to+=1440;
   let late=0,ut=0,worked=0,otActual=0,nd=0;
@@ -753,7 +779,7 @@ function cutCalc(e,rows,cutoff){
   const otMult=c=>c==='REG'?st.ot_reg:(c==='RH'?st.ot_rh:st.ot_snw);
   const ndBase=c=>c==='REG'?st.nd_base_reg:(c==='RH'?st.nd_base_rh:st.nd_base_snw);
   const doleFrom=String(st.dole_from||'2026-10-11');
-  const dayKind=(cls,d)=>{const rest=dow(d)===Number(st.rest_day);return cls==='RH'?(rest?'RHRD':'RH'):(cls==='SNW'?(rest?'SNWRD':'SNW'):cls)};
+  const dayKind=(cls,d)=>{const rest=isRestDay(e,d);return cls==='RH'?(rest?'RHRD':'RH'):(cls==='SNW'?(rest?'SNWRD':'SNW'):cls)};
   const dayMult=k=>({REG:1,RD:1+Number(st.rd_prem),SNW:1+Number(st.hol_snw_prem),SNWRD:1+Number(st.hol_snw_rd_prem),RH:1+Number(st.hol_rh_prem),RHRD:(1+Number(st.hol_rh_prem))*(1+Number(st.rd_prem))})[k]||1;
   const ndBase2=k=>({REG:Number(st.nd_base_reg),RD:Number(st.nd_base_snw),SNW:Number(st.nd_base_snw),SNWRD:1+Number(st.hol_snw_rd_prem),RH:Number(st.nd_base_rh),RHRD:Number(st.nd_base_rh)*(1+Number(st.rd_prem))})[k]||1;
   const mr=numOrNull(e.monthly_rate),dr=numOrNull(e.daily_rate);
@@ -798,7 +824,7 @@ function cutCalc(e,rows,cutoff){
   }
   let missing=0;
   for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
-    const isRest=dow(d)===Number(st.rest_day);
+    const isRest=isRestDay(e,d);
     if(!isMonthly&&hol[d]==='RH'&&!isRest){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++}}
     if(!isRest&&!hol[d]&&!byDate[d])missing++;
   }
@@ -1694,11 +1720,10 @@ function dashHead(){
     ${monthNote(c)}</div>`;
   html+=`<div class="panel"><h2>What to do</h2><ol class="steps">
     <li>Tap <b>Start reviewing</b> (or open <b>Attendance</b>). Only your department’s employees are shown.</li>
-    <li>Tap a row marked <b>For review</b> and check the time in and time out.</li>
-    <li><b>Overtime:</b> choose <b>Approve</b> or <b>Don’t approve</b>. Overtime is only paid when you approve it.</li>
-    <li><b>Absences:</b> choose <b>Approved</b> if there was a valid reason or leave, or <b>Not approved</b>. Write the reason in <b>Remarks</b>.</li>
-    <li>Set <b>Review</b> to <b>Approved</b> and tap <b>Save review</b>. If something looks wrong (for example a wrong time), choose <b>With issue</b> and explain in Remarks so HR can fix it.</li>
-    <li>When every row looks right, you can use <b>Mark … shown as approved</b> to finish faster. Overtime still needs its own approval.</li>
+    <li>Tap <b>✓ Approve clean days</b> first. It approves every day with complete punches and no late, undertime, overtime or absence, so only the days that need a decision are left.</li>
+    <li>For the rest, use the buttons on each row: <b>✓ Approve</b>, <b>✓ Approve + OT</b> / <b>Approve, no OT</b>, or pick the <b>Absence reason</b>. Use <b>⚠ Issue</b> when something is wrong and write what HR should fix.</li>
+    <li><b>Overtime is only paid when you approve it.</b> To approve only part of it (for example 1 hour of 2h 30m), tap the row and type the hours in <b>OT hours to approve</b>.</li>
+    <li>Need to change something else? Tap the row to open it, make the change and tap <b>Save review</b>.</li>
     <li>Finish before the deadline above.</li>
   </ol>
   <p class="muted small" style="margin-bottom:0"><b>You don’t need to:</b> import the DTR, change time records, or work on payroll — HR and Payroll handle those.</p></div>`;
@@ -1724,6 +1749,8 @@ function pageDtr(){
   const list=withCalc.filter(filt[f.dtrFilter]||filt.all).sort((a,b)=>b.r.work_date.localeCompare(a.r.work_date)||(a.e?.surname||'').localeCompare(b.e?.surname||''));
   const groups={};for(const o of list)(groups[o.r.work_date]=groups[o.r.work_date]||[]).push(o);
   const reviewable=list.filter(o=>(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
+  const clean=list.filter(isCleanDay);
+  f.dtrShownIds=list.map(o=>o.r._id);f.dtrCleanIds=clean.map(o=>o.r._id);
   const segs=[['all','All'],['review','For review'],['exceptions','Exceptions'],['absent','Absent'],['ot','Overtime'],['issue','With issue'],['approved','Approved']];
   const byEmp=f.dtrView==='emp';
   let html=`<div class="row" style="align-items:flex-end"><div><h1>Attendance</h1><p class="sub">${isHead?`Showing ${h(dept())} only.`:'Tap a row to review overtime, absences and remarks.'} attendance ${h(fmtRange(S.period.start,S.period.end))}.</p></div><span class="spacer"></span>
@@ -1739,7 +1766,8 @@ function pageDtr(){
     ${!isHead||depts().length>1?`<select data-change="dtrDept" aria-label="Department"><option value="">${isHead?'Both departments':'All departments'}</option>${(isHead?depts():DEPARTMENTS).map(d=>`<option ${f.dtrDept===d?'selected':''}>${h(d)}</option>`).join('')}</select>`:''}
     ${byEmp?dtrEmpSelect(allCalc):`<input type="search" placeholder="Search name" value="${h(f.dtrSearch)}" data-change="dtrSearch" aria-label="Search name" style="width:160px">`}
     <span class="spacer"></span>
-    ${canAppr&&reviewable&&!f.dtrSelMode?`<button class="btn ok" data-act="bulkApprove">Mark ${reviewable} shown as approved</button>`:''}
+    ${canAppr&&clean.length&&!f.dtrSelMode?`<button class="btn ok" data-act="approveClean" title="Approves only days with complete punches and no late, undertime, overtime or absence">✓ Approve ${clean.length} clean ${clean.length===1?'day':'days'}</button>`:''}
+    ${canAppr&&reviewable&&!f.dtrSelMode?`<button class="btn" data-act="bulkApprove">Mark all ${reviewable} shown as approved</button>`:''}
     ${canDelDtr()&&list.length&&!f.dtrSelMode?`<button class="btn danger" data-act="dtrSelMode">Select to delete</button>`:''}
   </div>`;
   if(f.dtrSelMode&&canDelDtr()){
@@ -1766,7 +1794,9 @@ function dtrChips(o){
   const sCls={P:'ok',A:'bad',CHK:'bad',RD:'',HOL:'acc',HD:'warn'}[c.status]||'';
   ch.push(`<span class="chip ${sCls}">${STATUS_LABEL[c.status]||c.status}</span>`);
   if(o.r._auto)ch.push(`<span class="chip bad" title="No time in or time out was imported for this working day">No record</span>`);
+  {const ds=dayShift(o.e,o.r.work_date);if(ds)ch.push(ds.off?'<span class="chip acc" title="Day off set in the daily schedule">Day off</span>':`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`)}
   if(c.dayClass!=='REG'&&c.status!=='RD'&&c.status!=='HOL')ch.push(`<span class="chip acc">${{RD:'Rest day',RH:'Regular holiday',SNW:'Special holiday'}[c.dayClass]}</span>`);
+  if(o.r.absent_reason&&(c.status==='A'||c.status==='HD'))ch.push(`<span class="chip ${o.r.absent_reason==='AWOL'?'bad':'acc'}">${h(absLabel(o.r.absent_reason))}</span>`);
   if(c.late)ch.push(`<span class="chip warn">Late ${fmtMin(c.late)}</span>`);
   if(c.ut)ch.push(`<span class="chip warn">Undertime ${fmtMin(c.ut)}</span>`);
   if(c.otActual>=st.min_ot){const a=o.r.ot_approval||'PENDING';ch.push(`<span class="chip ${a==='YES'?'ok':(a==='NO'?'':'warn')}">OT ${fmtMin(c.otActual)} · ${a==='YES'?(c.otCapped?`${fmtMin(c.otApproved)} approved`:'approved'):(a==='NO'?'not approved':'pending')}</span>`)}
@@ -1778,12 +1808,13 @@ function dtrChips(o){
 function dtrRow(o,canAppr,byDate){
   const id=o.r._id, open=S.ui.openRow===id, rs=o.r.review_status||'FOR REVIEW';
   const rsCls=rs==='APPROVED'?'ok':(rs==='WITH ISSUE'?'bad':'warn');
-  let html=`<button class="dtr-row" data-act="toggleRow" data-id="${h(id)}" aria-expanded="${open}">
+  const qa=open?'':quickActions(o,canAppr);
+  let html=`<div class="dtr-line${qa?' has-qa':''}"><button class="dtr-row" data-act="toggleRow" data-id="${h(id)}" aria-expanded="${open}">
     ${byDate?`<span class="nm"><b>${h(fmtDY(o.r.work_date))}</b><span>${WD[dow(o.r.work_date)]}</span></span>`:`<span class="nm"><b>${h(empName(o.e))}</b><span>${h(o.e?o.e.department:'')}${o.e&&o.e.position?' · '+h(o.e.position):''}</span></span>`}
     <span class="tm">${h(o.r.time_in||'—')} – ${h(o.r.time_out||'—')}</span>
     <span class="chips">${dtrChips(o)}</span>
     <span class="rv"><span class="chip ${rsCls}">${h(rs==='FOR REVIEW'?'For review':(rs==='WITH ISSUE'?'With issue':'Approved'))}</span></span>
-  </button>`;
+  </button>${qa}</div>`;
   if(open)html+=dtrEditor(o,canAppr);
   return html;
 }
@@ -1826,7 +1857,7 @@ function dtrByEmployee(list,canAppr){
   if(f.dtrEmp){
     const x=groups[0];if(!x)return '';
     const e=x.e,t=dtrEmpSummary(x.items);
-    return `<div class="panel" style="padding:14px 16px"><div class="row" style="align-items:flex-start"><div><h2 style="margin:0">${h(empName(e))}</h2><p class="muted small" style="margin:2px 0 0">${h(e?e.department||'':'')}${e&&e.position?' · '+h(e.position):''}${e&&e.branch?' · '+h(e.branch):''} · ${x.items.length} ${x.items.length===1?'day':'days'} shown</p></div><span class="spacer"></span><button class="btn sm" data-act="dtrEmpClear">All employees</button></div>${dtrEmpStats(t)}</div>${rowsHtml(x)}`;
+    return `<div class="panel" style="padding:14px 16px"><div class="row" style="align-items:flex-start"><div><h2 style="margin:0">${h(empName(e))}</h2><p class="muted small" style="margin:2px 0 0">${h(e?e.department||'':'')}${e&&e.position?' · '+h(e.position):''}${e&&e.branch?' · '+h(e.branch):''} · ${x.items.length} ${x.items.length===1?'day':'days'} shown</p></div><span class="spacer"></span>${canSched()&&e?`<button class="btn sm" data-act="schedOpen" data-id="${e.id}">Daily schedule…</button>`:''}<button class="btn sm" data-act="dtrEmpClear">All employees</button></div>${dtrEmpStats(t)}</div>${rowsHtml(x)}`;
   }
   const open=f.dtrEmpOpen||(f.dtrEmpOpen=new Set());
   return `<p class="muted small" style="margin:0 0 8px">${groups.length} ${groups.length===1?'employee':'employees'} · tap a name to see their days, or pick one employee above.${groups.length>1?` <button class="btn sm" data-act="dtrEmpAll" data-v="${open.size?'0':'1'}">${open.size?'Collapse all':'Expand all'}</button>`:''}</p>`+groups.map(x=>{
@@ -1837,6 +1868,103 @@ function dtrByEmployee(list,canAppr){
       <span class="tm">${t.present+t.half} present</span><span class="chips">${flags}</span>
       <span class="rv"><span class="btn sm" data-act="dtrEmpPick" data-id="${h(x.id)}">Open</span></span></button>
       ${on?rowsHtml(x):''}</section>`}).join('');
+}
+/* ---------- Daily schedule (per-day shifts) ---------- */
+function pruneShifts(ds){const old=addDays(todayISO(),-400);const o={};for(const[k,v]of Object.entries(ds||{}))if(k>=old&&v)o[k]=v;return o}
+function openSchedule(eid){
+  const e=empById(eid);if(!e)return;
+  if(!canSched()){toast('Only HR can set schedules.',true);return}
+  const f=S.ui,c=f.dtrCut?S.period.cuts[f.dtrCut-1]:null,start=c?c.start:S.period.start,end=c?c.end:S.period.end,hol=holidayMap();
+  const def=`${(e.shift_in||S.settings.std_in)}–${(e.shift_out||S.settings.std_out)}`;
+  let rows='';
+  for(let d=start;d<=end;d=addDays(d,1)){
+    const ds=dayShift(e,d),lk=lockedDate(d),dis=lk?'disabled':'',wk=dow(d)===Number(S.settings.rest_day);
+    rows+=`<tr data-d="${d}" class="${lk?'unsel':''}"><td><b>${h(fmtD(d))}</b> <span class="muted small">${WD[dow(d)]}</span>${hol[d]?' <span class="chip acc">Holiday</span>':''}${lk?' <span class="chip">Locked</span>':''}</td>
+      <td class="muted small">${wk?'Rest day':h(def)}</td>
+      <td><input type="text" class="t24 sch-in" inputmode="numeric" autocomplete="off" maxlength="8" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.in):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
+      <td><input type="text" class="t24 sch-out" inputmode="numeric" autocomplete="off" maxlength="8" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.out):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
+      <td><input type="checkbox" class="sch-off" name="off_${d}" ${ds&&ds.off?'checked':''} ${dis} aria-label="Day off ${h(fmtD(d))}"></td></tr>`;
+  }
+  openDlg(`Daily schedule · ${empName(e)}`,`<form data-form="sched" data-id="${e.id}">
+    <p class="muted small" style="margin-top:0">${h(fmtRange(start,end))}. Default shift: <b>${h(def)}</b>, rest day ${h(WD[Number(S.settings.rest_day)])}. Leave a day blank to use the default. Enter a shift to make it a working day with that shift (even on the usual rest day), or tick <b>Day off</b> to make it a rest day. Late, undertime, overtime and absences follow the schedule of each day.</p>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+      <label class="f" style="max-width:110px">Shift in<input type="text" class="t24" id="schFillIn" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
+      <label class="f" style="max-width:110px">Shift out<input type="text" class="t24" id="schFillOut" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
+      <button type="button" class="btn sm" data-act="schFill" data-v="blank">Fill blank working days</button>
+      <button type="button" class="btn sm" data-act="schFill" data-v="all">Fill all working days</button>
+      <button type="button" class="btn sm" data-act="schFill" data-v="clear">Clear all</button>
+    </div>
+    <div class="tablewrap" data-noresp style="max-height:55vh;overflow:auto"><table class="sch"><thead><tr><th>Date</th><th>Default</th><th>Shift in</th><th>Shift out</th><th>Day off</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="row" style="margin-top:12px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save schedule</button></div></form>`);
+}
+function schFill(mode){
+  const f=document.querySelector('form[data-form="sched"]');if(!f)return;
+  const si=parseTime($('#schFillIn').value),so=parseTime($('#schFillOut').value);
+  if(mode!=='clear'&&(!si||!so)){toast('Enter the shift in and shift out to fill, e.g. 07:00 and 16:00.',true);return}
+  for(const tr of f.querySelectorAll('tbody tr')){
+    const i=tr.querySelector('.sch-in'),o=tr.querySelector('.sch-out'),off=tr.querySelector('.sch-off');
+    if(off.disabled)continue;
+    if(mode==='clear'){off.checked=false;i.disabled=o.disabled=false;i.value=o.value='';continue}
+    if(off.checked)continue;
+    const rest=dow(tr.dataset.d)===Number(S.settings.rest_day);
+    if(rest&&!i.value)continue; // usual rest day stays a rest day unless it already has a shift
+    if(mode==='blank'&&(i.value||o.value))continue;
+    i.value=si;o.value=so;
+  }
+}
+async function saveSchedule(form){
+  const e=empById(form.dataset.id);if(!e)return;
+  const ds={...(e.day_shifts||{})},changes=[];
+  for(const tr of form.querySelectorAll('tbody tr')){
+    const d=tr.dataset.d,i=tr.querySelector('.sch-in'),o=tr.querySelector('.sch-out'),off=tr.querySelector('.sch-off');
+    if(off.disabled||lockedDate(d))continue;
+    let v=null;
+    if(off.checked)v='OFF';
+    else if(i.value||o.value){if(!i.value||!o.value){toast(`${fmtD(d)}: enter both the shift in and shift out, or leave both blank.`,true);(i.value?o:i).focus();return}v=`${i.value}-${o.value}`}
+    const cur=ds[d]||null;if(v===cur)continue;
+    if(v)ds[d]=v;else delete ds[d];changes.push(`${d} ${v==='OFF'?'day off':(v||'default')}`);
+  }
+  if(!changes.length){closeDlg();toast('No changes.');return}
+  try{
+    const jr=journal();
+    await jr.update(cp('employees/')+e.id,{day_shifts:pruneShifts(ds)},e);
+    logAction('SCHEDULE','employee',e.id,`${empName(e)} · daily schedule: ${changes.slice(0,15).join(', ')}${changes.length>15?` and ${changes.length-15} more`:''}`,jr);
+    closeDlg();toast(`Schedule saved · ${changes.length} ${changes.length===1?'day':'days'} changed`);scheduleRender();
+  }catch(err){writeError(err)}
+}
+/* ---------- Quick review (one tap, without opening the day) ---------- */
+function quickActions(o,canAppr){
+  const r=o.r,c=o.c,id=h(r._id);
+  if(!canAppr||S.readOnly||lockedDate(r.work_date)||(r.review_status||'FOR REVIEW')!=='FOR REVIEW')return '';
+  const b=(k,l,cls,t)=>`<button type="button" class="btn sm ${cls||''}" data-act="qa" data-id="${id}" data-k="${k}" title="${h(t||'')}">${l}</button>`;
+  const issue=`<button type="button" class="btn sm qa-issue" data-act="qaIssue" data-id="${id}" title="Mark with issue and write what HR should check">⚠ Issue</button>`;
+  let main;
+  if(c.status==='A'||c.status==='HD')main=`<select class="qa-sel" data-change="qaAbs" data-id="${id}" aria-label="Absence reason"><option value="">Absence reason…</option>${ABS_REASONS.map(([k,l])=>`<option value="${k}">${h(l)}</option>`).join('')}</select>`;
+  else if(c.status==='CHK')main=''; // missing punch: HR has to add the time first
+  else if(c.otPending)main=b('ot','✓ Approve + OT','ok',`Approve the day and all ${fmtMin(c.otActual)} of overtime. Open the day to approve only part of it.`)+b('noot','✓ Approve, no OT','','Approve the day; the overtime is not paid');
+  else main=b('ok','✓ Approve','ok');
+  return `<div class="dtr-qa">${main}${issue}</div>`;
+}
+async function quickReview(id,k,reason){
+  const r=dtrAll().find(x=>x._id===id);if(!r)return;
+  const e=empById(r.employee_id);
+  if(!can('approveDtr')||S.readOnly){toast('You can’t approve attendance.',true);return}
+  if(role()==='DEPT_HEAD'&&!inMyDept(e)){toast('You can only review your own department.',true);return}
+  if(lockedDate(r.work_date)){toast('This cut-off is approved and locked.',true);return}
+  if(k==='abs'&&reason==='OTHER'){S.ui.openRow=id;render();const f=document.querySelector('form.editor');if(f){const s=f.querySelector('select[name=absent_reason]');if(s)s.value='OTHER';const i=f.querySelector('input[name=remarks]');if(i){i.focus();i.scrollIntoView({block:'center'})}}toast('Write the reason in Remarks, then save.');return}
+  const patch={review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()};
+  let what='approved';
+  if(k==='ot'){patch.ot_approval='YES';patch.ot_approved_min=null;what='approved with overtime'}
+  else if(k==='noot'){patch.ot_approval='NO';patch.ot_approved_min=null;what='approved, overtime not approved'}
+  else if(k==='abs'){patch.absent_reason=reason;patch.absent_approval=absApproval(reason);what=`absence: ${absLabel(reason)}`}
+  try{
+    const jr=journal();
+    if(r._auto){if(await Store.get(cp('dtr/')+id)){toast('Attendance for this day was just imported. Please review it again.',true);scheduleRender();return}await jr.set(cp('dtr/')+id,{...dtrDoc(r),...patch},null)}
+    else await jr.update(cp('dtr/')+id,patch,r);
+    logAction('REVIEW','dtr',id,`${empName(e)} ${r.work_date}: APPROVED (${what}) — quick review`,jr);
+    toast(`${empName(e)} · ${fmtD(r.work_date)} ${what}`);
+  }catch(err){writeError(err)}
+  scheduleRender();
 }
 /* Who may delete attendance records: HR and Admin (time correction or DTR import access). Department heads never. */
 function canDelDtr(){return !S.readOnly&&role()!=='DEPT_HEAD'&&(can('editTimes')||can('importDtr'))}
@@ -1884,13 +2012,18 @@ function dtrEditor(o,canAppr){
     <div class="grid">
       <label class="f">Time in<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_in" value="${h(r.time_in||'')}" ${tdis}></label>
       <label class="f">Time out<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
+      ${(()=>{const sh=shiftOf(o.e,r.work_date),ds=dayShift(o.e,r.work_date),sdis=(!canSched()||lk)?'disabled':'',def=(o.e&&o.e.shift_in)||S.settings.std_in,defO=(o.e&&o.e.shift_out)||S.settings.std_out;
+        return `<label class="f">Shift in this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_in" placeholder="${h(def)}" value="${ds&&!ds.off?h(ds.in):''}" ${sdis}></label>
+      <label class="f">Shift out this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&!ds.off?h(ds.out):''}" ${sdis}></label>
+      <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Day off (rest day)</label>`})()}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
       <label class="f">OT hours to approve <span class="muted small">(blank = all ${fmtHM(c.otActual)})</span><input type="text" name="ot_hours" inputmode="decimal" autocomplete="off" maxlength="6" placeholder="${fmtHM(c.otActual)}" value="${otCapMin(r)!=null?fmtHM(otCapMin(r)):''}" ${dis||(c.otActual<S.settings.min_ot?'disabled':'')} title="Hours of overtime to pay, e.g. 1, 1.5 or 1:30. Leave blank to pay all of the computed overtime."></label>
       <label class="f">Absence${sel('absent_approval',[['PENDING','Pending'],['APPROVED','Approved'],['NOT APPROVED','Not approved']],r.absent_approval||'PENDING')}</label>
+      <label class="f">Absence reason${sel('absent_reason',[['','—'],...ABS_REASONS],r.absent_reason||'')}</label>
       <label class="f">Use OT to offset absences${sel('offset_ot_to_absent',[['NO','No'],['YES','Yes']],r.offset_ot_to_absent||'NO')}</label>
       <label class="f">Offset minutes<input type="number" name="offset_minutes" min="0" step="1" value="${h(r.offset_minutes||0)}" ${dis}></label>
-      <label class="f">Review${sel('review_status',[['FOR REVIEW','For review'],['APPROVED','Approved'],['WITH ISSUE','With issue']],r.review_status||'FOR REVIEW')}</label>
+      <label class="f">Review${sel('review_status',[['FOR REVIEW','For review'],['APPROVED','Approved'],['WITH ISSUE','With issue']],S.ui.issuePreset===r._id?'WITH ISSUE':(r.review_status||'FOR REVIEW'))}</label>
       <label class="f wide">Remarks<input name="remarks" value="${h(r.remarks||'')}" maxlength="300" ${dis} placeholder="Reason for OT, leave type, correction note…"></label>
     </div>
     <div class="row" style="margin-top:12px">
@@ -1901,9 +2034,17 @@ function dtrEditor(o,canAppr){
     </div>
   </form>`;
 }
+const canSched=()=>!S.readOnly&&(can('editTimes')||can('editEmployees'));
 async function saveDtr(form){
   const id=form.dataset.id, r=dtrAll().find(x=>x._id===id); if(!r)return;
   const e=empById(r.employee_id);
+  let newShift; // undefined = unchanged
+  if(form.querySelector('[name=day_shift_in]:not(:disabled)')){
+    const f0=new FormData(form),si=f0.get('day_shift_in')||'',so=f0.get('day_shift_out')||'',off=f0.get('day_off')==='on';
+    if(!off&&(!!si!==!!so)){toast('Enter both the shift in and shift out for this day, or leave both blank for the default shift.',true);return}
+    const v=off?'OFF':(si&&so?`${si}-${so}`:null),cur=(e&&e.day_shifts&&e.day_shifts[r.work_date])||null;
+    if(v!==cur)newShift=v;
+  }
   if(role()==='DEPT_HEAD'&&!inMyDept(e)){toast('You can only review your own department.',true);return}
   if(lockedDate(r.work_date)){toast('This cut-off is approved and locked.',true);return}
   const fd=new FormData(form), patch={};
@@ -1919,7 +2060,12 @@ async function saveDtr(form){
       if(otMin!=null&&(g('ot_approval')||'PENDING')!=='YES'){toast('Set Overtime to “Approve” to approve part of the overtime, or clear the OT hours.',true);return}
     }else otMin=otCapMin(r);
     patch.ot_approved_min=(g('ot_approval')||'PENDING')==='YES'?otMin:null;
-    Object.assign(patch,{ot_approval:g('ot_approval')||'PENDING',absent_approval:g('absent_approval')||'PENDING',offset_ot_to_absent:g('offset_ot_to_absent')||'NO',
+    const reason=g('absent_reason')||null;
+    let absAp=g('absent_approval')||'PENDING';if(reason&&absAp==='PENDING')absAp=absApproval(reason);
+    if(reason==='OTHER'&&!(g('remarks')||'').trim()){toast('Write the reason for the absence in Remarks.',true);return}
+    if(g('review_status')==='WITH ISSUE'&&!(g('remarks')||'').trim()){toast('Add a remark so HR knows what to check or fix.',true);return}
+    patch.absent_reason=reason;
+    Object.assign(patch,{ot_approval:g('ot_approval')||'PENDING',absent_approval:absAp,offset_ot_to_absent:g('offset_ot_to_absent')||'NO',
       offset_minutes:Math.max(0,parseInt(g('offset_minutes')||'0',10)||0),remarks:(g('remarks')||'').trim(),review_status:g('review_status')||'FOR REVIEW',reviewed_by:actor(),reviewed_at:nowISO()});
   }
   const changes=[];
@@ -1937,15 +2083,22 @@ async function saveDtr(form){
       if(await Store.get(cp('dtr/')+id)){toast('Attendance for this day was just imported. Please review it again.',true);S.ui.openRow=null;scheduleRender();return}
       await jr.set(cp('dtr/')+id,{...dtrDoc(r),...patch},null);
     } else await jr.update(cp('dtr/')+id,patch,r);
-    S.ui.openRow=null;
+    if(newShift!==undefined&&e){const ds={...(e.day_shifts||{})};if(newShift)ds[r.work_date]=newShift;else delete ds[r.work_date];await jr.update(cp('employees/')+e.id,{day_shifts:pruneShifts(ds)},e);changes.push(`shift this day → ${newShift==='OFF'?'day off':(newShift||'default')}`)}
+    S.ui.openRow=null;S.ui.issuePreset=null;
     logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}${patch.ot_approved_min!=null?` (${fmtHM(patch.ot_approved_min)} of ${fmtHM(calcEntry(r,e).otActual)} h)`:''}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
     toast('Review saved');scheduleRender();
   }catch(err){writeError(err)}
 }
-async function bulkApprove(btn){
+/* A clean day needs no decision: complete punches on a regular working day, no late, undertime or overtime to approve. */
+function isCleanDay(o){
+  const c=o.c,r=o.r;
+  return (r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!r._auto&&!lockedDate(r.work_date)&&c.status==='P'&&c.dayClass==='REG'&&!c.late&&!c.ut&&c.otActual<Number(S.settings.min_ot);
+}
+async function bulkApprove(btn,onlyClean){
+  const ids=new Set(onlyClean?(S.ui.dtrCleanIds||[]):(S.ui.dtrShownIds||[]));
+  if(!onlyClean&&ids.size&&!(await confirmDlg('Approve everything shown?',`All days shown that are still “For review” will be marked approved — including days with late, undertime, absences or missing punches. Overtime keeps its own approval.\n\nTo approve only the days with nothing to check, use “Approve clean days” instead.`,'Approve all shown')))return;
   btn.disabled=true;
-  const rows=[...document.querySelectorAll('.dtr-row')].map(b=>b.dataset.id);
-  const targets=dtrAll().filter(r=>rows.includes(r._id)&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date));
+  const targets=dtrAll().filter(r=>ids.has(r._id)&&(r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(r.work_date));
   let n=0;const jr=journal();
   try{
     for(const r of targets){
@@ -1955,8 +2108,8 @@ async function bulkApprove(btn){
       else await jr.update(cp('dtr/')+r._id,ap,r);n++;
       if(n%5===0)btn.textContent=`Saving ${n}/${targets.length}…`;
     }
-    logAction('BULK_APPROVE','dtr',null,`${n} records marked approved (overtime approvals unchanged)`,jr);
-    toast(`${n} records marked approved. Overtime still needs its own approval.`);
+    logAction('BULK_APPROVE','dtr',null,onlyClean?`${n} clean days approved (complete punches, no late, undertime, overtime or absence)`:`${n} records marked approved (overtime approvals unchanged)`,jr);
+    toast(onlyClean?`${n} clean ${n===1?'day':'days'} approved. What’s left needs a look.`:`${n} records marked approved. Overtime still needs its own approval.`);
   }catch(err){writeError(err)}
   scheduleRender();
 }
@@ -2793,6 +2946,8 @@ const mSaveBtn=()=>{const m=S.ui.multi,b=document.querySelector('[data-act="mSav
 document.addEventListener('input',e=>{if(mSync(e.target))mSaveBtn()});
 document.addEventListener('change',e=>{if(mSync(e.target)){mSaveBtn();if(e.target.dataset.m==='eid')render();else if(e.target.dataset.mr==='d')scheduleRender()}});
 document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24'))setTimeout(()=>mSync(i),0)});
+document.addEventListener('change',e=>{const c=e.target;if(c&&c.classList&&c.classList.contains('sch-off')){const tr=c.closest('tr');for(const i of tr.querySelectorAll('.sch-in,.sch-out')){i.disabled=c.checked;if(c.checked)i.value=''}}
+  else if(c&&c.name==='day_off'){const f=c.closest('form');for(const n of['day_shift_in','day_shift_out']){const i=f.querySelector(`[name=${n}]`);if(i){i.disabled=c.checked;if(c.checked)i.value=''}}}});
 function mAdd(){
   const m=multiState();mSyncAll();
   const last=[...m.rows].reverse().find(r=>r.d);
@@ -2894,7 +3049,7 @@ function pageEmployees(){
   if(!S.ready.employees)return html+'<div class="loading">Loading employees…</div>';
   if(!emps.length)return html+`<div class="panel empty"><b>No employees yet.</b>${edit?'Add your first employee to start matching DTR rows.':''}</div>`;
   html+=`<div class="tablewrap"><table><thead><tr><th>ID</th><th class="stick">Name</th><th>Department</th><th>Position</th><th>Status</th><th>Pay basis</th><th>Shift</th><th class="n">Monthly</th><th class="n">Daily</th><th class="n">Allowance</th><th>BIR</th></tr></thead><tbody>
-  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}${payFreq(e)!=='both'?` <span class="chip acc" title="Paid once a month">${payFreq(e)==='first'?'1st only':'2nd only'}</span>`:''}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}</td>
+  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}${payFreq(e)!=='both'?` <span class="chip acc" title="Paid once a month">${payFreq(e)==='first'?'1st only':'2nd only'}</span>`:''}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}${Object.keys(e.day_shifts||{}).some(d=>d>=S.period.start&&d<=S.period.end)?' <span class="chip acc" title="Has a daily schedule this payroll month">Daily</span>':''}</td>
   <td class="n">${numOrNull(e.monthly_rate)!=null?amt(e.monthly_rate):'<span class="chip warn">Not set</span>'}</td><td class="n">${numOrNull(e.daily_rate)!=null?amt(e.daily_rate):(numOrNull(e.monthly_rate)!=null?`<span class="muted">${amt(e.monthly_rate*12/S.settings.divisor)}</span>`:'—')}</td><td class="n">${e.monthly_allowance?amt(e.monthly_allowance):'—'}</td><td>${e.deducted_government!==false?`<span class="chip acc">${e.subject_tax===false?'Yes · MWE':'Yes'}</span>`:'<span class="muted">No</span>'}</td></tr>`).join('')}
   </tbody></table></div><p class="muted small">Grey daily rates are derived from the monthly rate × 12 ÷ ${S.settings.divisor}.</p>`;
   return html;
@@ -2917,8 +3072,8 @@ function empForm(e){
     <label class="f">Monthly rate (₱)<input name="monthly_rate" type="number" step="0.01" min="0" value="${v('monthly_rate')}"></label>
     <label class="f">Daily rate (₱)<input name="daily_rate" type="number" step="0.01" min="0" value="${v('daily_rate')}" placeholder="Auto from monthly"></label>
     <label class="f">Monthly allowance (₱)<input name="monthly_allowance" type="number" step="0.01" min="0" value="${v('monthly_allowance',0)}"></label>
-    <label class="f">Shift start<input name="shift_in" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_in')}" placeholder="${h(S.settings.std_in)}"></label>
-    <label class="f">Shift end<input name="shift_out" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_out')}" placeholder="${h(S.settings.std_out)}"></label>
+    <label class="f">Default shift start<input name="shift_in" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_in')}" placeholder="${h(S.settings.std_in)}"></label>
+    <label class="f">Default shift end<input name="shift_out" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_out')}" placeholder="${h(S.settings.std_out)}"></label>
     <p class="wide muted small" style="margin:0">Leave shift blank to use the company schedule (${h(S.settings.std_in)}–${h(S.settings.std_out)}). Night shifts that end the next morning are supported.</p>
     <div class="wide row" style="gap:18px">
       <label class="chk"><input type="checkbox" name="allowance_taxable" ${e&&e.allowance_taxable?'checked':''}> Allowance is taxable</label>
@@ -2927,7 +3082,7 @@ function empForm(e){
       <label class="chk"><input type="checkbox" name="ot_eligible" ${!e||e.ot_eligible!==false?'checked':''}> Eligible for overtime</label>
       <label class="chk"><input type="checkbox" name="active" ${!e||e.active!==false?'checked':''}> Active</label>
     </div></div>
-    <div class="row" style="margin-top:14px"><button type="button" class="btn" data-act="cancelEmp">Cancel</button><button class="btn primary">Save employee</button></div></form>`;
+    <div class="row" style="margin-top:14px">${e?`<button type="button" class="btn" data-act="schedOpen" data-id="${e.id}" title="Set a different shift or a day off for specific dates">Daily schedule…</button><span class="muted small">The default shift is used on days without their own schedule.</span>`:''}<span class="spacer"></span><button type="button" class="btn" data-act="cancelEmp">Cancel</button><button class="btn primary">Save employee</button></div></form>`;
 }
 async function saveEmp(form){
   const fd=new FormData(form),id=Number(fd.get('id'));
@@ -2939,6 +3094,7 @@ async function saveEmp(form){
     monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
+  if(existing&&existing.day_shifts)doc.day_shifts=existing.day_shifts; // per-day shifts are kept
   try{
     const jr=journal();
     await jr.set(cp('employees/')+id,doc,existing||null);
@@ -3609,8 +3765,13 @@ const actions={
   dtrEmpPick(el){S.ui.dtrEmp=el.dataset.id;S.ui.openRow=null;render();window.scrollTo({top:0})},
   dtrEmpClear(){S.ui.dtrEmp='';S.ui.openRow=null;render()},
   dtrEmpAll(el){const s=S.ui.dtrEmpOpen=new Set();if(el.dataset.v==='1')for(const b of document.querySelectorAll('[data-act="dtrEmpToggle"]'))s.add(b.dataset.id);render()},
-  toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;render()},
+  toggleRow(el){S.ui.openRow=S.ui.openRow===el.dataset.id?null:el.dataset.id;S.ui.issuePreset=null;render()},
   bulkApprove(el){bulkApprove(el)},
+  approveClean(el){bulkApprove(el,true)},
+  schedOpen(el){openSchedule(el.dataset.id)},
+  schFill(el){schFill(el.dataset.v)},
+  qa(el){quickReview(el.dataset.id,el.dataset.k)},
+  qaIssue(el){S.ui.openRow=el.dataset.id;S.ui.issuePreset=el.dataset.id;render();const i=document.querySelector('form.editor input[name=remarks]');if(i){i.focus();i.scrollIntoView({block:'center'})}},
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;S.ui.importNote='';scheduleRender()},
   mAdd(){mAdd()},mDel(el){mDel(Number(el.dataset.i))},mClear(){mClear()},mFill(){mFill()},mSave(){saveMulti()},
   impEdit(el){const x=(S.ui.importRows||[])[Number(el.dataset.i)];if(x){x.editing=true;scheduleRender()}},
@@ -3732,6 +3893,7 @@ document.addEventListener('change',async e=>{
   else if(k==='accessMode'){const box=$('#customAccess');if(box)box.style.display=el.value==='custom'?'':'none';if(el.value==='custom'&&box){const f=el.closest('form'),r=f.querySelector('select[name=role]');if(r&&!S.ui.acctEdit){const v=roleAccess(r.value);for(const[pk]of PERMS){const c=f.querySelector(`input[name="p_${pk}"]`);if(c)c.checked=!!v[pk]}}}}
   else if(k==='dtrCut'){S.ui.dtrCut=Number(el.value)||0;S.ui.openRow=null;render()}
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
+  else if(k==='qaAbs'){const v=el.value;el.blur();if(v)quickReview(el.dataset.id,'abs',v)}
   else if(k==='dtrEmp'){S.ui.dtrEmp=el.value;S.ui.openRow=null;render()}
   else if(k==='fileIn')handleFile(el);
   else if(k==='dtrSel'){if(el.checked)S.ui.dtrSel.add(el.dataset.id);else S.ui.dtrSel.delete(el.dataset.id);const row=el.closest('.dtr-row');if(row)row.classList.toggle('on',el.checked);updateSelBar()}
@@ -3778,6 +3940,7 @@ document.addEventListener('submit',e=>{
   if(k==='fbsetup'){const c=parseFbConfig(new FormData(f).get('cfg'));if(!c){S.ui.setupErr='Could not find apiKey, projectId and appId in what you pasted. Copy the whole firebaseConfig block.';render();return}localStorage.setItem(CFG_KEY,JSON.stringify(c));location.reload();return}
   if(k==='acct'){saveAcct(f);return}
   if(k==='payedit'){savePayEdit(f);return}
+  if(k==='sched'){saveSchedule(f);return}
   if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
