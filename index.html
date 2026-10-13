@@ -723,7 +723,11 @@ function dayShift(emp,d){
   if(v==='OFF')return{off:true};
   const m=String(v).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);return m?{in:m[1],out:m[2]}:null;
 }
-function isRestDay(emp,d){const s=dayShift(emp,d);if(s)return !!s.off;return dow(d)===Number(S.settings.rest_day)}
+/* Weekly rest day: the employee's own (employee.rest_day 0–6), 'none' when it changes every week (set per day in the
+   schedule), or the company setting when not set. A rest day set for a specific date always wins. */
+function weeklyRest(emp){const v=emp&&emp.rest_day;if(v==='none')return null;if(v!==undefined&&v!==null&&v!==''&&!isNaN(Number(v)))return Number(v);return Number(S.settings.rest_day)}
+const restLabel=emp=>{const w=weeklyRest(emp);return w==null?'none (set per day)':WD[w]};
+function isRestDay(emp,d){const s=dayShift(emp,d);if(s)return !!s.off;const w=weeklyRest(emp);return w!=null&&dow(d)===w}
 function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&!s.off)return{in:s.in,out:s.out,own:true};return{in:(emp&&emp.shift_in)||S.settings.std_in,out:(emp&&emp.shift_out)||S.settings.std_out,own:false}}
 function calcEntry(r,emp){
   const st=S.settings, hol=holidayMap();
@@ -1794,7 +1798,7 @@ function dtrChips(o){
   const sCls={P:'ok',A:'bad',CHK:'bad',RD:'',HOL:'acc',HD:'warn'}[c.status]||'';
   ch.push(`<span class="chip ${sCls}">${STATUS_LABEL[c.status]||c.status}</span>`);
   if(o.r._auto)ch.push(`<span class="chip bad" title="No time in or time out was imported for this working day">No record</span>`);
-  {const ds=dayShift(o.e,o.r.work_date);if(ds)ch.push(ds.off?'<span class="chip acc" title="Day off set in the daily schedule">Day off</span>':`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`)}
+  {const ds=dayShift(o.e,o.r.work_date);if(ds)ch.push(ds.off?'<span class="chip acc" title="Rest day set for this date">Rest day (set)</span>':`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`)}
   if(c.dayClass!=='REG'&&c.status!=='RD'&&c.status!=='HOL')ch.push(`<span class="chip acc">${{RD:'Rest day',RH:'Regular holiday',SNW:'Special holiday'}[c.dayClass]}</span>`);
   if(o.r.absent_reason&&(c.status==='A'||c.status==='HD'))ch.push(`<span class="chip ${o.r.absent_reason==='AWOL'?'bad':'acc'}">${h(absLabel(o.r.absent_reason))}</span>`);
   if(c.late)ch.push(`<span class="chip warn">Late ${fmtMin(c.late)}</span>`);
@@ -1878,15 +1882,15 @@ function openSchedule(eid){
   const def=`${(e.shift_in||S.settings.std_in)}–${(e.shift_out||S.settings.std_out)}`;
   let rows='';
   for(let d=start;d<=end;d=addDays(d,1)){
-    const ds=dayShift(e,d),lk=lockedDate(d),dis=lk?'disabled':'',wk=dow(d)===Number(S.settings.rest_day);
+    const ds=dayShift(e,d),lk=lockedDate(d),dis=lk?'disabled':'',wk=weeklyRest(e)!=null&&dow(d)===weeklyRest(e);
     rows+=`<tr data-d="${d}" class="${lk?'unsel':''}"><td><b>${h(fmtD(d))}</b> <span class="muted small">${WD[dow(d)]}</span>${hol[d]?' <span class="chip acc">Holiday</span>':''}${lk?' <span class="chip">Locked</span>':''}</td>
       <td class="muted small">${wk?'Rest day':h(def)}</td>
       <td><input type="text" class="t24 sch-in" inputmode="numeric" autocomplete="off" maxlength="8" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.in):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
       <td><input type="text" class="t24 sch-out" inputmode="numeric" autocomplete="off" maxlength="8" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.out):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
-      <td><input type="checkbox" class="sch-off" name="off_${d}" ${ds&&ds.off?'checked':''} ${dis} aria-label="Day off ${h(fmtD(d))}"></td></tr>`;
+      <td><input type="checkbox" class="sch-off" name="off_${d}" ${ds&&ds.off?'checked':''} ${dis} aria-label="Rest day ${h(fmtD(d))}"></td></tr>`;
   }
   openDlg(`Daily schedule · ${empName(e)}`,`<form data-form="sched" data-id="${e.id}">
-    <p class="muted small" style="margin-top:0">${h(fmtRange(start,end))}. Default shift: <b>${h(def)}</b>, rest day ${h(WD[Number(S.settings.rest_day)])}. Leave a day blank to use the default. Enter a shift to make it a working day with that shift (even on the usual rest day), or tick <b>Day off</b> to make it a rest day. Late, undertime, overtime and absences follow the schedule of each day.</p>
+    <p class="muted small" style="margin-top:0">${h(fmtRange(start,end))}. Default shift: <b>${h(def)}</b> · weekly rest day: <b>${h(restLabel(e))}</b>. Leave a day blank to use the default. Enter a shift to make it a working day with that shift (even on the usual rest day), or tick <b>Rest day</b> for this employee's rest day that week. A rest day is not counted as absent, and work done on it is paid as rest-day work. Late, undertime, overtime and absences follow the schedule of each day.</p>
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
       <label class="f" style="max-width:110px">Shift in<input type="text" class="t24" id="schFillIn" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
       <label class="f" style="max-width:110px">Shift out<input type="text" class="t24" id="schFillOut" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
@@ -1894,7 +1898,7 @@ function openSchedule(eid){
       <button type="button" class="btn sm" data-act="schFill" data-v="all">Fill all working days</button>
       <button type="button" class="btn sm" data-act="schFill" data-v="clear">Clear all</button>
     </div>
-    <div class="tablewrap" data-noresp style="max-height:55vh;overflow:auto"><table class="sch"><thead><tr><th>Date</th><th>Default</th><th>Shift in</th><th>Shift out</th><th>Day off</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="tablewrap" data-noresp style="max-height:55vh;overflow:auto"><table class="sch"><thead><tr><th>Date</th><th>Default</th><th>Shift in</th><th>Shift out</th><th>Rest day</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="row" style="margin-top:12px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save schedule</button></div></form>`);
 }
 function schFill(mode){
@@ -1906,7 +1910,7 @@ function schFill(mode){
     if(off.disabled)continue;
     if(mode==='clear'){off.checked=false;i.disabled=o.disabled=false;i.value=o.value='';continue}
     if(off.checked)continue;
-    const rest=dow(tr.dataset.d)===Number(S.settings.rest_day);
+    const e0=empById(f.dataset.id),rest=weeklyRest(e0)!=null&&dow(tr.dataset.d)===weeklyRest(e0);
     if(rest&&!i.value)continue; // usual rest day stays a rest day unless it already has a shift
     if(mode==='blank'&&(i.value||o.value))continue;
     i.value=si;o.value=so;
@@ -1922,7 +1926,7 @@ async function saveSchedule(form){
     if(off.checked)v='OFF';
     else if(i.value||o.value){if(!i.value||!o.value){toast(`${fmtD(d)}: enter both the shift in and shift out, or leave both blank.`,true);(i.value?o:i).focus();return}v=`${i.value}-${o.value}`}
     const cur=ds[d]||null;if(v===cur)continue;
-    if(v)ds[d]=v;else delete ds[d];changes.push(`${d} ${v==='OFF'?'day off':(v||'default')}`);
+    if(v)ds[d]=v;else delete ds[d];changes.push(`${d} ${v==='OFF'?'rest day':(v||'default')}`);
   }
   if(!changes.length){closeDlg();toast('No changes.');return}
   try{
@@ -1939,7 +1943,7 @@ function quickActions(o,canAppr){
   const b=(k,l,cls,t)=>`<button type="button" class="btn sm ${cls||''}" data-act="qa" data-id="${id}" data-k="${k}" title="${h(t||'')}">${l}</button>`;
   const issue=`<button type="button" class="btn sm qa-issue" data-act="qaIssue" data-id="${id}" title="Mark with issue and write what HR should check">⚠ Issue</button>`;
   let main;
-  if(c.status==='A'||c.status==='HD')main=`<select class="qa-sel" data-change="qaAbs" data-id="${id}" aria-label="Absence reason"><option value="">Absence reason…</option>${ABS_REASONS.map(([k,l])=>`<option value="${k}">${h(l)}</option>`).join('')}</select>`;
+  if(c.status==='A'||c.status==='HD')main=`<select class="qa-sel" data-change="qaAbs" data-id="${id}" aria-label="Absence reason"><option value="">Absence reason…</option>${canSched()?'<option value="REST">Rest day (not absent)</option>':''}${ABS_REASONS.map(([k,l])=>`<option value="${k}">${h(l)}</option>`).join('')}</select>`;
   else if(c.status==='CHK')main=''; // missing punch: HR has to add the time first
   else if(c.otPending)main=b('ot','✓ Approve + OT','ok',`Approve the day and all ${fmtMin(c.otActual)} of overtime. Open the day to approve only part of it.`)+b('noot','✓ Approve, no OT','','Approve the day; the overtime is not paid');
   else main=b('ok','✓ Approve','ok');
@@ -1952,6 +1956,17 @@ async function quickReview(id,k,reason){
   if(role()==='DEPT_HEAD'&&!inMyDept(e)){toast('You can only review your own department.',true);return}
   if(lockedDate(r.work_date)){toast('This cut-off is approved and locked.',true);return}
   if(k==='abs'&&reason==='OTHER'){S.ui.openRow=id;render();const f=document.querySelector('form.editor');if(f){const s=f.querySelector('select[name=absent_reason]');if(s)s.value='OTHER';const i=f.querySelector('input[name=remarks]');if(i){i.focus();i.scrollIntoView({block:'center'})}}toast('Write the reason in Remarks, then save.');return}
+  if(k==='abs'&&reason==='REST'){
+    if(!canSched()||!e){toast('Only HR can set rest days.',true);return}
+    try{
+      const jr=journal(),ds={...(e.day_shifts||{}),[r.work_date]:'OFF'};
+      await jr.update(cp('employees/')+e.id,{day_shifts:pruneShifts(ds)},e);
+      if(!r._auto)await jr.update(cp('dtr/')+id,{review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()},r);
+      logAction('SCHEDULE','employee',e.id,`${empName(e)} · ${r.work_date} set as rest day (quick review)`,jr);
+      toast(`${empName(e)} · ${fmtD(r.work_date)} set as rest day`);
+    }catch(err){writeError(err)}
+    scheduleRender();return;
+  }
   const patch={review_status:'APPROVED',reviewed_by:actor(),reviewed_at:nowISO()};
   let what='approved';
   if(k==='ot'){patch.ot_approval='YES';patch.ot_approved_min=null;what='approved with overtime'}
@@ -2015,7 +2030,7 @@ function dtrEditor(o,canAppr){
       ${(()=>{const sh=shiftOf(o.e,r.work_date),ds=dayShift(o.e,r.work_date),sdis=(!canSched()||lk)?'disabled':'',def=(o.e&&o.e.shift_in)||S.settings.std_in,defO=(o.e&&o.e.shift_out)||S.settings.std_out;
         return `<label class="f">Shift in this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_in" placeholder="${h(def)}" value="${ds&&!ds.off?h(ds.in):''}" ${sdis}></label>
       <label class="f">Shift out this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&!ds.off?h(ds.out):''}" ${sdis}></label>
-      <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Day off (rest day)</label>`})()}
+      <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Rest day this date</label>`})()}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
       <label class="f">OT hours to approve <span class="muted small">(blank = all ${fmtHM(c.otActual)})</span><input type="text" name="ot_hours" inputmode="decimal" autocomplete="off" maxlength="6" placeholder="${fmtHM(c.otActual)}" value="${otCapMin(r)!=null?fmtHM(otCapMin(r)):''}" ${dis||(c.otActual<S.settings.min_ot?'disabled':'')} title="Hours of overtime to pay, e.g. 1, 1.5 or 1:30. Leave blank to pay all of the computed overtime."></label>
@@ -2039,7 +2054,7 @@ async function saveDtr(form){
   const id=form.dataset.id, r=dtrAll().find(x=>x._id===id); if(!r)return;
   const e=empById(r.employee_id);
   let newShift; // undefined = unchanged
-  if(form.querySelector('[name=day_shift_in]:not(:disabled)')){
+  if(form.querySelector('[name=day_off]:not(:disabled)')){
     const f0=new FormData(form),si=f0.get('day_shift_in')||'',so=f0.get('day_shift_out')||'',off=f0.get('day_off')==='on';
     if(!off&&(!!si!==!!so)){toast('Enter both the shift in and shift out for this day, or leave both blank for the default shift.',true);return}
     const v=off?'OFF':(si&&so?`${si}-${so}`:null),cur=(e&&e.day_shifts&&e.day_shifts[r.work_date])||null;
@@ -2083,7 +2098,7 @@ async function saveDtr(form){
       if(await Store.get(cp('dtr/')+id)){toast('Attendance for this day was just imported. Please review it again.',true);S.ui.openRow=null;scheduleRender();return}
       await jr.set(cp('dtr/')+id,{...dtrDoc(r),...patch},null);
     } else await jr.update(cp('dtr/')+id,patch,r);
-    if(newShift!==undefined&&e){const ds={...(e.day_shifts||{})};if(newShift)ds[r.work_date]=newShift;else delete ds[r.work_date];await jr.update(cp('employees/')+e.id,{day_shifts:pruneShifts(ds)},e);changes.push(`shift this day → ${newShift==='OFF'?'day off':(newShift||'default')}`)}
+    if(newShift!==undefined&&e){const ds={...(e.day_shifts||{})};if(newShift)ds[r.work_date]=newShift;else delete ds[r.work_date];await jr.update(cp('employees/')+e.id,{day_shifts:pruneShifts(ds)},e);changes.push(`shift this day → ${newShift==='OFF'?'rest day':(newShift||'default')}`)}
     S.ui.openRow=null;S.ui.issuePreset=null;
     logAction(changes.length?'CORRECT':'REVIEW','dtr',id,`${empName(e)} ${r.work_date}: ${patch.review_status||''}${patch.ot_approval?`, OT ${patch.ot_approval}${patch.ot_approved_min!=null?` (${fmtHM(patch.ot_approved_min)} of ${fmtHM(calcEntry(r,e).otActual)} h)`:''}`:''}${changes.length?'; '+changes.join(', '):''}`,jr);
     toast('Review saved');scheduleRender();
@@ -2893,7 +2908,7 @@ function multiPanel(){
   const status=r=>{
     if(!r.d)return '';
     const bits=[WD[dow(r.d)]];
-    if(dow(r.d)===Number(st.rest_day))bits.push('rest day');
+    if(isRestDay(m.eid?empById(m.eid):null,r.d))bits.push('rest day');
     if(hol[r.d])bits.push('holiday');
     if(count.get(r.d)>1)bits.push('<span class="chip bad">listed twice</span>');
     else if(m.eid){const ex=have.get(String(m.eid)+'_'+r.d);
@@ -2917,7 +2932,7 @@ function multiPanel(){
         <label class="f">Time out${t('fo',m.fo,'data-m="fo"')}</label>
       </div>
       <div class="row" style="margin-top:10px;gap:16px;flex-wrap:wrap">
-        <label class="chk small"><input type="checkbox" data-m="skipRest" ${m.skipRest?'checked':''} ${dis}> Skip rest day (${h(WD[Number(st.rest_day)]||'')})</label>
+        <label class="chk small"><input type="checkbox" data-m="skipRest" ${m.skipRest?'checked':''} ${dis}> Skip rest days (${h(restLabel(m.eid?empById(m.eid):null))})</label>
         <label class="chk small"><input type="checkbox" data-m="skipHol" ${m.skipHol?'checked':''} ${dis}> Skip holidays</label>
         <span class="spacer"></span><button class="btn" data-act="mFill" ${dis}>Add these dates</button>
       </div>
@@ -2967,9 +2982,9 @@ function mFill(){
   if(m.fi&&!fi){toast(`“${m.fi}” isn’t a valid time. Use 24-hour HH:MM, e.g. 08:00.`,true);return}
   if(m.fo&&!fo){toast(`“${m.fo}” isn’t a valid time. Use 24-hour HH:MM, e.g. 17:00.`,true);return}
   m.fi=fi;m.fo=fo;
-  const hol=holidayMap(),rest=Number(S.settings.rest_day),listed=new Set(m.rows.map(r=>r.d).filter(Boolean)),add=[];
+  const hol=holidayMap(),me=m.eid?empById(m.eid):null,listed=new Set(m.rows.map(r=>r.d).filter(Boolean)),add=[];
   for(let d=m.from;d<=m.to;d=addDays(d,1)){
-    if(m.skipRest&&dow(d)===rest)continue;
+    if(m.skipRest&&isRestDay(me,d))continue;
     if(m.skipHol&&hol[d])continue;
     if(!listed.has(d))add.push({d,i:fi,o:fo,r:''});
   }
@@ -3049,7 +3064,7 @@ function pageEmployees(){
   if(!S.ready.employees)return html+'<div class="loading">Loading employees…</div>';
   if(!emps.length)return html+`<div class="panel empty"><b>No employees yet.</b>${edit?'Add your first employee to start matching DTR rows.':''}</div>`;
   html+=`<div class="tablewrap"><table><thead><tr><th>ID</th><th class="stick">Name</th><th>Department</th><th>Position</th><th>Status</th><th>Pay basis</th><th>Shift</th><th class="n">Monthly</th><th class="n">Daily</th><th class="n">Allowance</th><th>BIR</th></tr></thead><tbody>
-  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}${payFreq(e)!=='both'?` <span class="chip acc" title="Paid once a month">${payFreq(e)==='first'?'1st only':'2nd only'}</span>`:''}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}${Object.keys(e.day_shifts||{}).some(d=>d>=S.period.start&&d<=S.period.end)?' <span class="chip acc" title="Has a daily schedule this payroll month">Daily</span>':''}</td>
+  ${emps.map(e=>`<tr class="${edit?'click':''}" ${edit?`data-act="editEmp" data-id="${e.id}"`:''}><td class="num">${e.id}</td><td class="stick"><b>${h(empName(e))}</b>${e.active===false?' <span class="chip">Inactive</span>':''}</td><td>${h(e.department)}</td><td>${h(e.position||'')}</td><td>${h(e.employment_status||'')}</td><td>${h(e.pay_basis||'Monthly')}${payFreq(e)!=='both'?` <span class="chip acc" title="Paid once a month">${payFreq(e)==='first'?'1st only':'2nd only'}</span>`:''}</td><td class="num">${e.shift_in&&e.shift_out?h(e.shift_in+'–'+e.shift_out):'<span class="muted">Default</span>'}${Object.keys(e.day_shifts||{}).some(d=>d>=S.period.start&&d<=S.period.end)?' <span class="chip acc" title="Has a daily schedule this payroll month">Daily</span>':''}${e.rest_day!=null&&e.rest_day!==''?` <span class="chip" title="Weekly rest day">Rest ${e.rest_day==='none'?'per day':WD[Number(e.rest_day)]}</span>`:''}</td>
   <td class="n">${numOrNull(e.monthly_rate)!=null?amt(e.monthly_rate):'<span class="chip warn">Not set</span>'}</td><td class="n">${numOrNull(e.daily_rate)!=null?amt(e.daily_rate):(numOrNull(e.monthly_rate)!=null?`<span class="muted">${amt(e.monthly_rate*12/S.settings.divisor)}</span>`:'—')}</td><td class="n">${e.monthly_allowance?amt(e.monthly_allowance):'—'}</td><td>${e.deducted_government!==false?`<span class="chip acc">${e.subject_tax===false?'Yes · MWE':'Yes'}</span>`:'<span class="muted">No</span>'}</td></tr>`).join('')}
   </tbody></table></div><p class="muted small">Grey daily rates are derived from the monthly rate × 12 ÷ ${S.settings.divisor}.</p>`;
   return html;
@@ -3068,6 +3083,7 @@ function empForm(e){
     <label class="f">Branch<input name="branch" value="${v('branch','Main / Victoria')}"></label>
     <label class="f">Status<select name="employment_status">${opt(['Regular','Probationary','Contractual'],e?e.employment_status:'Regular')}</select></label>
     <label class="f">Pay basis<select name="pay_basis">${opt(['Monthly','Daily'],e?e.pay_basis:'Monthly')}</select></label>
+    <label class="f">Weekly rest day<select name="rest_day">${[['',`Company setting (${WD[Number(S.settings.rest_day)]})`],...WD.map((w,i)=>[String(i),w]),['none','No fixed rest day — set per day']].map(([rv,rl])=>`<option value="${rv}" ${String(e&&e.rest_day!=null?e.rest_day:'')===rv?'selected':''}>${h(rl)}</option>`).join('')}</select></label>
     <label class="f">Payroll frequency<select name="pay_frequency">${[['both','Every cut-off (1st and 2nd) — default'],['first','Once a month — 1st cut-off only'],['second','Once a month — 2nd cut-off only']].map(([pv,pl])=>`<option value="${pv}" ${payFreq(e)===pv?'selected':''}>${pl}</option>`).join('')}</select></label>
     <label class="f">Monthly rate (₱)<input name="monthly_rate" type="number" step="0.01" min="0" value="${v('monthly_rate')}"></label>
     <label class="f">Daily rate (₱)<input name="daily_rate" type="number" step="0.01" min="0" value="${v('daily_rate')}" placeholder="Auto from monthly"></label>
@@ -3090,7 +3106,7 @@ async function saveEmp(form){
   const existing=empById(id);
   if(!S.ui.empEdit&&existing){toast(`Employee ID ${id} is already used by ${empName(existing)}.`,true);return}
   const doc={id,first_name:String(fd.get('first_name')).trim().toUpperCase(),surname:String(fd.get('surname')).trim().toUpperCase(),department:fd.get('department'),position:String(fd.get('position')||'').trim(),portal_name:String(fd.get('portal_name')||'').trim(),
-    branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),pay_frequency:['first','second'].includes(fd.get('pay_frequency'))?fd.get('pay_frequency'):'both',monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
+    branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),pay_frequency:['first','second'].includes(fd.get('pay_frequency'))?fd.get('pay_frequency'):'both',rest_day:fd.get('rest_day')==='none'?'none':(/^[0-6]$/.test(fd.get('rest_day')||'')?Number(fd.get('rest_day')):null),monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
     monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
