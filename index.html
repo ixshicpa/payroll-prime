@@ -645,7 +645,7 @@ let Store=Local;
 /* ---------------- State ---------------- */
 const S={
   mode:'loading', company:null, ready:{employees:false,dtr:false},
-  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
+  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, coop:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
   ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
@@ -904,8 +904,13 @@ function computePayroll(){
     const tax=bir&&!mwe?monthlyTax(taxable):0;
     const taxType=!bir?'':(mwe?'T1':(tax>0?'T3':'T2'));
     const led=(S.ledger||[]).filter(a=>String(a.employee_id)===String(e.id));
+    const loanLed=(S.loans||[]).filter(a=>String(a.employee_id)===String(e.id));
     [[k1,P.cuts[0]],[k2,P.cuts[1]]].forEach(([k,c])=>{ // company advances recorded in "Company advances": this payday's installment
+      k.coop=k.off?0:coopAmount(c.n,e.id);k.adv=r2(k.adv+k.coop); // coop savings count as part of company advances
       k.advOther=k.adv;k.advItems=[];k.advBal=0;
+      k.loanItems=[];k.sssLoan=0;k.hdmfLoan=0; // SSS / Pag-IBIG loan amortization, taken on the 1st cut-off payday
+      if(!k.off)for(const l of loanLed){const sc=loanSchedule(l,e,c.key);if(sc.ded>0){k.loanItems.push({id:advId(l),amount:sc.ded,no:sc.no,of:sc.times,type:l.type});if(l.type==='SSS')k.sssLoan=r2(k.sssLoan+sc.ded);else k.hdmfLoan=r2(k.hdmfLoan+sc.ded)}}
+      k.loan=r2(k.sssLoan+k.hdmfLoan);
       for(const a of led){const sc=advSchedule(a,e,c.key);if(!k.off&&sc.ded>0)k.advItems.push({id:advId(a),amount:sc.ded});if(a.status!=='closed')k.advBal=r2(k.advBal+(k.off?sc.before:sc.after))}
       k.advLedger=r2(k.advItems.reduce((t,x)=>t+x.amount,0));k.adv=r2(k.adv+k.advLedger);
     });
@@ -916,10 +921,10 @@ function computePayroll(){
     gk.auto={...gk.auto,sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax};
     const og=((S.edits[freq==='first'?1:2]||{})[e.id]||{}).v||{};
     for(const f of['sss','phic','hdmf','tax'])if(og[f]!=null){gk[f]=r2(Number(og[f]));gk.edited=true}
-    gk.ded=r2(gk.adv+gk.sss+gk.phic+gk.hdmf+gk.tax);gk.net=r2(gk.gross-gk.ded);
-    ok.ded=ok.adv;ok.net=r2(ok.gross-ok.ded);
+    gk.ded=r2(gk.adv+gk.sss+gk.phic+gk.hdmf+gk.tax+gk.loan);gk.net=r2(gk.gross-gk.ded);
+    ok.ded=r2(ok.adv+ok.loan);ok.net=r2(ok.gross-ok.ded);
     const sum=f=>r2(k1[f]+k2[f]);
-    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),
+    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
       sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net,advBal:(freq==='first'?k1:k2).advBal};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
     return {e,freq,raw,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
@@ -1046,7 +1051,7 @@ async function deleteAdv(id){
   try{const jr=journal();await jr.del(cp('advance_ledger/')+id,before);logAction('DELETE','advance',id,`${empName(e)} · ${peso(a.amount)} removed`,jr);S.ui.advConfirm=null;toast('Advance removed');scheduleRender()}
   catch(err){writeError(err)}
 }
-function pageAdvances(){
+function pageAdvancesMain(){
   const u=S.ui,edit=can('editAdvances')&&!S.readOnly,led=S.ledger||[],ac=activeCut();
   let html=`<div class="row"><div><h1>Company advances</h1><p class="sub">Record each advance once. Its deduction is taken automatically from payroll every payday until it is paid, and the balance updates when a cut-off is approved.</p></div><span class="spacer"></span>${edit&&!u.advForm?'<button class="btn primary" data-act="advNew">Record an advance</button>':''}</div>`;
   if(S.ledgerErr)html+=`<div class="banner bad">Could not read company advances: ${h(S.ledgerErr)}</div>`;
@@ -1084,6 +1089,162 @@ function advDetail(r,edit){
   </tbody></table></div>`;
 }
 
+/* ---------------- Coop savings and SSS / Pag-IBIG loans (tabs on the Company advances page) ----------------
+   Coop savings: entered per cut-off (who and how much, not fixed). Counted inside "Company advances" on payroll and payslip.
+   Loans: amortization taken on the 1st cut-off payday (15th) for a number of times; staff paid once a month on the 2nd cut-off have it on their payday. */
+const coopAmount=(n,id)=>{const it=((S.coop||{})[n]||{})[id];return it?Number(it.amount)||0:0};
+const LOAN_TYPES={SSS:'SSS loan',HDMF:'Pag-IBIG loan'};
+const loanYm=k=>String(k).split('_')[0];
+const loanKeyFor=(e,ym)=>ym+(payFreq(e)==='second'?'_2':'_1');
+const loanPaid=l=>r2(Object.values(l.payments||{}).reduce((t,v)=>t+(Number(v)||0),0));
+const loanCount=l=>Object.values(l.payments||{}).filter(v=>Number(v)>0).length;
+const loanTimes=l=>Math.max(1,Math.round(Number(l.times)||0));
+const loanLeft=l=>l.status==='closed'?0:Math.max(0,loanTimes(l)-loanCount(l));
+function loanSchedule(l,e,key){
+  const times=loanTimes(l),per=r2(Number(l.amount)||0),pays=l.payments||{},startYm=l.start_ym||loanYm(key),keyYm=loanYm(key);
+  const live=l.status!=='paused'&&l.status!=='closed';
+  let done=0,ym=startYm,guard=0;
+  while(ym<keyYm&&guard++<600){const k=loanKeyFor(e,ym);if(pays[k]!=null){if(Number(pays[k])>0)done++}else if(live&&done<times)done++;ym=shiftMonth(ym,1)}
+  let ded=0;
+  if(key===loanKeyFor(e,keyYm)&&keyYm>=startYm){if(pays[key]!=null)ded=r2(Number(pays[key])||0);else if(live&&done<times)ded=per}
+  return{before:done,ded,no:done+(ded>0?1:0),times};
+}
+function loanStatus(l){if(l.status==='closed')return['Closed',''];if(loanCount(l)>=loanTimes(l))return['Fully paid','ok'];if(l.status==='paused')return['Paused','warn'];return['Active','acc']}
+function pageAdvances(){
+  const u=S.ui,tab=u.advTab||'adv',edit=can('editAdvances')&&!S.readOnly;
+  const seg=`<div class="seg" role="group" aria-label="Section" style="margin-bottom:14px">${[['adv','Company advances'],['coop','Coop savings'],['loan','SSS & Pag-IBIG loans']].map(([k,l])=>`<button data-act="advTab" data-v="${k}" aria-pressed="${tab===k}">${l}</button>`).join('')}</div>`;
+  if(tab==='coop')return seg+pageCoop(edit);
+  if(tab==='loan')return seg+pageLoans(edit);
+  return seg+pageAdvancesMain();
+}
+/* ---- Coop savings ---- */
+function coopCutSel(){const n=S.ui.coopCut;if(n===1||n===2)return n;const ac=activeCut();return inPeriod(ac)?ac.n:1}
+function pageCoop(edit){
+  const n=coopCutSel(),c=S.period.cuts[n-1],items=(S.coop||{})[n]||{},locked=cutLocked(n);
+  const rows=Object.keys(items).map(id=>({id,e:empById(id)||{id,first_name:'#'+id,surname:'(not in the employee list)',department:''},a:items[id]})).sort((x,y)=>empName(x.e).localeCompare(empName(y.e)));
+  const total=r2(rows.reduce((t,r)=>t+(Number(r.a.amount)||0),0));
+  const emps=S.employees.filter(e=>e.active!==false&&paidOnKey(e,c.key)).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  let html=`<h1>Coop savings</h1><p class="sub">Coop savings are deducted every cut-off, but the amount is not always the same. For each cut-off, list the employees to deduct and how much. On payroll and the payslip the amount is part of <b>Company advances</b>.</p>
+  <div class="row" style="margin-bottom:12px"><div class="seg" role="group" aria-label="Cut-off">${S.period.cuts.map(k=>`<button data-act="coopCut" data-v="${k.n}" aria-pressed="${n===k.n}">${k.n===1?'1st':'2nd'} cut-off</button>`).join('')}</div><span class="muted small">${h(fmtMonth(S.period.ym))} · payroll ${h(fmtRange(c.payStart,c.payEnd))}</span><span class="spacer"></span>${edit&&!locked?'<button class="btn" data-act="coopCopy">Copy from previous cut-off</button>':''}</div>`;
+  if(locked)html+=`<div class="banner ok">This cut-off is approved and locked. Reopen it in Payroll to change coop savings.</div>`;
+  if(edit&&!locked)html+=`<form class="panel" data-form="coopAdd"><h2 style="margin:0 0 10px">Add or change an amount</h2><div class="grid">
+    <label class="f">Employee<select name="employee_id" required><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}">${h(empName(e))} · #${e.id}</option>`).join('')}</select></label>
+    <label class="f">Coop savings (₱)<input name="amount" type="number" min="0.01" step="0.01" required></label>
+    <label class="f">Note<input name="note" maxlength="120" placeholder="Optional"></label></div>
+    <p class="muted small" style="margin:8px 0 0">Choosing an employee who is already listed replaces their amount for this cut-off.</p>
+    <div class="row" style="margin-top:12px"><button class="btn primary">Add to ${n===1?'1st':'2nd'} cut-off</button></div></form>`;
+  if(!rows.length)return html+`<div class="panel empty"><b>No coop savings for this cut-off yet.</b>${edit&&!locked?'Add the employees to deduct above.':''}</div>`;
+  html+=`<div class="stats"><div class="stat"><b>${rows.length}</b><span>Employees</span></div><div class="stat hl"><b class="money">${peso(total)}</b><span>Total coop savings</span></div></div>
+  <div class="tablewrap"><table><thead><tr><th>ID</th><th>Employee</th><th>Department</th><th class="n">Amount</th><th>Note</th><th></th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td class="num">${h(r.e.id)}</td><td><b>${h(empName(r.e))}</b></td><td>${h(r.e.department||'')}</td><td class="n">${amt(r.a.amount)}</td><td class="small">${h(r.a.note||'')}</td><td style="text-align:right">${edit&&!locked?`<button class="btn sm danger" data-act="coopDel" data-id="${h(r.id)}">Remove</button>`:''}</td></tr>`).join('')}
+  </tbody><tfoot><tr><td></td><td>Total</td><td></td><td class="n">${amt(total)}</td><td></td><td></td></tr></tfoot></table></div>`;
+  return html;
+}
+async function writeCoop(n,items,msg){
+  const c=S.period.cuts[n-1],jr=journal();
+  try{await jr.set(cp('coop_savings/')+c.key,{items,updated_by:actor(),updated_at:nowISO()});logAction('ADVANCES','payroll',c.key,`Coop savings ${n===1?'1st':'2nd'} cut-off: ${msg}`,jr);toast('Coop savings saved')}
+  catch(e){writeError(e)}
+}
+async function saveCoop(form){
+  if(!can('editAdvances')||S.readOnly){toast('Only HR or Admin can set coop savings.',true);return}
+  const n=coopCutSel();if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return}
+  const fd=new FormData(form),id=Number(fd.get('employee_id')),e=empById(id),a=r2(Number(fd.get('amount'))||0),note=String(fd.get('note')||'').trim();
+  if(!e){toast('Choose the employee.',true);return}
+  if(!(a>0)){toast('Enter the coop savings amount.',true);return}
+  const items={...((S.coop||{})[n]||{})},was=items[id]?items[id].amount:0;
+  items[id]={amount:a,note};
+  await writeCoop(n,items,`${empName(e)} ${amt(was)} → ${amt(a)}`);form.reset();
+}
+async function coopRemove(id){
+  const n=coopCutSel();if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return}
+  const items={...((S.coop||{})[n]||{})},it=items[id];if(!it)return;delete items[id];
+  await writeCoop(n,items,`${empName(empById(id))} ${amt(it.amount)} removed`);
+}
+async function coopCopyPrev(){
+  const n=coopCutSel();if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return}
+  const c=S.period.cuts[n-1],prev=n===2?S.period.cuts[0].key:shiftMonth(S.period.ym,-1)+'_2';
+  let d=null;try{d=await Store.get(cp('coop_savings/')+prev)}catch(e){}
+  const src=(d&&d.items)||{},items={...((S.coop||{})[n]||{})};let added=0;
+  for(const id of Object.keys(src)){const e=empById(id);if(!e||e.active===false||!paidOnKey(e,c.key)||items[id])continue;items[id]={amount:src[id].amount,note:src[id].note||''};added++}
+  if(!added){toast('Nothing to copy from '+cutKeyLabel(prev)+'.',true);return}
+  await writeCoop(n,items,`${added} amounts copied from ${cutKeyLabel(prev)}`);
+}
+/* ---- SSS and Pag-IBIG loans ---- */
+function loanStartYms(l){
+  const ac=activeCut();let ym=(ac.n===1&&!(inPeriod(ac)&&cutLocked(1)))?ac.ym:shiftMonth(ac.ym,1);
+  const out=[];if(l&&l.start_ym&&l.start_ym<ym)out.push(l.start_ym);
+  for(let i=0;i<12;i++){out.push(ym);ym=shiftMonth(ym,1)}
+  return out;
+}
+function loanForm(l){
+  const emps=S.employees.filter(e=>e.active!==false||(l&&String(e.id)===String(l.employee_id))).sort((x,y)=>empName(x).localeCompare(empName(y)));
+  const paid=l?loanCount(l):0,yms=loanStartYms(l),cur=l?l.start_ym:yms[0];
+  return `<form class="panel" data-form="loanRec"><h2 style="margin:0">${l?'Edit loan':'Record an SSS / Pag-IBIG loan'}</h2>
+  <p class="muted small" style="margin:4px 0 0">Enter the actual amortization and how many times it is deducted. It comes off automatically on every 1st cut-off payday (the 15th) until the count is complete. Staff paid once a month on the 2nd cut-off have it deducted on their payday.</p>
+  <div class="grid" style="margin-top:12px">
+    <label class="f">Employee<select name="employee_id" required ${paid>0?'disabled':''}><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}" ${l&&String(l.employee_id)===String(e.id)?'selected':''}>${h(empName(e))} · #${e.id}</option>`).join('')}</select>${paid>0?`<input type="hidden" name="employee_id" value="${h(l.employee_id)}">`:''}</label>
+    <label class="f">Loan<select name="type">${Object.entries(LOAN_TYPES).map(([k,v])=>`<option value="${k}" ${l&&l.type===k?'selected':''}>${v}</option>`).join('')}</select></label>
+    <label class="f">Amortization per deduction (₱)<input name="amount" type="number" min="0.01" step="0.01" required value="${l?h(l.amount):''}"></label>
+    <label class="f">Number of times to deduct<input name="times" type="number" min="1" step="1" required value="${l?h(l.times):''}"></label>
+    <label class="f">First deduction<select name="start_ym">${yms.map(k=>`<option value="${k}" ${k===cur?'selected':''}>${h(fmtMonth(k))} · 15th</option>`).join('')}</select></label>
+    <label class="f wide">Note<input name="note" maxlength="160" value="${l?h(l.note||''):''}" placeholder="e.g. SSS salary loan, loan no."></label>
+  </div>
+  ${paid>0?`<p class="small muted" style="margin:8px 0 0">${paid} deduction${paid===1?' was':'s were'} already taken on approved cut-offs, so the count can’t go below ${paid}.</p>`:''}
+  <div class="row" style="margin-top:14px"><button type="button" class="btn" data-act="loanCancel">Cancel</button><button class="btn primary">${l?'Save changes':'Record loan'}</button></div></form>`;
+}
+async function saveLoan(form){
+  if(!can('editAdvances')||S.readOnly){toast('Only HR or Admin can record loans.',true);return}
+  const fd=new FormData(form),u=S.ui,prev=u.loanEdit?(S.loans||[]).find(a=>advId(a)===u.loanEdit):null;
+  const empId=Number(fd.get('employee_id')),e=empById(empId),type=String(fd.get('type')||''),amount=r2(Number(fd.get('amount'))||0),times=Math.round(Number(fd.get('times'))||0),start=String(fd.get('start_ym')||''),note=String(fd.get('note')||'').trim();
+  if(!e){toast('Choose the employee.',true);return}
+  if(!LOAN_TYPES[type]){toast('Choose SSS loan or Pag-IBIG loan.',true);return}
+  if(!(amount>0)){toast('Enter the amortization amount.',true);return}
+  if(!(times>=1)){toast('Enter how many times it will be deducted.',true);return}
+  if(!/^\d{4}-\d{2}$/.test(start)){toast('Choose the first deduction month.',true);return}
+  if(prev&&times<loanCount(prev)){toast(`The count can’t be lower than the ${loanCount(prev)} deduction(s) already taken.`,true);return}
+  const id=prev?advId(prev):'LN'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const base=prev?(({_id,...r})=>r)(prev):{status:'active',payments:{},created_by:actor(),created_at:nowISO()};
+  const doc={...base,id,employee_id:empId,type,amount,times,start_ym:start,note,updated_by:actor(),updated_at:nowISO()};
+  try{
+    const jr=journal();
+    await jr.set(cp('loan_ledger/')+id,doc,prev?base:null);
+    logAction(prev?'UPDATE':'CREATE','loan',id,`${empName(e)} · ${LOAN_TYPES[type]} · ${peso(amount)} × ${times} from ${fmtMonth(start)}${note?' · '+note:''}`,jr);
+    u.loanForm=false;u.loanEdit=null;toast(prev?'Loan updated':'Loan recorded');scheduleRender();
+  }catch(err){writeError(err)}
+}
+async function setLoanStatus(id,status,label){
+  const l=(S.loans||[]).find(x=>advId(x)===id);if(!l)return;
+  const {_id,...before}=l,e=empById(l.employee_id);
+  try{const jr=journal();await jr.set(cp('loan_ledger/')+id,{...before,status,updated_by:actor(),updated_at:nowISO()},before);logAction('UPDATE','loan',id,`${empName(e)} · ${LOAN_TYPES[l.type]} · ${label}`,jr);S.ui.loanConfirm=null;toast('Loan '+label.toLowerCase());scheduleRender()}
+  catch(err){writeError(err)}
+}
+async function deleteLoan(id){
+  const l=(S.loans||[]).find(x=>advId(x)===id);if(!l)return;
+  if(loanCount(l)>0){toast('This loan already has deductions. Close it instead.',true);return}
+  const {_id,...before}=l,e=empById(l.employee_id);
+  try{const jr=journal();await jr.del(cp('loan_ledger/')+id,before);logAction('DELETE','loan',id,`${empName(e)} · ${LOAN_TYPES[l.type]} removed`,jr);S.ui.loanConfirm=null;toast('Loan removed');scheduleRender()}
+  catch(err){writeError(err)}
+}
+function pageLoans(edit){
+  const u=S.ui,all=(S.loans||[]).map(l=>({l,e:empById(l.employee_id)||{id:l.employee_id,first_name:'#'+l.employee_id,surname:'(not in the employee list)',department:''}})).sort((a,b)=>empName(a.e).localeCompare(empName(b.e))||String(a.l.type).localeCompare(String(b.l.type)));
+  const shown=u.loanAll?all:all.filter(x=>loanStatus(x.l)[0]==='Active'||loanStatus(x.l)[0]==='Paused'||advId(x.l)===u.loanEdit);
+  const active=all.filter(x=>loanStatus(x.l)[0]==='Active');
+  const bal=r2(all.reduce((t,x)=>t+loanLeft(x.l)*(Number(x.l.amount)||0),0)),paid=r2(all.reduce((t,x)=>t+loanPaid(x.l),0));
+  let html=`<div class="row"><div><h1>SSS &amp; Pag-IBIG loans</h1><p class="sub">Record each loan once with its actual amortization and the number of deductions. It is taken every 1st cut-off payday (15th) and shown as its own line on the payslip.</p></div><span class="spacer"></span>${edit&&!u.loanForm?'<button class="btn primary" data-act="loanNew">Record a loan</button>':''}</div>`;
+  if(u.loanForm)html+=loanForm(u.loanEdit?(S.loans||[]).find(a=>advId(a)===u.loanEdit):null);
+  html+=`<div class="stats"><div class="stat"><b>${active.length}</b><span>Active loans</span></div><div class="stat"><b class="money">${peso(paid)}</b><span>Deducted so far</span></div><div class="stat hl"><b class="money">${peso(bal)}</b><span>Remaining to deduct</span></div></div>
+  <div class="panel"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">Loans</h2><span class="spacer"></span><label class="chk small"><input type="checkbox" data-change="loanAll" ${u.loanAll?'checked':''}> Show fully paid / closed</label></div>`;
+  if(!shown.length)return html+`<div class="empty"><b>${all.length?'No active loans.':'No loans recorded yet.'}</b>${edit?'Press “Record a loan” to add one.':''}</div></div>`;
+  html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Loan</th><th class="n">Per deduction</th><th class="n">Deducted</th><th class="n">Remaining</th><th class="n">Remaining ₱</th><th>Starts</th><th>Status</th><th>Note</th><th></th></tr></thead><tbody>
+  ${shown.map(({l,e})=>{const id=advId(l),[sl,sc]=loanStatus(l),left=loanLeft(l);
+    const btns=!edit?'':(u.loanConfirm===id+':close'?`<span class="small">Stop deducting the remaining ${left}?</span> <button class="btn sm danger" data-act="loanCloseYes" data-id="${h(id)}">Yes, close</button> <button class="btn sm" data-act="loanNo">No</button>`
+      :u.loanConfirm===id+':del'?`<span class="small">Remove this loan?</span> <button class="btn sm danger" data-act="loanDelYes" data-id="${h(id)}">Yes, remove</button> <button class="btn sm" data-act="loanNo">No</button>`
+      :`<button class="btn sm" data-act="loanEdit" data-id="${h(id)}">Edit</button>${left>0?` <button class="btn sm" data-act="loanPause" data-id="${h(id)}">${l.status==='paused'?'Resume':'Pause'}</button>`:''}${loanCount(l)>0?(left>0?` <button class="btn sm danger" data-act="loanClose" data-id="${h(id)}">Close</button>`:''):` <button class="btn sm danger" data-act="loanDel" data-id="${h(id)}">Remove</button>`}`);
+    return `<tr><td class="num">${h(e.id)}</td><td class="stick"><b>${h(empName(e))}</b></td><td>${h(LOAN_TYPES[l.type]||l.type)}</td><td class="n">${amt(l.amount)}</td><td class="n">${loanCount(l)} of ${loanTimes(l)}</td><td class="n"><b>${left}</b></td><td class="n">${amt(left*(Number(l.amount)||0))}</td><td>${h(l.start_ym?fmtMonth(l.start_ym):'—')}</td><td><span class="chip ${sc}">${sl}</span></td><td class="small">${h(l.note||'')}</td><td style="text-align:right;white-space:nowrap">${btns}</td></tr>`}).join('')}
+  </tbody></table></div><p class="muted small">“Deducted” counts approved cut-offs only. Pausing skips the coming paydays without using up the count.</p></div>`;
+  return html;
+}
+
 /* ---------------- Payroll records (saved automatically when a cut-off is approved) ---------------- */
 const REC_CHUNK=80;
 function snapItem(x){const e=x.e;return{...x,e:{id:e.id,first_name:e.first_name,surname:e.surname,department:e.department||'',position:e.position||'',employment_status:e.employment_status||'',pay_basis:e.pay_basis||'Monthly',branch:e.branch||''}}}
@@ -1108,6 +1269,13 @@ async function afterPayrollStatus(n,c,status,all){
     if(status==='APPROVED'&&applied[id])pays[c.key]=applied[id];else if(had)delete pays[c.key];else continue;
     const {_id,...doc}=a;
     try{await Store.set(cp('advance_ledger/')+id,{...doc,payments:pays})}catch(e){toast('Could not update the company advance balances: '+(e.message||e),true);break}
+  }
+  const lapplied={};for(const x of all)for(const it of (x[k].loanItems||[]))lapplied[it.id]=it.amount;
+  for(const l of (S.loans||[])){
+    const id=advId(l),pays={...(l.payments||{})},had=c.key in pays;
+    if(status==='APPROVED'&&lapplied[id])pays[c.key]=lapplied[id];else if(had)delete pays[c.key];else continue;
+    const {_id,...doc}=l;
+    try{await Store.set(cp('loan_ledger/')+id,{...doc,payments:pays})}catch(e){toast('Could not update the loan balances: '+(e.message||e),true);break}
   }
   if(status==='APPROVED'){
     try{await saveRecord(n,all);toast('Cut-off approved · saved in Payroll records')}
@@ -3124,6 +3292,7 @@ const TABS=[['1','1st cut-off'],['2','2nd cut-off'],['M','Monthly'],['BIR','BIR 
 const neg=(v)=>v?'−'+amt(v):amt(0);
 function sectionCols(tab,items){
   const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['adv','Company advances',1]];
+  if(items&&items.some(x=>((x.mo&&x.mo.sssLoan)||0)+((x.mo&&x.mo.hdmfLoan)||0)>0))base.push(['sssLoan','SSS loan',1],['hdmfLoan','Pag-IBIG loan',1]);
   const gov=[['sss','SSS',1],['phic','PhilHealth',1],['hdmf','Pag-IBIG',1],['tax','W/tax',1]];
   if(tab==='1')return[...base,...(items&&items.some(x=>x.freq==='first')?gov:[]),['net','Net pay']]; // staff paid once a month on the 1st cut-off have their deductions here
   if(tab==='2')return[...base,...gov,['net','Net pay']];
@@ -3155,10 +3324,10 @@ function pagePayroll(){
   if(warn.length&&!appr)html+=`<div class="banner warn">Before approving: ${h(warn.join(' · '))}.</div>`;
   const cols=sectionCols(tab,items);
   const tot={};for(const x of items){const r=rowOf(x);for(const[k]of cols)tot[k]=(tot[k]||0)+(r[k]||0)}
-  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.sssLoan||0)+(tot.hdmfLoan||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
   const showCards=isPhone()&&S.ui.payView!=='table';
   html+=isPhone()?`<div class="row" style="margin-bottom:10px"><div class="seg" role="group" aria-label="View"><button data-act="payView" data-v="cards" aria-pressed="${showCards}">Cards</button><button data-act="payView" data-v="table" aria-pressed="${!showCards}">Full table</button></div></div>`:'';
-  if(showCards)html+=`<div class="pcards">${items.map(x=>{const r=rowOf(x),dd=(r.adv||0)+(r.sss||0)+(r.phic||0)+(r.hdmf||0)+(r.tax||0);return`<button class="pcard" data-act="payslip" data-id="${x.e.id}"><div class="top-row"><span class="nm"><b>#${x.e.id} · ${h(empName(x.e))}</b><span>${h(x.e.department)}${!x.hasRate?' · <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' · BIR':''}</span></span><span class="net"><b>${amt(r.net)}</b><span>Net pay</span></span></div><div class="fig"><div><span>Gross</span><b>${amt(r.gross)}</b></div><div><span>Deductions</span><b>${amt(dd)}</b></div><div><span>Late/Abs.</span><b>${amt((r.lateUt||0)+(r.absence||0))}</b></div></div></button>`}).join('')}</div><div class="panel" style="margin-top:10px;padding:12px 14px"><div class="row" style="justify-content:space-between"><b>Total net pay</b><b class="money">${peso(tot.net)}</b></div></div>`;
+  if(showCards)html+=`<div class="pcards">${items.map(x=>{const r=rowOf(x),dd=(r.adv||0)+(r.sssLoan||0)+(r.hdmfLoan||0)+(r.sss||0)+(r.phic||0)+(r.hdmf||0)+(r.tax||0);return`<button class="pcard" data-act="payslip" data-id="${x.e.id}"><div class="top-row"><span class="nm"><b>#${x.e.id} · ${h(empName(x.e))}</b><span>${h(x.e.department)}${!x.hasRate?' · <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' · BIR':''}</span></span><span class="net"><b>${amt(r.net)}</b><span>Net pay</span></span></div><div class="fig"><div><span>Gross</span><b>${amt(r.gross)}</b></div><div><span>Deductions</span><b>${amt(dd)}</b></div><div><span>Late/Abs.</span><b>${amt((r.lateUt||0)+(r.absence||0))}</b></div></div></button>`}).join('')}</div><div class="panel" style="margin-top:10px;padding:12px 14px"><div class="row" style="justify-content:space-between"><b>Total net pay</b><b class="money">${peso(tot.net)}</b></div></div>`;
   else html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Dept</th>${cols.map(c=>`<th class="n">${c[1]}</th>`).join('')}</tr></thead><tbody>
   ${items.map(x=>{const r=rowOf(x);return`<tr class="click" data-act="payslip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td class="stick"><b>${h(empName(x.e))}</b>${!x.hasRate?' <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' <span class="chip acc" title="Included in BIR Purposes">BIR</span>':''}${tk(x).pendingOt?' <span class="chip warn" title="Pending OT">OT?</span>':''}${(tab==='M'?(x.k1.edited||x.k2.edited):r.edited)?' <span class="chip acc" title="Amounts edited manually">Edited</span>':''}${r.net<0?' <span class="chip bad">Negative net</span>':''}</td><td>${h(x.e.department)}</td>
   ${cols.map(([k,,isNeg])=>`<td class="n">${k==='net'?'<b>'+amt(r[k])+'</b>':(isNeg?neg(r[k]):amt(r[k]))}</td>`).join('')}</tr>`}).join('')}
@@ -3221,7 +3390,7 @@ function payslipHtml(x,tab){
   ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line('Company advances',r.adv)}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
+  ${line('Company advances',r.adv)}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
   <p class="cert">I, the undersigned hereby certify to the best of my knowledge and belief that the amounts indicated above are the exact payments of my services rendered for the period covered by this payroll receipt of which I hereby acknowledge.</p>
   
@@ -3846,6 +4015,19 @@ const actions={
   recSlip(el){const r=S.ui.recData;if(!r)return;const x=r.items.find(i=>String(i.e.id)===el.dataset.id);if(!x)return;openDlg('Payslip',withRec(r,()=>payslipHtml(x,String(r.n))),'<button class="btn sm" data-act="printSlip">Print</button>')},
   async recSave(el){const n=Number(el.dataset.n);if(!cutLocked(n)){toast('Approve the cut-off first.',true);return}try{await saveRecord(n,computePayroll());S.ui.recListLoaded=false;S.ui.recList=null;toast('Saved in Payroll records')}catch(e){toast('Could not save the record: '+(e.message||e),true)}},
   recGo(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';location.hash='records'},
+  advTab(el){S.ui.advTab=el.dataset.v;S.ui.advForm=false;S.ui.loanForm=false;S.ui.loanEdit=null;scheduleRender()},
+  coopCut(el){S.ui.coopCut=Number(el.dataset.v);scheduleRender()},
+  coopDel(el){coopRemove(el.dataset.id)},
+  coopCopy(){coopCopyPrev()},
+  loanNew(){S.ui.loanForm=true;S.ui.loanEdit=null;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
+  loanEdit(el){S.ui.loanForm=true;S.ui.loanEdit=el.dataset.id;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
+  loanCancel(){S.ui.loanForm=false;S.ui.loanEdit=null;scheduleRender()},
+  loanPause(el){const l=(S.loans||[]).find(x=>advId(x)===el.dataset.id);if(l)setLoanStatus(advId(l),l.status==='paused'?'active':'paused',l.status==='paused'?'Resumed':'Paused')},
+  loanClose(el){S.ui.loanConfirm=el.dataset.id+':close';scheduleRender()},
+  loanDel(el){S.ui.loanConfirm=el.dataset.id+':del';scheduleRender()},
+  loanNo(){S.ui.loanConfirm=null;scheduleRender()},
+  loanCloseYes(el){setLoanStatus(el.dataset.id,'closed','Closed')},
+  loanDelYes(el){deleteLoan(el.dataset.id)},
   advNew(){S.ui.advForm=true;S.ui.advEdit=null;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
   advEdit(el){S.ui.advForm=true;S.ui.advEdit=el.dataset.id;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
   advCancel(){S.ui.advForm=false;S.ui.advEdit=null;scheduleRender()},
@@ -3933,6 +4115,7 @@ document.addEventListener('change',async e=>{
   else if(k==='brNew'){S.ui.branchNew=el.value}
   else if(k==='portalCut'){S.ui.portalCut=el.value}
   else if(k==='advAll'){S.ui.advAll=el.checked;render()}
+  else if(k==='loanAll'){S.ui.loanAll=el.checked;render()}
   else if(k==='recYear'){S.ui.recYear=el.value;render()}
   else if(k==='acctCo'){S.ui.acctCo=el.value;render()}
 });
@@ -3960,6 +4143,8 @@ document.addEventListener('submit',e=>{
   if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
+  if(k==='coopAdd'){saveCoop(f);return}
+  if(k==='loanRec'){saveLoan(f);return}
   if(k==='deadline'){saveDeadline(f);return}
   if(k==='roleAccess'){saveRoleAccess(f);return}
   if(k==='dept'){addDepartment(f);return}
@@ -3988,12 +4173,13 @@ let unsubDtr=null,unsubPay=[],unsubAudit=null;
 function onSubErr(e){console.warn('subscription',e);if(errCode(e)==='revoked'){toast('Access to this data was removed.',true)}}
 function watchPeriod(){
   if(unsubDtr)unsubDtr();for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];
-  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.edits={};S.recIdx={};
+  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.coop={};S.edits={};S.recIdx={};
   unsubDtr=Store.watchCollection(cp('dtr'),[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
   for(const c of S.period.cuts){
     unsubPay.push(Store.watchDoc(cp('payroll/')+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('payedits/')+c.key,d=>{S.edits[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('advances/')+c.key,d=>{S.adv[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('coop_savings/')+c.key,d=>{S.coop[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('payroll_record_index/')+c.key,d=>{S.recIdx[c.n]=d;scheduleRender()},()=>{}));
   }
 }
@@ -4033,6 +4219,7 @@ function startData(){
   },onSubErr));
   if(fbMode()&&S.account&&S.account.role==='ADMIN')unsubBase.push(Store.watchCollection('pay_link_requests',[],rows=>{S.linkReqs=rows;scheduleRender()},()=>{}));
   unsubBase.push(Store.watchDoc('settings/access',d=>{S.roleAccess=(d&&d.roles)||{};scheduleRender()},onSubErr));
+  unsubBase.push(Store.watchCollection(cp('loan_ledger'),[],rows=>{S.loans=rows;scheduleRender()},onSubErr));
   unsubBase.push(Store.watchCollection(cp('advance_ledger'),[],rows=>{S.ledger=rows;S.ledgerErr='';scheduleRender()},e=>{S.ledgerErr=e&&e.message||String(e);onSubErr(e);scheduleRender()}));
   unsubBase.push(Store.watchCollection(cp('deadlines'),[],rows=>{const m={};for(const r of rows)m[r._id]=r;S.deadlines=m;scheduleRender()},onSubErr));
   unsubBase.push(Store.watchDoc(cp('audit/')+todayISO().slice(0,7),d=>{S.auditToday=(d&&d.entries)||[];scheduleRender()},onSubErr));
@@ -4041,12 +4228,12 @@ function startData(){
 function stopData(){
   for(const u of unsubBase)try{u()}catch(e){}unsubBase=[];
   if(unsubDtr){unsubDtr();unsubDtr=null}for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];if(unsubAudit){unsubAudit();unsubAudit=null}
-  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
+  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.coop={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
   Object.assign(S.ui,{recKey:null,recData:null,recErr:'',recList:null,recListLoaded:false,recListBusy:false,recLoading:null,advForm:false,advEdit:null,advEmp:null,advConfirm:null});
 }
 
 /* ---------------- Backup & restore (Admin) ---------------- */
-const SCOPED_COLS=['employees','dtr','payroll','advances','deadlines','audit','settings'];
+const SCOPED_COLS=['employees','dtr','payroll','advances','advance_ledger','coop_savings','loan_ledger','deadlines','audit','settings'];
 /* Backup covers user accounts plus every company the admin can open. Older backups (Prime Laundry only) still restore. */
 function backupCols(){const cols=['accounts'];for(const id of myCompanies()){const c=coById(id);for(const x of SCOPED_COLS)cols.push(c.prefix+x)}return cols}
 function colCompany(col){if(col==='accounts')return null;const c=COMPANIES.find(x=>x.prefix&&col.startsWith(x.prefix));if(c)return c.id;return col.startsWith('companies/')?'?':'prime'}
