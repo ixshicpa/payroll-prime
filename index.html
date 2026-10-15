@@ -645,7 +645,7 @@ let Store=Local;
 /* ---------------- State ---------------- */
 const S={
   mode:'loading', company:null, ready:{employees:false,dtr:false},
-  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, coop:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
+  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, coop:{}, dsum:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
   ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
@@ -684,7 +684,7 @@ function blankAbsent(eid,d){return {_id:eid+'_'+d,_auto:true,employee_id:eid,wor
   ot_approval:'PENDING',absent_approval:'PENDING',offset_ot_to_absent:'NO',offset_minutes:0,remarks:'',review_status:'FOR REVIEW',reviewed_by:null,reviewed_at:null}}
 function autoAbsents(){
   const P=S.period;if(!P||!S.ready.dtr||!S.ready.employees)return [];
-  const key=[S.dtr,S.employees,S.settings,P,S.payDocs[1],S.payDocs[2],todayISO()];
+  const key=[S.dtr,S.employees,S.settings,P,S.payDocs[1],S.payDocs[2],todayISO(),S.dsum&&S.dsum[1],S.dsum&&S.dsum[2]];
   if(_autoAbs.key&&key.every((v,i)=>v===_autoAbs.key[i]))return _autoAbs.rows;
   const st=S.settings,hol=holidayMap(),have=new Set(S.dtr.map(r=>String(r.employee_id)+'_'+r.work_date));
   const emps=S.employees.filter(e=>e.active!==false),rows=[];
@@ -693,7 +693,7 @@ function autoAbsents(){
     if(!through)continue;
     for(let d=c.start;d<=c.end&&d<=through;d=addDays(d,1)){
       if(hol[d])continue;
-      for(const e of emps)if(!isRestDay(e,d)&&!have.has(String(e.id)+'_'+d))rows.push(blankAbsent(e.id,d));
+      for(const e of emps)if(!isRestDay(e,d)&&!have.has(String(e.id)+'_'+d)&&!dtrSummaryOf(c.n,e.id))rows.push(blankAbsent(e.id,d));
     }
   }
   _autoAbs={key,rows};return rows;
@@ -789,9 +789,17 @@ function cutCalc(e,rows,cutoff){
   const mr=numOrNull(e.monthly_rate),dr=numOrNull(e.daily_rate);
   const daily=dr!=null?dr:(mr!=null?mr*12/st.divisor:0), monthly=mr!=null?mr:daily*st.divisor/12, hourly=daily/hpd;
   const isMonthly=e.pay_basis!=='Daily';
-  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,payDays:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0};
+  const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,payDays:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0,fromSummary:0};
   const byDate={};
-  for(const r of rows){
+  /* DTR summary for this cut-off (Import DTR → Summary): the totals replace the daily records of this employee. */
+  const sm=dtrSummaryOf(cutoff.n,e.id);
+  if(sm){
+    const days=Math.max(0,Number(sm.days)||0),ot=Math.max(0,Number(sm.ot_min)||0),nd=Math.max(0,Number(sm.nd_min)||0);
+    Object.assign(t,{late:Math.max(0,Number(sm.late_min)||0),ut:Math.max(0,Number(sm.ut_min)||0),ot,nd,present:days,payDays:days,fromSummary:1,
+      absent:sm.absent!=null&&sm.absent!==''?Math.max(0,Number(sm.absent)||0):summaryAutoAbsent(e,cutoff,days),
+      otPay:hourly*(ot/60)*Number(st.ot_reg),ndPay:hourly*(nd/60)*st.nd_pct*Number(st.nd_base_reg),hol:Math.max(0,Number(sm.hol_pay)||0)});
+  }
+  for(const r of (sm?[]:rows)){
     byDate[r.work_date]=r;
     const c=calcEntry(r,e);
     t.late+=c.late;t.ut+=c.ut;t.absent+=c.absent;t.offset+=c.offset;t.ot+=c.otPaid;t.nd+=c.nd;
@@ -827,7 +835,7 @@ function cutCalc(e,rows,cutoff){
     t.holDays++;
   }
   let missing=0;
-  for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
+  if(!sm)for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
     const isRest=isRestDay(e,d);
     if(!isMonthly&&hol[d]==='RH'&&!isRest){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++}}
     if(!isRest&&!hol[d]&&!byDate[d])missing++;
@@ -844,6 +852,12 @@ function cutCalc(e,rows,cutoff){
   return {t,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
     hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv)};
 }
+/* ---------- DTR summary (totals per employee and cut-off instead of daily time records) ----------
+   Stored in dtr_summary/<cut-off key> as { items: { <employee id>: {days, late_min, ut_min, ot_min, nd_min, absent, hol_pay, ...} } }. */
+const dtrSummaryOf=(n,id)=>{const it=((S.dsum||{})[n]||{})[id];return it&&!it.removed?it:null};
+/* Monthly-paid staff without an Absences figure: working days of the cut-off (rest days and holidays left out) less days worked. */
+function summaryWorkdays(e,c){let n=0;const hol=holidayMap();for(let d=c.start;d<=c.end;d=addDays(d,1))if(!isRestDay(e,d)&&!hol[d])n++;return n}
+const summaryAutoAbsent=(e,c,days)=>Math.max(0,r2(summaryWorkdays(e,c)-days));
 /* Manual overrides of computed amounts (Payroll/Admin). Stored per cut-off and employee; blank = computed. */
 function applyEdit(e,k,n){
   k.auto={basic:k.basic,lateUt:k.lateUt,absence:k.absence,allowance:k.allowance,hol:k.hol,otPay:k.otPay,ndPay:k.ndPay};
@@ -1931,6 +1945,8 @@ function pageDtr(){
   const lk=S.period.cuts.filter(c=>cutLocked(c.n));
   const nr=withCalc.filter(o=>o.r._auto&&(o.r.review_status||'FOR REVIEW')==='FOR REVIEW'&&!lockedDate(o.r.work_date)).length;
   if(nr)html+=`<div class="banner warn"><div><b>${nr} working ${nr===1?'day has':'days have'} no time record</b> and ${nr===1?'is':'are'} marked <b>Absent</b> for review. Open a row to approve the absence, or mark it <b>With issue</b> with a remark if the employee did work — HR can then add the times. Days are checked up to the last day with imported attendance; rest days and holidays are skipped. Payroll counts them as absences.</div><span class="spacer"></span>${f.dtrFilter!=='absent'?`<button class="btn sm" data-act="dtrFilter" data-v="absent">Show absences</button>`:''}</div>`;
+  {const sc=S.period.cuts.map(c=>[c,Object.entries((S.dsum||{})[c.n]||{}).filter(([,v])=>v&&!v.removed).length]).filter(([,n])=>n);
+   if(sc.length)html+=`<div class="banner info"><div>${sc.map(([c,n])=>`<b>${n} ${n===1?'employee is':'employees are'}</b> paid from a DTR summary for the ${c.n===1?'1st':'2nd'} cut-off`).join(' and ')}. Their daily records here are not used for payroll in that cut-off, and days without a record aren’t marked absent.</div><span class="spacer"></span>${can('importDtr')?'<a class="btn sm" href="#import" data-act="goSummary">View summaries</a>':''}</div>`}
   if(lk.length)html+=`<div class="banner ok">${lk.map(c=>`${c.n===1?'1st':'2nd'} cut-off attendance (${fmtRange(c.start,c.end)})`).join(' and ')} ${lk.length>1?'are':'is'} locked because payroll was approved. Payroll can reopen it if a correction is needed.</div>`;
   html+=`<div class="row" style="margin-bottom:14px">
     <select data-change="dtrCut" aria-label="Cut-off"><option value="0">Whole month</option>${S.period.cuts.map(c=>`<option value="${c.n}" ${f.dtrCut===c.n?'selected':''}>${c.n===1?'1st':'2nd'} cut-off · ${h(fmtD(c.start))}–${h(fmtD(c.end))}</option>`).join('')}</select>
@@ -2302,7 +2318,7 @@ function pageImport(){
   const u=S.ui;
   let html=`<h1>Import DTR</h1><p class="sub">Bring in punches from the timekeeping app. Only four columns are needed: First Name, Date, Time In and Time Out. Rows are matched by first name <b>only to employees registered under ${h(curCo().name)}</b> — the company selected at the top — so people in other companies who share a first name are never mixed up. Add a Company column if one file covers several companies; rows for other companies are left out.</p>`;
   if(S.readOnly)return html+'<div class="empty"><b>View-only access.</b></div>';
-  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry'],['multi','Multiple days']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
+  html+=`<div class="seg" role="group" style="margin-bottom:14px">${[['upload','Upload file'],['paste','Paste rows'],['portal','From portal'],['single','Single entry'],['multi','Multiple days'],['summary','DTR summary']].map(([k,l])=>`<button data-act="importTab" data-v="${k}" aria-pressed="${u.importTab===k}">${l}</button>`).join('')}</div>`;
   if(u.importNote&&!u.importRows)html+=`<div class="banner ok">${h(u.importNote)}<span class="spacer"></span><button class="btn sm" data-act="clearImport">OK</button></div>`;
   if(u.importResult){
     const R=u.importResult;
@@ -2312,6 +2328,8 @@ function pageImport(){
     html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect time card exports can be uploaded as they are.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
   } else if(u.importTab==='portal'){
     html+=portalPanel();
+  } else if(u.importTab==='summary'){
+    html+=summaryPanel();
   } else if(u.importTab==='multi'){
     html+=multiPanel();
   } else if(u.importTab==='paste'){
@@ -2326,7 +2344,7 @@ function pageImport(){
       <label class="f wide">Remarks<input name="remarks" placeholder="Why this entry is added manually"></label>
     </div><div class="row" style="margin-top:12px"><button class="btn primary">Save entry</button></div></form>`;
   }
-  if(u.importRows&&u.importTab!=='single'&&u.importTab!=='multi'){
+  if(u.importRows&&u.importTab!=='single'&&u.importTab!=='multi'&&u.importTab!=='summary'){
     if(u.otherCo===null)loadOtherCompanies();
     if(!u.importRows._checked){checkImportRows();return html+'<div class="panel"><div class="loading">Checking which days are already imported…</div></div>'}
     const rows=u.importRows, ok=rows.filter(x=>x.match==='OK'&&x.dup!=='diff'), diffN=rows.filter(x=>canPick(x)&&x.dup==='diff').length, conf=rows.filter(x=>x.match==='CONFIRM'), bad=rows.filter(x=>!canPick(x)).length;
@@ -3058,6 +3076,151 @@ async function saveSingle(form){
   }catch(e){writeError(e)}
 }
 
+/* ---------- DTR summary import ----------
+   For staff whose time records come as totals per cut-off (days, late, overtime, night differential) instead of daily punches.
+   Late and undertime are in minutes; overtime and night differential in hours (2.5 or 2:30). */
+function sumState(){
+  if(!S.ui.sum){const ac=activeCut();S.ui.sum={cut:inPeriod(ac)?ac.n:1,rows:null,file:''}}
+  if(S.ui.sum.cut!==1&&S.ui.sum.cut!==2)S.ui.sum.cut=1;
+  return S.ui.sum;
+}
+const SUM_COLS=[['days','Days worked'],['late','Late (min)'],['ut','Undertime (min)'],['ot','Overtime (hrs)'],['nd','Night diff / NSD (hrs)'],['absent','Absences (days)']];
+function sumNum(v,kind){
+  if(v==null||String(v).trim()==='')return null;
+  if(typeof v==='number')return kind==='hrs'?Math.round(v*60):v;
+  const t=String(v).trim().replace(/,/g,'');
+  if(kind==='hrs'){const m=parseOtHours(t);return Number.isNaN(m)?NaN:m}
+  if(kind==='min'&&/^\d{1,3}:\d{2}$/.test(t)){const[a,b]=t.split(':').map(Number);return b<60?a*60+b:NaN}
+  const n=Number(t.replace(/\s*(mins?|minutes|days?|d)$/i,''));return isFinite(n)&&n>=0?n:NaN;
+}
+function summaryRows(grid){
+  const nm=x=>String(x==null?'':x).toLowerCase().replace(/[^a-z0-9ñ]+/g,' ').trim();
+  const rows=(grid||[]).map(r=>(r||[]).map(c=>typeof c==='string'?c.trim():(c==null?'':c)));
+  let hi=-1;
+  for(let i=0;i<Math.min(rows.length,40);i++){const H=rows[i].map(nm);if(H.some(x=>/\b(name|employee)\b/.test(x))&&H.some(x=>/\b(days?|late|overtime|ot|nsd|night)\b/.test(x))){hi=i;break}}
+  if(hi<0)throw new Error('Could not find the header row. It needs a Name (or Employee ID) column and at least one of Days, Late, Overtime or NSD.');
+  const H=rows[hi].map(nm),used=new Set();
+  const col=test=>{const i=H.findIndex((x,j)=>!used.has(j)&&test(x));if(i>=0)used.add(i);return i};
+  const iId=col(x=>/^(employee id|emp id|ee no|employee no|employee number|emp no|id|no)$/.test(x));
+  const iLate=col(x=>/\blate\b|tard/.test(x));
+  const iUt=col(x=>/undertime|^ut\b|\but\b/.test(x));
+  const iNd=col(x=>/\bnsd\b|night|^nd\b|\bnd\b/.test(x));
+  const iOt=col(x=>/overtime|^ot\b|\bot\b/.test(x));
+  const iAbs=col(x=>/absen|\babs\b/.test(x));
+  const iDays=col(x=>/\bdays?\b|\bpresent\b/.test(x));
+  const iLast=col(x=>/^(last name|lastname|surname)$/.test(x));
+  const iName=col(x=>/\b(name|employee)\b/.test(x));
+  if(iName<0&&iId<0)throw new Error('No Name or Employee ID column found.');
+  if(iDays<0&&iLate<0&&iOt<0&&iNd<0)throw new Error('No Days, Late, Overtime or NSD column found.');
+  const out=[];
+  for(let r=hi+1;r<rows.length;r++){
+    const c=rows[r];if(!c.some(v=>String(v).trim()!==''))continue;
+    const first=iName>=0?String(c[iName]??'').trim():'',last=iLast>=0?String(c[iLast]??'').trim():'';
+    const name=last&&first?`${last}, ${first}`:first,id=iId>=0?c[iId]:null;
+    if(!name&&!(id!=null&&String(id).trim()))continue;
+    if(/^(total|grand total)$/i.test(name))continue;
+    const v={days:iDays>=0?sumNum(c[iDays],'num'):null,late:iLate>=0?sumNum(c[iLate],'min'):null,ut:iUt>=0?sumNum(c[iUt],'min'):null,
+      ot:iOt>=0?sumNum(c[iOt],'hrs'):null,nd:iNd>=0?sumNum(c[iNd],'hrs'):null,absent:iAbs>=0?sumNum(c[iAbs],'num'):null};
+    const bad=Object.entries(v).filter(([k,x])=>Number.isNaN(x)).map(([k])=>SUM_COLS.find(z=>z[0]===k)[1]);
+    const [e,match]=findEmployee(id,name);
+    out.push({src:name||String(id),employee_id:e?e.id:null,match:bad.length?`Not a number: ${bad.join(', ')}`:(e?match:match||'No match'),...v});
+  }
+  if(!out.length)throw new Error('No data rows under the header.');
+  for(const x of out)x.sel=x.employee_id!=null&&x.match==='OK';
+  return out;
+}
+async function sumFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  const u=sumState();
+  try{
+    let grid;
+    if(/\.(xlsx|xls)$/i.test(f.name)){
+      if(typeof XLSX==='undefined')throw new Error('Excel reading is unavailable here. Save the sheet as CSV and upload that instead.');
+      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:''});
+    }else grid=splitTable(await f.text());
+    u.rows=summaryRows(grid);u.file=f.name;
+  }catch(e){toast(e.message||'Could not read that file.',true)}
+  input.value='';scheduleRender();
+}
+function sumPaste(){const t=$('#sumPaste');if(!t||!t.value.trim()){toast('Paste the summary rows with their header first.',true);return}const u=sumState();try{u.rows=summaryRows(splitTable(t.value));u.file='Pasted summary'}catch(e){toast(e.message,true)}scheduleRender()}
+const fmtH=m=>m==null?'':String(r2(m/60));
+function summaryPanel(){
+  const u=sumState(),n=u.cut,c=S.period.cuts[n-1],items=(S.dsum||{})[n]||{},locked=cutLocked(n),edit=can('importDtr')&&!S.readOnly&&!locked;
+  const saved=Object.entries(items).filter(([,v])=>v&&!v.removed).map(([id,v])=>({id,e:empById(id),v})).sort((a,b)=>empName(a.e||{first_name:a.id}).localeCompare(empName(b.e||{first_name:b.id})));
+  const emps=[...S.employees].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  let html=`<div class="panel"><h2>DTR summary</h2>
+    <p class="muted small" style="margin:0 0 10px">For employees whose attendance comes as totals per cut-off instead of daily time in and time out. Payroll uses these totals in place of the daily records of that cut-off: <b>days worked</b>, <b>late</b> and <b>undertime</b> in minutes, <b>overtime</b> and <b>night differential (NSD)</b> in hours (2.5 or 2:30). Overtime is paid at the regular-day OT rate and NSD at the regular-day night differential. Leave <b>Absences</b> blank to compute it for monthly-paid staff (working days of the cut-off less days worked). Holiday and rest-day premiums are not included — add them in Payroll with <b>Edit</b> if needed.</p>
+    <div class="row" style="flex-wrap:wrap;gap:10px"><div class="seg" role="group" aria-label="Cut-off">${S.period.cuts.map(k=>`<button data-act="sumCut" data-v="${k.n}" aria-pressed="${n===k.n}">${k.n===1?'1st':'2nd'} cut-off</button>`).join('')}</div>
+      <span class="muted small">${h(fmtMonth(S.period.ym))} · attendance ${h(fmtRange(c.start,c.end))} — change the month at the top</span></div>
+    ${locked?'<div class="banner ok" style="margin:10px 0 0">This cut-off is approved and locked. Reopen it in Payroll to change the summary.</div>':''}</div>`;
+  if(edit){
+    html+=`<div class="panel"><h2>Upload or paste the summary</h2><div class="row" style="flex-wrap:wrap;gap:10px"><input type="file" accept=".xlsx,.xls,.csv,.txt" data-change="sumFile"><span class="spacer"></span><button class="btn sm" data-act="sumTemplate">Download template</button></div>
+      <p class="muted small" style="margin:8px 0">Columns: <b>Name</b> (first name, or Surname, First name; or an <b>Employee ID</b> column) and any of <b>Days</b>, <b>Late</b>, <b>Undertime</b>, <b>Overtime</b>, <b>NSD</b>, <b>Absences</b>. Title lines above the header and other columns are ignored.</p>
+      <details><summary style="cursor:pointer;font-weight:600">Paste from Excel instead</summary><textarea id="sumPaste" rows="6" spellcheck="false" placeholder="Name&#9;Days&#9;Late&#9;Overtime&#9;NSD&#10;JUNE&#9;12&#9;35&#9;4.5&#9;2"></textarea><div class="row" style="margin-top:8px"><button class="btn" data-act="sumPaste">Check rows</button></div></details></div>`;
+    html+=`<form class="panel" data-form="sumOne"><h2>Add one employee</h2><div class="grid">
+      <label class="f">Employee<select name="employee_id" required><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}">${h(empName(e))} · #${e.id}</option>`).join('')}</select></label>
+      <label class="f">Days worked<input name="days" inputmode="decimal" placeholder="e.g. 12"></label>
+      <label class="f">Late (min)<input name="late" inputmode="numeric" placeholder="0"></label>
+      <label class="f">Undertime (min)<input name="ut" inputmode="numeric" placeholder="0"></label>
+      <label class="f">Overtime (hrs)<input name="ot" inputmode="decimal" placeholder="e.g. 4.5"></label>
+      <label class="f">NSD (hrs)<input name="nd" inputmode="decimal" placeholder="e.g. 2"></label>
+      <label class="f">Absences (days)<input name="absent" inputmode="decimal" placeholder="auto"></label></div>
+      <div class="row" style="margin-top:12px"><button class="btn primary">Save for ${n===1?'1st':'2nd'} cut-off</button></div></form>`;
+  }
+  if(u.rows&&edit){
+    const rows=u.rows,ok=rows.filter(x=>x.employee_id!=null&&!/^Not a number/.test(x.match)),nSel=rows.filter(x=>x.sel&&x.employee_id!=null).length;
+    const cell=(x,k,kind)=>x[k]==null?'<span class="muted">—</span>':(kind==='h'?h(fmtH(x[k])):h(String(r2(x[k]))));
+    html+=`<div class="panel"><div class="row"><h2 style="margin:0">Preview</h2><span class="chip acc">${h(u.file)}</span><span class="chip ok">${ok.length} matched</span>${rows.length-ok.length?`<span class="chip bad">${rows.length-ok.length} need attention</span>`:''}<span class="spacer"></span><button class="btn" data-act="sumDiscard">Discard</button><button class="btn primary" data-act="sumSave" ${nSel?'':'disabled'}>Save ${nSel} to ${n===1?'1st':'2nd'} cut-off</button></div>
+      <p class="muted small">Tick the rows to save. An employee who already has a summary for this cut-off gets the new figures. Pick the employee for a row that didn’t match.</p>
+      <div class="tablewrap"><table><thead><tr><th class="cb"></th><th>Name in file</th><th>Employee</th><th class="n">Days</th><th class="n">Late (min)</th><th class="n">UT (min)</th><th class="n">OT (hrs)</th><th class="n">NSD (hrs)</th><th class="n">Absences</th><th>Note</th></tr></thead><tbody>
+      ${rows.map((x,i)=>{const e=x.employee_id!=null?empById(x.employee_id):null,badNum=/^Not a number/.test(x.match);
+        return `<tr class="${e&&!badNum?(x.sel?'':'unsel'):'bad'}"><td class="cb">${e&&!badNum?`<input type="checkbox" class="imp-cb" data-change="sumSel" data-i="${i}" ${x.sel?'checked':''}>`:''}</td><td>${h(x.src)}</td>
+        <td><select data-change="sumAssign" data-i="${i}" aria-label="Employee for ${h(x.src)}"><option value="">${e?'':'Choose…'}</option>${emps.map(o=>`<option value="${o.id}" ${e&&e.id===o.id?'selected':''}>${h(empName(o))}</option>`).join('')}</select></td>
+        <td class="n">${cell(x,'days')}</td><td class="n">${cell(x,'late')}</td><td class="n">${cell(x,'ut')}</td><td class="n">${cell(x,'ot','h')}</td><td class="n">${cell(x,'nd','h')}</td>
+        <td class="n">${x.absent!=null?h(String(x.absent)):(e&&e.pay_basis!=='Daily'&&x.days!=null?`<span class="muted" title="Computed: working days less days worked">auto ${summaryAutoAbsent(e,c,x.days)}</span>`:'<span class="muted">—</span>')}</td>
+        <td class="small" style="white-space:normal">${x.match==='OK'?(items[x.employee_id]&&!items[x.employee_id].removed?'<span class="chip warn">replaces saved summary</span>':'<span class="chip ok">matched</span>'):h(x.match)}</td></tr>`}).join('')}
+      </tbody></table></div></div>`;
+  }
+  html+=`<div class="panel"><div class="row"><h2 style="margin:0">Saved for the ${n===1?'1st':'2nd'} cut-off</h2><span class="chip">${saved.length} ${saved.length===1?'employee':'employees'}</span><span class="spacer"></span>${edit&&saved.length?'<button class="btn sm danger" data-act="sumClear">Remove all</button>':''}</div>`;
+  html+=saved.length?`<p class="muted small">These employees are paid from the totals below for this cut-off; their daily records in Attendance are not used.</p><div class="tablewrap"><table><thead><tr><th>Employee</th><th class="n">Days</th><th class="n">Late (min)</th><th class="n">UT (min)</th><th class="n">OT (hrs)</th><th class="n">NSD (hrs)</th><th class="n">Absences</th><th>Saved</th><th></th></tr></thead><tbody>
+    ${saved.map(({id,e,v})=>`<tr><td><b>${h(e?empName(e):'#'+id+' (not in the employee list)')}</b></td><td class="n">${r2(Number(v.days)||0)}</td><td class="n">${Math.round(v.late_min||0)}</td><td class="n">${Math.round(v.ut_min||0)}</td><td class="n">${h(fmtH(v.ot_min||0))}</td><td class="n">${h(fmtH(v.nd_min||0))}</td>
+      <td class="n">${v.absent!=null&&v.absent!==''?r2(v.absent):(e&&e.pay_basis!=='Daily'?`<span class="muted">auto ${summaryAutoAbsent(e,c,Number(v.days)||0)}</span>`:'—')}</td><td class="small muted">${h(v.src||'')}${v.at?' · '+h(fmtStamp(v.at)):''}</td>
+      <td style="text-align:right">${edit?`<button class="btn sm danger" data-act="sumDel" data-id="${h(id)}">Remove</button>`:''}</td></tr>`).join('')}
+    </tbody></table></div>`:`<p class="muted small" style="margin:8px 0 0">None yet. Employees without a summary are paid from their daily records as usual.</p>`;
+  return html+'</div>';
+}
+async function writeSummary(n,mutate,msg){
+  const c=S.period.cuts[n-1];
+  if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return false}
+  try{
+    const jr=journal(),path=cp('dtr_summary/')+c.key;
+    const cur=await Store.get(path).catch(()=>null),items={...((cur&&cur.items)||{})};
+    mutate(items);
+    await jr.set(path,{items,cut:c.key,updated_by:actor(),updated_at:nowISO()},cur);
+    logAction('DTR_SUMMARY','payroll',c.key,`DTR summary ${n===1?'1st':'2nd'} cut-off ${fmtRange(c.start,c.end)}: ${msg}`,jr);
+    return true;
+  }catch(e){writeError(e);return false}
+}
+const sumItem=(x,src)=>({days:x.days!=null?r2(x.days):0,late_min:x.late!=null?Math.round(x.late):0,ut_min:x.ut!=null?Math.round(x.ut):0,ot_min:x.ot!=null?Math.round(x.ot):0,nd_min:x.nd!=null?Math.round(x.nd):0,absent:x.absent!=null?r2(x.absent):null,src,at:nowISO(),by:actor()});
+async function sumSave(){
+  const u=sumState(),rows=(u.rows||[]).filter(x=>x.sel&&x.employee_id!=null&&!/^Not a number/.test(x.match));
+  if(!rows.length){toast('Tick at least one matched row.',true);return}
+  const ids=rows.map(x=>x.employee_id);if(new Set(ids).size!==ids.length){toast('The same employee is ticked on more than one row. Keep one row per employee.',true);return}
+  const ok=await writeSummary(u.cut,items=>{for(const x of rows)items[x.employee_id]=sumItem(x,u.file||'Import')},`${rows.length} employees from ${u.file||'import'} (${rows.slice(0,8).map(x=>empName(empById(x.employee_id))).join(', ')}${rows.length>8?'…':''})`);
+  if(ok){u.rows=null;toast(`Summary saved for ${rows.length} ${rows.length===1?'employee':'employees'}`);scheduleRender()}
+}
+async function sumSaveOne(form){
+  const u=sumState(),fd=new FormData(form),eid=Number(fd.get('employee_id')),e=empById(eid);
+  if(!e){toast('Choose an employee.',true);return}
+  const x={days:sumNum(fd.get('days'),'num'),late:sumNum(fd.get('late'),'min'),ut:sumNum(fd.get('ut'),'min'),ot:sumNum(fd.get('ot'),'hrs'),nd:sumNum(fd.get('nd'),'hrs'),absent:sumNum(fd.get('absent'),'num')};
+  const bad=Object.entries(x).filter(([,v])=>Number.isNaN(v)).map(([k])=>SUM_COLS.find(z=>z[0]===k)[1]);
+  if(bad.length){toast(`Not a number: ${bad.join(', ')}. Overtime and NSD are hours (2.5 or 2:30); late and undertime are minutes.`,true);return}
+  if(x.days==null){toast('Enter the days worked.',true);return}
+  if(await writeSummary(u.cut,items=>{items[eid]=sumItem(x,'Entered by hand')},`${empName(e)}: ${x.days} days, late ${x.late||0}m, OT ${fmtH(x.ot||0)}h, NSD ${fmtH(x.nd||0)}h`)){form.reset();toast(`Summary saved for ${empName(e)}`)}
+}
+async function sumDel(id){const u=sumState(),e=empById(id);if(!(await confirmDlg('Remove this summary?',`${e?empName(e):'#'+id} will be paid from the daily records of this cut-off again.`,'Remove',true)))return;if(await writeSummary(u.cut,items=>{delete items[id]},`removed ${e?empName(e):'#'+id}`))toast('Summary removed')}
+async function sumClear(){const u=sumState();if(!(await confirmDlg('Remove all summaries of this cut-off?','Everyone listed will be paid from their daily records of this cut-off again.','Remove all',true)))return;if(await writeSummary(u.cut,items=>{for(const k of Object.keys(items))delete items[k]},'all removed'))toast('All summaries removed')}
+
 /* ---------- Multiple days for one employee ----------
    Same as Single entry (source 'manual'), but for many days at once. The rows live in S.ui.multi
    and are kept in sync as you type, so a screen refresh never loses what was entered. */
@@ -3381,7 +3544,7 @@ function payslipHtml(x,tab){
   return `<div class="slip"><div class="slip-head">${coLogo()}<div><p><b>${h(st.company)}</b></p><p class="muted small">${h(st.address)}</p></div></div>
   <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h(['#'+e.id,e.employment_status,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">${c?(c.n===1?'1st':'2nd')+' cut-off':'Monthly'} payroll<br><b>${h(payLbl)}</b><br><span class="muted">Covered: ${h(attLbl)}</span></div></div>
   <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin-bottom:14px">
-    <div class="stat"><b style="font-size:18px">${t.present}</b><span>Days present</span></div>
+    <div class="stat"><b style="font-size:18px">${r2(t.present)}</b><span>Days present${t.fromSummary?' · from DTR summary':''}</span></div>
     <div class="stat"><b style="font-size:18px">${r2(tab==='1'?x.k1.absentNet:tab==='2'?x.k2.absentNet:x.absentNet)}</b><span>Absences</span></div>
     <div class="stat"><b style="font-size:18px">${fmtMin(t.late+t.ut)}</b><span>Late + undertime</span></div>
     <div class="stat"><b style="font-size:18px">${fmtMin(t.ot)}</b><span>Approved OT</span></div>
@@ -3958,6 +4121,10 @@ const actions={
   qa(el){quickReview(el.dataset.id,el.dataset.k)},
   qaIssue(el){S.ui.openRow=el.dataset.id;S.ui.issuePreset=el.dataset.id;render();const i=document.querySelector('form.editor input[name=remarks]');if(i){i.focus();i.scrollIntoView({block:'center'})}},
   importTab(el){S.ui.importTab=el.dataset.v;S.ui.importRows=null;S.ui.importNote='';scheduleRender()},
+  sumCut(el){sumState().cut=Number(el.dataset.v);S.ui.sum.rows=null;render()},
+  sumPaste(){sumPaste()},goSummary(){S.ui.importTab='summary';location.hash='#import'},sumSave(){sumSave()},sumDel(el){sumDel(el.dataset.id)},sumClear(){sumClear()},
+  sumDiscard(){sumState().rows=null;render()},
+  sumTemplate(){offerFile('dtr-summary-template.csv','Employee ID,Name,Days,Late (min),Undertime (min),Overtime (hrs),NSD (hrs),Absences\n,JUNE,12,35,0,4.5,2,\n,"REYES, MARK",11.5,0,30,0,0,1\n')},
   mAdd(){mAdd()},mDel(el){mDel(Number(el.dataset.i))},mClear(){mClear()},mFill(){mFill()},mSave(){saveMulti()},
   impEdit(el){const x=(S.ui.importRows||[])[Number(el.dataset.i)];if(x){x.editing=true;scheduleRender()}},
   clearImport(){S.ui.importRows=null;S.ui.importResult=null;S.ui.importNote='';S.ui.portalText='';S.ui.portalSyncMsg='';S.ui.portalInfo='';S.ui.portalError='';S.ui.portalSkipped=[];S.ui.pasteText=PASTE_HEADER+'\n';scheduleRender()},
@@ -4091,6 +4258,9 @@ document.addEventListener('change',async e=>{
   else if(k==='accessMode'){const box=$('#customAccess');if(box)box.style.display=el.value==='custom'?'':'none';if(el.value==='custom'&&box){const f=el.closest('form'),r=f.querySelector('select[name=role]');if(r&&!S.ui.acctEdit){const v=roleAccess(r.value);for(const[pk]of PERMS){const c=f.querySelector(`input[name="p_${pk}"]`);if(c)c.checked=!!v[pk]}}}}
   else if(k==='dtrCut'){S.ui.dtrCut=Number(el.value)||0;S.ui.openRow=null;render()}
   else if(k==='dtrSearch'){S.ui.dtrSearch=el.value.trim();render()}
+  else if(k==='sumFile')sumFile(el);
+  else if(k==='sumSel'){const x=(S.ui.sum&&S.ui.sum.rows||[])[Number(el.dataset.i)];if(x)x.sel=el.checked;const tr=el.closest('tr');if(tr)tr.classList.toggle('unsel',!el.checked);const rows=S.ui.sum.rows,n=rows.filter(x=>x.sel&&x.employee_id!=null).length,b=document.querySelector('[data-act="sumSave"]');if(b){b.disabled=!n;b.textContent=`Save ${n} to ${S.ui.sum.cut===1?'1st':'2nd'} cut-off`}}
+  else if(k==='sumAssign'){const x=(S.ui.sum&&S.ui.sum.rows||[])[Number(el.dataset.i)];if(x){x.employee_id=el.value?Number(el.value):null;if(!/^Not a number/.test(x.match))x.match=x.employee_id!=null?'OK':'No match';x.sel=x.employee_id!=null&&x.match==='OK'}el.blur();render()}
   else if(k==='qaAbs'){const v=el.value;el.blur();if(v)quickReview(el.dataset.id,'abs',v)}
   else if(k==='dtrEmp'){S.ui.dtrEmp=el.value;S.ui.openRow=null;render()}
   else if(k==='fileIn')handleFile(el);
@@ -4140,6 +4310,7 @@ document.addEventListener('submit',e=>{
   if(k==='acct'){saveAcct(f);return}
   if(k==='payedit'){savePayEdit(f);return}
   if(k==='sched'){saveSchedule(f);return}
+  if(k==='sumOne'){sumSaveOne(f);return}
   if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
@@ -4173,13 +4344,14 @@ let unsubDtr=null,unsubPay=[],unsubAudit=null;
 function onSubErr(e){console.warn('subscription',e);if(errCode(e)==='revoked'){toast('Access to this data was removed.',true)}}
 function watchPeriod(){
   if(unsubDtr)unsubDtr();for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];
-  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.coop={};S.edits={};S.recIdx={};
+  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.coop={};S.dsum={};S.edits={};S.recIdx={};
   unsubDtr=Store.watchCollection(cp('dtr'),[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
   for(const c of S.period.cuts){
     unsubPay.push(Store.watchDoc(cp('payroll/')+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('payedits/')+c.key,d=>{S.edits[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('advances/')+c.key,d=>{S.adv[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('coop_savings/')+c.key,d=>{S.coop[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('dtr_summary/')+c.key,d=>{S.dsum={...S.dsum,[c.n]:(d&&d.items)||{}};scheduleRender()},()=>{S.dsum={...S.dsum,[c.n]:{}}}));
     unsubPay.push(Store.watchDoc(cp('payroll_record_index/')+c.key,d=>{S.recIdx[c.n]=d;scheduleRender()},()=>{}));
   }
 }
@@ -4228,12 +4400,12 @@ function startData(){
 function stopData(){
   for(const u of unsubBase)try{u()}catch(e){}unsubBase=[];
   if(unsubDtr){unsubDtr();unsubDtr=null}for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];if(unsubAudit){unsubAudit();unsubAudit=null}
-  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.coop={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
+  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.coop={};S.dsum={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
   Object.assign(S.ui,{recKey:null,recData:null,recErr:'',recList:null,recListLoaded:false,recListBusy:false,recLoading:null,advForm:false,advEdit:null,advEmp:null,advConfirm:null});
 }
 
 /* ---------------- Backup & restore (Admin) ---------------- */
-const SCOPED_COLS=['employees','dtr','payroll','advances','advance_ledger','coop_savings','loan_ledger','deadlines','audit','settings'];
+const SCOPED_COLS=['employees','dtr','dtr_summary','payroll','advances','advance_ledger','coop_savings','loan_ledger','deadlines','audit','settings'];
 /* Backup covers user accounts plus every company the admin can open. Older backups (Prime Laundry only) still restore. */
 function backupCols(){const cols=['accounts'];for(const id of myCompanies()){const c=coById(id);for(const x of SCOPED_COLS)cols.push(c.prefix+x)}return cols}
 function colCompany(col){if(col==='accounts')return null;const c=COMPANIES.find(x=>x.prefix&&col.startsWith(x.prefix));if(c)return c.id;return col.startsWith('companies/')?'?':'prime'}
