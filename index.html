@@ -451,7 +451,7 @@ function rememberCompany(email,id){try{localStorage.setItem(CO_KEY+':'+email,id)
 const CAN={
   viewEmployees:['ADMIN','HR','PAYROLL'], editEmployees:['ADMIN','HR'], importDtr:['ADMIN','HR'],
   viewDtr:['ADMIN','HR','PAYROLL','DEPT_HEAD'], editTimes:['ADMIN','HR'], approveDtr:['ADMIN','HR','DEPT_HEAD'],
-  viewPayroll:['ADMIN','HR','PAYROLL'], approvePayroll:['ADMIN','PAYROLL'], editAdvances:['ADMIN','HR'], editPayroll:['ADMIN','PAYROLL'], setDeadline:['ADMIN'], audit:['ADMIN','HR'],
+  viewPayroll:['ADMIN','HR','PAYROLL'], approvePayroll:['ADMIN','PAYROLL'], editAdvances:['ADMIN','HR'], editAdjustments:['ADMIN','HR','PAYROLL'], editPayroll:['ADMIN','PAYROLL'], setDeadline:['ADMIN'], audit:['ADMIN','HR'],
   settings:['ADMIN','HR'], access:['ADMIN']
 };
 /* Features the admin can switch on or off per role, or per person. "access" (User accounts) stays Admin-only. */
@@ -460,7 +460,7 @@ const PERMS=[
   ['editTimes','Correct time records','Attendance',['viewDtr']],['importDtr','Import DTR','Attendance'],
   ['viewEmployees','View employees and salary rates','Employees'],['editEmployees','Add and edit employees','Employees',['viewEmployees']],
   ['viewPayroll','View payroll and payslips, export to Excel','Payroll'],['approvePayroll','Approve and reopen payroll cut-offs','Payroll',['viewPayroll']],
-  ['editAdvances','Set company advances','Payroll',['viewPayroll']],['editPayroll','Edit computed payroll amounts','Payroll',['viewPayroll']],
+  ['editAdvances','Set company advances','Payroll',['viewPayroll']],['editAdjustments','Add payroll adjustments','Payroll',['viewPayroll']],['editPayroll','Edit computed payroll amounts','Payroll',['viewPayroll']],
   ['audit','View activity log','Admin tools'],['settings','Change payroll settings and holidays','Admin tools'],['setDeadline','Set approval deadlines','Admin tools']
 ];
 const EDIT_ROLES=['HR','PAYROLL','DEPT_HEAD'];
@@ -469,7 +469,7 @@ function withDeps(map){const o={...map};for(const[k,,,deps]of PERMS)if(o[k]&&dep
 function roleAccess(r){const st=(S.roleAccess||{})[r];return st?{...roleDefaults(r),...st}:roleDefaults(r)}
 const NAV=[
   ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],['imports','Import history','importDtr'],
-  ['employees','Employees','viewEmployees'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['advances','Company advances','viewPayroll'],['audit','Activity log','audit'],
+  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['advances','Company advances','viewPayroll'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
 const ABS_REASONS=[['SL','Sick leave'],['VL','Vacation leave'],['EL','Emergency leave'],['LWOP','Leave without pay'],['AWOL','AWOL / no notice'],['OTHER','Other reason']];
@@ -511,8 +511,8 @@ function monthPeriods(ym){
   const start=iso(py,pm,Math.min(cs,daysIn(py,pm)));
   const c1End=iso(y,m,Math.min(mid,last)), end=addDays(iso(y,m,Math.min(cs,last)),-1);
   return {ym,start,end,cuts:[
-    {n:1,start,end:c1End,payStart:iso(y,m,1),payEnd:iso(y,m,15),key:ym+'_1'},
-    {n:2,start:addDays(c1End,1),end,payStart:iso(y,m,16),payEnd:iso(y,m,last),key:ym+'_2'}]};
+    {n:1,ym,start,end:c1End,payStart:iso(y,m,1),payEnd:iso(y,m,15),key:ym+'_1'},
+    {n:2,ym,start:addDays(c1End,1),end,payStart:iso(y,m,16),payEnd:iso(y,m,last),key:ym+'_2'}]};
 }
 function payMonthFor(dateStr){
   const cs=Number(S.settings.cutoff_day)||26;const[y,m,d]=dateStr.split('-').map(Number);
@@ -645,7 +645,7 @@ let Store=Local;
 /* ---------------- State ---------------- */
 const S={
   mode:'loading', company:null, ready:{employees:false,dtr:false},
-  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, coop:{}, dsum:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
+  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, adj:{}, rel:{}, coop:{}, dsum:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
   ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
@@ -847,10 +847,12 @@ function cutCalc(e,rows,cutoff){
   const netLA=Math.max(0,basic-lateUt-absence);
   const allowance=(Number(e.monthly_allowance)||0)/2;
   const taxAllow=e.allowance_taxable?allowance:0;
-  const gross=netLA+allowance+t.hol+t.otPay+t.ndPay;
+  const aj=(S.adj[cutoff.n]||[]).filter(a=>String(a.emp)===String(e.id));
+  const adjPlus=r2(aj.filter(a=>a.kind==='add').reduce((q,a)=>q+Number(a.amount||0),0)), adjMinus=r2(aj.filter(a=>a.kind!=='add').reduce((q,a)=>q+Number(a.amount||0),0));
+  const gross=netLA+allowance+t.hol+t.otPay+t.ndPay+adjPlus;
   const adv=Number(((S.adv[cutoff.n]||{})[e.id]||{}).amount)||0;
   return {t,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
-    hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv)};
+    hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv),adjPlus,adjMinus};
 }
 /* ---------- DTR summary (totals per employee and cut-off instead of daily time records) ----------
    Stored in dtr_summary/<cut-off key> as { items: { <employee id>: {days, late_min, ut_min, ot_min, nd_min, absent, hol_pay, ...} } }. */
@@ -865,14 +867,14 @@ function applyEdit(e,k,n){
   if(k.off||!it||!it.v||!Object.keys(it.v).length)return k;
   for(const f of Object.keys(k.auto))if(it.v[f]!=null)k[f]=r2(Number(it.v[f]));
   k.netLA=r2(Math.max(0,k.basic-k.lateUt-k.absence));
-  k.gross=r2(k.netLA+k.allowance+k.hol+k.otPay+k.ndPay);
+  k.gross=r2(k.netLA+k.allowance+k.hol+k.otPay+k.ndPay+(Number(k.adjPlus)||0));
   if(e.allowance_taxable)k.taxAllow=k.allowance;
   k.govBasis=r2(k.netLA+k.hol+k.taxAllow);
   k.edited=true;k.editNote=it.note||'';
   return k;
 }
 /* Payroll frequency: most staff are paid on both cut-offs. Staff paid once a month ('first' or 'second') get the whole month in that one payout: both cut-offs are added together there and the other cut-off shows nothing. */
-const CUT_SUM=['basic','lateUt','absence','netLA','allowance','taxAllow','hol','otPay','ndPay','gross','govBasis','adv'];
+const CUT_SUM=['basic','lateUt','absence','netLA','allowance','taxAllow','hol','otPay','ndPay','gross','govBasis','adv','adjPlus','adjMinus'];
 function mergeCuts(a,b){const o={...a,t:{},missing:a.missing+b.missing,absentNet:a.absentNet+b.absentNet};for(const f of CUT_SUM)o[f]=r2(a[f]+b[f]);for(const k of Object.keys(a.t))o.t[k]=a.t[k]+b.t[k];return o}
 function zeroCut(a){const o={...a,t:{},missing:0,absentNet:0,off:true};for(const f of CUT_SUM)o[f]=0;for(const k of Object.keys(a.t))o.t[k]=0;return o}
 const payFreq=e=>e&&(e.pay_frequency==='first'||e.pay_frequency==='second')?e.pay_frequency:'both';
@@ -935,10 +937,10 @@ function computePayroll(){
     gk.auto={...gk.auto,sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax};
     const og=((S.edits[freq==='first'?1:2]||{})[e.id]||{}).v||{};
     for(const f of['sss','phic','hdmf','tax'])if(og[f]!=null){gk[f]=r2(Number(og[f]));gk.edited=true}
-    gk.ded=r2(gk.adv+gk.sss+gk.phic+gk.hdmf+gk.tax+gk.loan);gk.net=r2(gk.gross-gk.ded);
-    ok.ded=r2(ok.adv+ok.loan);ok.net=r2(ok.gross-ok.ded);
+    gk.ded=r2(gk.adv+(gk.adjMinus||0)+gk.sss+gk.phic+gk.hdmf+gk.tax+gk.loan);gk.net=r2(gk.gross-gk.ded);
+    ok.ded=r2(ok.adv+(ok.adjMinus||0)+ok.loan);ok.net=r2(ok.gross-ok.ded);
     const sum=f=>r2(k1[f]+k2[f]);
-    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
+    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
       sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net,advBal:(freq==='first'?k1:k2).advBal};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
     return {e,freq,raw,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
@@ -1259,6 +1261,110 @@ function pageLoans(edit){
   return html;
 }
 
+/* ---------------- Adjustments (corrections to pay from an earlier, already-approved cut-off) ---------------- */
+function prevCut(c){return c.n===2?monthPeriods(c.ym).cuts[0]:monthPeriods(shiftMonth(c.ym,-1)).cuts[1]}
+function srcCuts(c){const out=[];let x=c;for(let i=0;i<4;i++){x=prevCut(x);out.push(x)}return out}
+const srcLabel=x=>`${cutName(x)} · ${fmtRange(x.payStart,x.payEnd)}`;
+const sumAdj=(list,add)=>r2(list.filter(a=>(a.kind==='add')===add).reduce((q,a)=>q+Number(a.amount||0),0));
+function pageAdjustments(){
+  const P=S.period,u=S.ui,ac=activeCut(),n=u.adjCut||(inPeriod(ac)?ac.n:1),c=P.cuts[n-1];
+  const canEdit=can('editAdjustments')&&!S.readOnly,locked=cutLocked(n),list=S.adj[n]||[];
+  const srcs=srcCuts(c),prevDoc=n===2?S.payDocs[1]:null;
+  const emps=S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id);
+  const plus=sumAdj(list,true),minus=sumAdj(list,false);
+  let html=`<h1>Adjustments</h1><p class="sub">For corrections to pay from a cut-off that was already approved (for example an underpaid overtime or a wrong late deduction). Add it here and it reflects in the cut-off you choose below, on the payroll and on the payslip.</p>
+  <div class="seg" role="group" aria-label="Cut-off" style="margin-bottom:14px">${P.cuts.map(x=>`<button data-act="adjCut" data-v="${x.n}" aria-pressed="${n===x.n}">${x.n===1?'1st':'2nd'} cut-off · ${h(fmtD(x.payStart))}–${h(fmtD(x.payEnd))}</button>`).join('')}</div>
+  <div class="banner info">Adjustments here reflect on the <b>${cutName(c)}</b> payroll (${h(fmtRange(c.payStart,c.payEnd))}).${prevDoc?` The cut-off before it is ${prevDoc.status==='APPROVED'?'<span class="chip ok">approved</span>':'<span class="chip warn">not yet approved</span>'}.`:''}</div>`;
+  if(locked)html+=`<div class="banner ok">This cut-off is already approved, so its adjustments are locked. Put new adjustments on the next cut-off instead.</div>`;
+  if(canEdit&&!locked)html+=`<form class="panel" data-form="adj" data-n="${n}"><h2>Add adjustment</h2><div class="grid">
+      <label class="f">Employee<select name="emp" required><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}">#${e.id} · ${h(empName(e))}</option>`).join('')}</select></label>
+      <label class="f">Type<select name="kind"><option value="add">Add to pay (+)</option><option value="less">Deduct from pay (−)</option></select></label>
+      <label class="f">Amount (₱)<input name="amount" type="number" step="0.01" min="0.01" required></label>
+      <label class="f">From cut-off<select name="src">${srcs.map(x=>`<option value="${h(x.key)}">${h(srcLabel(x))}</option>`).join('')}</select></label>
+      <label class="f wide">Reason<input name="note" required maxlength="160" placeholder="e.g. Overtime on Oct 3 was approved late, wrong late deduction"></label>
+    </div><div class="row" style="margin-top:12px"><span class="muted small">Added to gross pay or deducted from net pay. It does not change SSS, PhilHealth, Pag-IBIG or withholding tax.</span><span class="spacer"></span><button class="btn primary">Save adjustment</button></div></form>`;
+  if(!S.ready.employees)return html+'<div class="loading">Loading…</div>';
+  if(!list.length)return html+`<div class="panel empty"><b>No adjustments for this cut-off.</b></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${list.length}</b><span>Adjustments</span></div><div class="stat"><b class="money">${peso(plus)}</b><span>Added to pay</span></div><div class="stat"><b class="money">${peso(minus)}</b><span>Deducted from pay</span></div><div class="stat hl"><b class="money">${peso(plus-minus)}</b><span>Net effect</span></div></div>
+  <div class="tablewrap"><table><thead><tr><th>Employee</th><th>Type</th><th class="n">Amount</th><th>From cut-off</th><th>Reason</th><th>Added</th><th></th></tr></thead><tbody>
+  ${list.map(a=>`<tr><td><b>${h(empName(empById(a.emp)))}</b></td><td><span class="chip ${a.kind==='add'?'ok':'warn'}">${a.kind==='add'?'Add to pay':'Deduct from pay'}</span></td><td class="n">${amt(a.amount)}</td><td>${h(a.src_label||'')}</td><td style="white-space:normal;min-width:200px">${h(a.note||'')}</td><td>${h(fmtStamp(a.at))}<div class="muted small">${h(personName(a.by))}</div></td><td>${canEdit&&!locked?`<button class="btn sm danger" data-act="delAdj" data-id="${h(a.id)}">Remove</button>`:''}</td></tr>`).join('')}
+  </tbody></table></div>`;
+  return html;
+}
+async function saveAdjustment(form){
+  const n=Number(form.dataset.n),c=S.period.cuts[n-1];
+  if(!can('editAdjustments')){toast('You don’t have access to add adjustments.',true);return}
+  if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return}
+  const fd=new FormData(form),emp=Number(fd.get('emp')),amount=r2(Number(fd.get('amount'))),note=String(fd.get('note')||'').trim();
+  if(!emp||!(amount>0)){toast('Choose an employee and enter an amount above zero.',true);return}
+  if(!note){toast('Add a reason for the adjustment.',true);return}
+  const src=srcCuts(c).find(x=>x.key===fd.get('src'))||prevCut(c),kind=fd.get('kind')==='less'?'less':'add';
+  const entry={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),emp,kind,amount,src_key:src.key,src_label:srcLabel(src),note,by:actor(),at:nowISO()};
+  const jr=journal();
+  try{
+    await jr.set(cp('adjustments/')+c.key,{items:[...(S.adj[n]||[]),entry],updated_by:actor(),updated_at:nowISO()});
+    logAction('ADJUSTMENT','payroll',c.key,`${cutName(c)}: ${empName(empById(emp))} ${kind==='add'?'+':'−'}${amt(amount)} (from ${srcLabel(src)}) — ${note}`,jr);
+    form.reset();toast('Adjustment saved');
+  }catch(e){writeError(e)}
+}
+async function deleteAdjustment(id){
+  const n=S.ui.adjCut||1,c=S.period.cuts[n-1],a=(S.adj[n]||[]).find(x=>x.id===id);
+  if(!a||!can('editAdjustments'))return;
+  if(cutLocked(n)){toast('This cut-off is approved and locked.',true);return}
+  if(!(await confirmDlg('Remove this adjustment?',`${empName(empById(a.emp))} · ${a.kind==='add'?'+':'−'}${amt(a.amount)}\n${a.note||''}`,'Remove',true)))return;
+  const jr=journal();
+  try{
+    await jr.set(cp('adjustments/')+c.key,{items:(S.adj[n]||[]).filter(x=>x.id!==id),updated_by:actor(),updated_at:nowISO()});
+    logAction('ADJUSTMENT','payroll',c.key,`Removed: ${empName(empById(a.emp))} ${a.kind==='add'?'+':'−'}${amt(a.amount)} — ${a.note||''}`,jr);toast('Adjustment removed');
+  }catch(e){writeError(e)}
+}
+
+/* ---------------- Payroll release (when, how and where the payroll was released) ---------------- */
+const REL_METHODS=['Bank transfer','Cash','Check','E-wallet (GCash / Maya)','Other'];
+const relText=r=>r?[fmtDY(r.released_on),r.method,r.place,r.ref?'Ref '+r.ref:''].filter(Boolean).join(' · '):'';
+function relCell(r){return r?`<span class="chip ok">Released</span><div>${h(fmtDY(r.released_on))}</div><div class="muted">${h([r.method,r.place,r.ref?'Ref '+r.ref:''].filter(Boolean).join(' · '))}</div>`:'<span class="chip warn">Not released</span>'}
+function releaseBanner(r,key,n,ps,pe,canAp){
+  const btn=(act,label,cls)=>`<button class="btn sm ${cls||''}" data-act="${act}" data-key="${h(key)}" data-n="${n}" data-ps="${h(ps)}" data-pe="${h(pe)}">${label}</button>`;
+  if(!r)return `<div class="banner warn">Approved, but the release hasn’t been recorded yet.${canAp?`<span class="spacer"></span>${btn('releaseDlg','Record release','primary')}`:''}</div>`;
+  return `<div class="banner ok" style="align-items:flex-start"><div><b>Released ${h(fmtDY(r.released_on))}</b> · ${h(r.method)}${r.place?' · '+h(r.place):''}${r.ref?' · Ref '+h(r.ref):''}<br><span class="small">Recorded by ${h(personName(r.released_by))} on ${h(fmtStamp(r.released_at))}${r.note?' · '+h(r.note):''}</span></div><span class="spacer"></span>${canAp?btn('releaseDlg','Edit')+btn('undoRelease','Undo release','danger'):''}</div>`;
+}
+function releaseDialog(key,n,ps,pe){
+  const r=(S.rel[n]&&S.period.cuts[n-1]&&S.period.cuts[n-1].key===key?S.rel[n]:(S.ui.recRel||{})[key])||{};
+  openDlg(`Record release · ${n===1?'1st':'2nd'} cut-off`,`<form data-form="release" data-key="${h(key)}" data-n="${n}" class="grid" style="grid-template-columns:1fr">
+    <p class="muted small" style="margin:0">Payroll ${h(fmtRange(ps,pe))}. Record when and where the payroll was released to employees.</p>
+    <label class="f">Date released<input type="date" name="released_on" required value="${h(r.released_on||todayISO())}"></label>
+    <label class="f">Released through<select name="method">${REL_METHODS.map(m=>`<option ${r.method===m?'selected':''}>${h(m)}</option>`).join('')}</select></label>
+    <label class="f">Where (bank, branch or location)<input name="place" maxlength="120" value="${h(r.place||'')}" placeholder="e.g. BDO payroll account, Main office"></label>
+    <label class="f">Reference no. (optional)<input name="ref" maxlength="80" value="${h(r.ref||'')}"></label>
+    <label class="f">Notes (optional)<input name="note" maxlength="200" value="${h(r.note||'')}"></label>
+    <div class="row"><span class="spacer"></span><button class="btn primary">Save release</button></div></form>`);
+}
+async function saveRelease(form){
+  const key=form.dataset.key,n=Number(form.dataset.n);
+  if(!can('approvePayroll')){toast('Only Payroll or Admin can record the release.',true);return}
+  const cur=S.period.cuts[n-1],isCur=!!(cur&&cur.key===key),rec=(S.ui.recList||[]).find(x=>x.key===key);
+  if(isCur?!cutLocked(n):!rec){toast('Approve the cut-off before recording its release.',true);return}
+  const fd=new FormData(form),g=k=>String(fd.get(k)||'').trim();
+  if(!g('released_on')){toast('Enter the date released.',true);return}
+  const doc={key,released_on:g('released_on'),method:g('method'),place:g('place'),ref:g('ref'),note:g('note'),released_by:actor(),released_at:nowISO()};
+  const jr=journal();
+  try{
+    await jr.set(cp('payroll_release/')+key,doc);
+    logAction('RELEASE','payroll',key,`${n===1?'1st':'2nd'} cut-off released ${relText(doc)}`,jr);
+    S.ui.recRel={...(S.ui.recRel||{}),[key]:doc};closeDlg();toast('Release recorded');scheduleRender();
+  }catch(e){writeError(e)}
+}
+async function undoRelease(key,n){
+  if(!can('approvePayroll'))return;
+  if(!(await confirmDlg('Undo the release record?','The cut-off stays approved, but it will show as not yet released.','Undo release',true)))return;
+  const jr=journal();
+  try{
+    await jr.del(cp('payroll_release/')+key);
+    logAction('UNRELEASE','payroll',key,`${n===1?'1st':'2nd'} cut-off release record removed`,jr);
+    const m={...(S.ui.recRel||{})};delete m[key];S.ui.recRel=m;toast('Release record removed');scheduleRender();
+  }catch(e){writeError(e)}
+}
+
 /* ---------------- Payroll records (saved automatically when a cut-off is approved) ---------------- */
 const REC_CHUNK=80;
 function snapItem(x){const e=x.e;return{...x,e:{id:e.id,first_name:e.first_name,surname:e.surname,department:e.department||'',position:e.position||'',employment_status:e.employment_status||'',pay_basis:e.pay_basis||'Monthly',branch:e.branch||''}}}
@@ -1300,6 +1406,7 @@ async function afterPayrollStatus(n,c,status,all){
 }
 async function loadRecordList(){
   const u=S.ui;u.recListBusy=true;u.recListErr='';
+  try{u.recRel=Object.fromEntries(await Store.getAll(cp('payroll_release')))}catch(e){u.recRel=u.recRel||{}}
   try{const rows=await Store.getAll(cp('payroll_record_index'));u.recList=rows.map(([id,d])=>({...d,key:d.key||id})).sort((a,b)=>String(b.key).localeCompare(String(a.key)))}
   catch(e){u.recListErr=e.message||String(e)}
   u.recListBusy=false;u.recListLoaded=true;scheduleRender();
@@ -1324,11 +1431,11 @@ const recSecList=rec=>rec.n===1?['dtr','cut','slips']:['dtr','cut','slips','M','
 const recSecLabel=(rec,s)=>({dtr:'DTR summary',cut:rec.n===1?'1st cut-off':'2nd cut-off',slips:'Payslips',M:'Monthly',BIR:'BIR Purposes'}[s]);
 function recDtrData(rec){
   const n=rec.n,c=rec.period.cuts[n-1];
-  const head=['EE No','Employee','Department','Days present','Absences (days)','Late + undertime (min)','Approved OT (min)','Night diff (min)','Holiday / RD days worked','Missing punches','Not yet approved','Workdays without DTR'];
+  const head=['EE No','Employee','Department','Monthly rate','Daily rate','Days present','Absences (days)','Late + undertime (min)','Approved OT (min)','Night diff (min)','Holiday / RD days worked','Missing punches','Not yet approved','Workdays without DTR'];
   const rows=rec.items.map(x=>{const k=n===1?x.k1:x.k2,r=(x.raw&&x.raw[n-1])||{t:k.t,absentNet:k.absentNet,missing:k.missing},t=r.t||{};
-    return[x.e.id,empName(x.e),x.e.department||'',t.present||0,r2(r.absentNet||0),Math.round((t.late||0)+(t.ut||0)),Math.round(t.ot||0),Math.round(t.nd||0),t.holDays||0,t.chk||0,t.review||0,r.missing||0]});
-  const tot=['','TOTAL','',...[3,4,5,6,7,8,9,10,11].map(i=>r2(rows.reduce((a,r)=>a+(Number(r[i])||0),0)))];
-  return{name:'DTR Summary',hdr:[rec.company||S.settings.company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],head,rows,tot,extra:[],count:true};
+    return[x.e.id,empName(x.e),x.e.department||'',r2(Number(x.k1.monthly)||0),r2(Number(x.daily)||0),t.present||0,r2(r.absentNet||0),Math.round((t.late||0)+(t.ut||0)),Math.round(t.ot||0),Math.round(t.nd||0),t.holDays||0,t.chk||0,t.review||0,r.missing||0]});
+  const tot=['','TOTAL','','','',...[5,6,7,8,9,10,11,12,13].map(i=>r2(rows.reduce((a,r)=>a+(Number(r[i])||0),0)))];
+  return{name:'DTR Summary',hdr:[rec.company||S.settings.company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],head,rows,tot,extra:[],count:true,money:[3,4]};
 }
 function recSecData(rec,s){
   if(s==='dtr')return recDtrData(rec);
@@ -1336,7 +1443,7 @@ function recSecData(rec,s){
   return withRec(rec,()=>sectionData(s,rec.items));
 }
 function secTable(d){
-  const cell=(v,i)=>typeof v==='number'&&i>0?(d.count?String(v):amt(v)):h(v==null?'':v);
+  const cell=(v,i)=>typeof v==='number'&&i>0?((d.count&&!(d.money||[]).includes(i))?String(v):amt(v)):h(v==null?'':v);
   return `<div class="rec-sec"><div class="rec-head">${coLogo()}<div>${d.hdr.map((t,i)=>i?`<div class="muted small">${h(t)}</div>`:`<div><b>${h(t)}</b></div>`).join('')}</div></div>
   <div class="tablewrap" data-noresp style="margin-top:8px"><table><thead><tr>${d.head.map((x,i)=>`<th${i>2?' class="n"':''}>${h(x)}</th>`).join('')}</tr></thead>
   <tbody>${d.rows.map(r=>`<tr>${r.map((v,i)=>`<td${typeof v==='number'&&i>0?' class="n"':''}>${cell(v,i)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${d.head.length}" class="muted">No employees in this section.</td></tr>`}</tbody>
@@ -1367,8 +1474,8 @@ function pageRecords(){
   const years=[...new Set(list.map(r=>String(r.ym||r.key).slice(0,4)))];const yr=u.recYear&&years.includes(u.recYear)?u.recYear:'';
   const L=yr?list.filter(r=>String(r.ym||r.key).startsWith(yr)):list;
   if(years.length>1)html+=`<div class="row" style="margin-bottom:10px"><label class="f">Year<select data-change="recYear"><option value="">All years</option>${years.map(y=>`<option ${y===yr?'selected':''}>${y}</option>`).join('')}</select></label></div>`;
-  html+=`<div class="tablewrap"><table><thead><tr><th>Payroll month</th><th>Cut-off</th><th>Payroll period</th><th>Attendance</th><th class="n">Employees</th><th class="n">Gross</th><th class="n">Net pay</th><th>Approved</th><th>Status</th></tr></thead><tbody>
-  ${L.map(r=>`<tr class="click" data-act="recOpen" data-key="${h(r.key)}"><td><b>${h(fmtMonth(r.ym||String(r.key).slice(0,7)))}</b></td><td>${r.n===1?'1st':'2nd'} cut-off</td><td>${h(fmtRange(r.pay_start,r.pay_end))}</td><td>${h(fmtRange(r.att_start,r.att_end))}</td><td class="n">${(r.totals||{}).employees||0}</td><td class="n">${amt((r.totals||{}).gross)}</td><td class="n"><b>${amt((r.totals||{}).net)}</b></td><td class="small">${h(personName(r.approved_by))}<br><span class="muted">${h(fmtStamp(r.approved_at))}</span></td><td>${r.status==='REOPENED'?'<span class="chip warn">Reopened</span>':'<span class="chip ok">Approved</span>'}</td></tr>`).join('')}
+  html+=`<div class="tablewrap"><table><thead><tr><th>Payroll month</th><th>Cut-off</th><th>Payroll period</th><th>Attendance</th><th class="n">Employees</th><th class="n">Gross</th><th class="n">Net pay</th><th>Approved</th><th>Status</th><th>Released</th></tr></thead><tbody>
+  ${L.map(r=>`<tr class="click" data-act="recOpen" data-key="${h(r.key)}"><td><b>${h(fmtMonth(r.ym||String(r.key).slice(0,7)))}</b></td><td>${r.n===1?'1st':'2nd'} cut-off</td><td>${h(fmtRange(r.pay_start,r.pay_end))}</td><td>${h(fmtRange(r.att_start,r.att_end))}</td><td class="n">${(r.totals||{}).employees||0}</td><td class="n">${amt((r.totals||{}).gross)}</td><td class="n"><b>${amt((r.totals||{}).net)}</b></td><td class="small">${h(personName(r.approved_by))}<br><span class="muted">${h(fmtStamp(r.approved_at))}</span></td><td>${r.status==='REOPENED'?'<span class="chip warn">Reopened</span>':'<span class="chip ok">Approved</span>'}</td><td class="small">${relCell((u.recRel||{})[r.key])}</td></tr>`).join('')}
   </tbody></table></div>`;
   return html;
 }
@@ -1380,6 +1487,7 @@ function recordView(){
   if(!rec)return html+'<div class="loading">Loading the record…</div>';
   const c=rec.period.cuts[rec.n-1],secs=recSecList(rec),sec=secs.includes(u.recSec)?u.recSec:'dtr';
   html+=`<div class="row" style="margin-top:8px"><div><h1>${h(fmtMonth(rec.ym))} · ${rec.n===1?'1st':'2nd'} cut-off</h1><p class="sub">Payroll ${h(fmtRange(c.payStart,c.payEnd))} · attendance ${h(fmtRange(c.start,c.end))} · approved by ${h(personName(rec.approved_by))} on ${h(fmtStamp(rec.approved_at))}</p></div><span class="spacer"></span><button class="btn" data-act="recPrint">Print this section</button><button class="btn" data-act="recExport">Export Excel</button></div>`;
+  if(rec.status!=='REOPENED')html+=releaseBanner((u.recRel||{})[key],key,rec.n,c.payStart,c.payEnd,can('approvePayroll')&&!S.readOnly);
   if(rec.status==='REOPENED')html+=`<div class="banner warn">This cut-off was reopened by ${h(personName(rec.reopened_by))} on ${h(fmtStamp(rec.reopened_at))}. The record below is the payroll as it was approved; it is replaced when the cut-off is approved again.</div>`;
   const t=rec.totals||{};
   html+=`<div class="stats"><div class="stat"><b>${t.employees||0}</b><span>Employees paid</span></div><div class="stat"><b class="money">${peso(t.gross)}</b><span>Gross pay</span></div><div class="stat hl"><b class="money">${peso(t.net)}</b><span>Net pay</span></div>${rec.month?`<div class="stat"><b class="money">${peso(rec.month.net)}</b><span>Net pay for the month</span></div>`:''}</div>`;
@@ -1716,7 +1824,7 @@ function render(){
   if(S.viewAs)html+=`<div class="banner warn">Previewing as ${h(ROLES[S.viewAs.role])}${S.viewAs.dept?' · '+h(S.viewAs.dept):''}. <span class="spacer"></span><button class="btn sm" data-act="stopPreview">Stop preview</button></div>`;
   if(S.readOnly)html+=`<div class="banner bad">Your changes can't be saved because you have view-only access to this page. Ask the owner to share it with you as a Contributor.</div>`;
   if(r==='NONE'){html+=pageNoAccess();$('#view').innerHTML=html;return}
-  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,records:pageRecords,advances:pageAdvances,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
+  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,adjustments:pageAdjustments,records:pageRecords,advances:pageAdvances,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
   const navItem=NAV.find(n=>n[0]===S.route);
   if(navItem&&navItem[2]&&!can(navItem[2])){html+=`<div class="empty"><b>This section isn't available for your role.</b>Use the tabs above to continue.</div>`}
   else html+=page();
@@ -1793,6 +1901,7 @@ function attentionHtml(rows,emps){
   if(pending)attn.push(['acc',`${pending} attendance ${pending===1?'record is':'records are'} waiting for department review`,'#dtr','Open']);
   if(noRate&&can('viewEmployees'))attn.push(['warn',`${noRate} ${noRate===1?'employee has':'employees have'} no salary rate, so payroll shows ₱0 for them`,'#employees','Add rates']);
   for(const c of [...S.period.cuts].reverse()){const d=S.payDocs[c.n];if(d&&d.status==='APPROVED')attn.unshift(['ok',`${cutName(c)} (${fmtRange(c.payStart,c.payEnd)}) was approved by ${personName(d.approved_by)} on ${fmtStamp(d.approved_at)}`,can('viewPayroll')?'#payroll':'',can('viewPayroll')?'View':''])}
+  if(can('viewPayroll'))for(const c of S.period.cuts){const d=S.payDocs[c.n];if(d&&d.status==='APPROVED'&&!S.rel[c.n])attn.unshift(['warn',`${cutName(c)} (${fmtRange(c.payStart,c.payEnd)}) is approved but its release hasn’t been recorded yet`,'#payroll','Record'])}
   return `<div class="panel"><h2>Needs attention</h2>${attn.length?`<ul class="attn">${attn.map(a=>`<li><span class="chip ${a[0]}">●</span><span>${h(a[1])}</span><span class="spacer"></span>${a[2]?`<a class="btn sm" href="${a[2]}">${h(a[3])}</a>`:''}</li>`).join('')}</ul>`:'<p class="muted">Nothing waiting. Everything in this payroll month is reviewed.</p>'}</div>`;
 }
 function monthNote(c){return inPeriod(c)?'':`<p class="muted small">Counts for this cut-off appear when ${h(fmtMonth(c.ym))} is the selected payroll month. <button class="btn sm" data-act="pmPick" data-ym="${c.ym}">Show ${h(fmtMonth(c.ym))}</button></p>`}
@@ -1852,7 +1961,7 @@ async function clearDeadline(key){
 /* Admin: today's changes */
 function dashToday(){
   const t=todayISO(),ents=S.auditToday.filter(x=>{const d=new Date(x.at);return iso(d.getFullYear(),d.getMonth()+1,d.getDate())===t}).reverse();
-  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY','DELETE_ATTENDANCE']],['Undone changes',['UNDO']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','ADVANCES']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
+  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY','DELETE_ATTENDANCE']],['Undone changes',['UNDO']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','ADVANCES','ADJUSTMENT','RELEASE','UNRELEASE']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
   const counts=groups.map(([l,a])=>[l,ents.filter(x=>a.includes(x.action)).length]).filter(x=>x[1]);
   const shown=ents.filter(x=>x.action!=='LOGIN'&&x.action!=='LOGOUT').slice(0,8);
   return `<div class="panel"><div class="row"><h2 style="margin:0">Today’s changes</h2><span class="muted small">${h(fmtDY(t))}</span><span class="spacer"></span><a class="btn sm" href="#audit">Open activity log</a></div>
@@ -3455,6 +3564,7 @@ const TABS=[['1','1st cut-off'],['2','2nd cut-off'],['M','Monthly'],['BIR','BIR 
 const neg=(v)=>v?'−'+amt(v):amt(0);
 function sectionCols(tab,items){
   const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['adv','Company advances',1]];
+  if(items&&items.some(x=>x.mo&&((x.mo.adjPlus||0)||(x.mo.adjMinus||0)))){base.splice(base.findIndex(c=>c[0]==='gross'),0,['adjPlus','Adjustments (+)']);base.push(['adjMinus','Adjustments (−)',1])}
   if(items&&items.some(x=>((x.mo&&x.mo.sssLoan)||0)+((x.mo&&x.mo.hdmfLoan)||0)>0))base.push(['sssLoan','SSS loan',1],['hdmfLoan','Pag-IBIG loan',1]);
   const gov=[['sss','SSS',1],['phic','PhilHealth',1],['hdmf','Pag-IBIG',1],['tax','W/tax',1]];
   if(tab==='1')return[...base,...(items&&items.some(x=>x.freq==='first')?gov:[]),['net','Net pay']]; // staff paid once a month on the 1st cut-off have their deductions here
@@ -3473,10 +3583,12 @@ function pagePayroll(){
   const canAp=can('approvePayroll')&&!S.readOnly, canAdv=can('editAdvances')&&!S.readOnly;
   if(c){
     html+=`<div class="panel" style="padding:12px 16px"><div class="row"><div><b>Payroll ${h(fmtRange(c.payStart,c.payEnd))}</b><div class="muted small">Attendance ${h(fmtRange(c.start,c.end))}${cutN===2?' · government contributions and withholding tax are deducted on this cut-off':''}</div></div><span class="spacer"></span>
+      <a class="btn" href="#adjustments" data-act="goAdj" data-n="${cutN}">Adjustments${(S.adj[cutN]||[]).length?` (${(S.adj[cutN]||[]).length})`:''}</a>
       ${canAdv&&!appr?`<button class="btn" data-act="editAdvances" data-n="${cutN}" title="One-time amounts. Installments are recorded under Company advances.">One-time advances</button>`:''}
       ${canAp?(appr?`<button class="btn danger" data-act="reopenPayroll" data-n="${cutN}">Reopen</button>`:`<button class="btn ok" data-act="approvePayroll" data-n="${cutN}">Approve ${cutN===1?'1st':'2nd'} cut-off</button>`):''}</div></div>`;
     const ri=S.recIdx&&S.recIdx[cutN];
-    html+=appr?`<div class="banner ok">Approved by ${h(personName(d.approved_by))} on ${h(fmtStamp(d.approved_at))}. Attendance and company advances for this cut-off are locked.<span class="spacer"></span>${ri&&ri.status==='APPROVED'?`<button class="btn sm" data-act="recGo" data-key="${h(c.key)}">View in Payroll records</button>`:(canAp?`<button class="btn sm" data-act="recSave" data-n="${cutN}">Save to Payroll records</button>`:'')}</div>`:'';
+    html+=appr?`<div class="banner ok">Approved by ${h(personName(d.approved_by))} on ${h(fmtStamp(d.approved_at))}. Attendance, adjustments and company advances for this cut-off are locked.<span class="spacer"></span>${ri&&ri.status==='APPROVED'?`<button class="btn sm" data-act="recGo" data-key="${h(c.key)}">View in Payroll records</button>`:(canAp?`<button class="btn sm" data-act="recSave" data-n="${cutN}">Save to Payroll records</button>`:'')}</div>`:'';
+    html+=appr?releaseBanner(S.rel[cutN],c.key,c.n,c.payStart,c.payEnd,canAp):'';
   } else html+=`<div class="banner info">Monthly view: both cut-offs together · payroll ${h(fmtRange(P.cuts[0].payStart,P.cuts[1].payEnd))} · attendance ${h(fmtRange(P.start,P.end))}.</div>`;
   const tk=x=>tab==='1'?x.k1.t:(tab==='2'?x.k2.t:x.t);
   const noRate=items.filter(x=>!x.hasRate).length, pendOt=items.reduce((a,x)=>a+tk(x).pendingOt,0), chk=items.reduce((a,x)=>a+tk(x).chk,0), review=items.reduce((a,x)=>a+tk(x).review,0);
@@ -3487,10 +3599,10 @@ function pagePayroll(){
   if(warn.length&&!appr)html+=`<div class="banner warn">Before approving: ${h(warn.join(' · '))}.</div>`;
   const cols=sectionCols(tab,items);
   const tot={};for(const x of items){const r=rowOf(x);for(const[k]of cols)tot[k]=(tot[k]||0)+(r[k]||0)}
-  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.sssLoan||0)+(tot.hdmfLoan||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.adjMinus||0)+(tot.sssLoan||0)+(tot.hdmfLoan||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
   const showCards=isPhone()&&S.ui.payView!=='table';
   html+=isPhone()?`<div class="row" style="margin-bottom:10px"><div class="seg" role="group" aria-label="View"><button data-act="payView" data-v="cards" aria-pressed="${showCards}">Cards</button><button data-act="payView" data-v="table" aria-pressed="${!showCards}">Full table</button></div></div>`:'';
-  if(showCards)html+=`<div class="pcards">${items.map(x=>{const r=rowOf(x),dd=(r.adv||0)+(r.sssLoan||0)+(r.hdmfLoan||0)+(r.sss||0)+(r.phic||0)+(r.hdmf||0)+(r.tax||0);return`<button class="pcard" data-act="payslip" data-id="${x.e.id}"><div class="top-row"><span class="nm"><b>#${x.e.id} · ${h(empName(x.e))}</b><span>${h(x.e.department)}${!x.hasRate?' · <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' · BIR':''}</span></span><span class="net"><b>${amt(r.net)}</b><span>Net pay</span></span></div><div class="fig"><div><span>Gross</span><b>${amt(r.gross)}</b></div><div><span>Deductions</span><b>${amt(dd)}</b></div><div><span>Late/Abs.</span><b>${amt((r.lateUt||0)+(r.absence||0))}</b></div></div></button>`}).join('')}</div><div class="panel" style="margin-top:10px;padding:12px 14px"><div class="row" style="justify-content:space-between"><b>Total net pay</b><b class="money">${peso(tot.net)}</b></div></div>`;
+  if(showCards)html+=`<div class="pcards">${items.map(x=>{const r=rowOf(x),dd=(r.adv||0)+(r.adjMinus||0)+(r.sssLoan||0)+(r.hdmfLoan||0)+(r.sss||0)+(r.phic||0)+(r.hdmf||0)+(r.tax||0);return`<button class="pcard" data-act="payslip" data-id="${x.e.id}"><div class="top-row"><span class="nm"><b>#${x.e.id} · ${h(empName(x.e))}</b><span>${h(x.e.department)}${!x.hasRate?' · <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' · BIR':''}</span></span><span class="net"><b>${amt(r.net)}</b><span>Net pay</span></span></div><div class="fig"><div><span>Gross</span><b>${amt(r.gross)}</b></div><div><span>Deductions</span><b>${amt(dd)}</b></div><div><span>Late/Abs.</span><b>${amt((r.lateUt||0)+(r.absence||0))}</b></div></div></button>`}).join('')}</div><div class="panel" style="margin-top:10px;padding:12px 14px"><div class="row" style="justify-content:space-between"><b>Total net pay</b><b class="money">${peso(tot.net)}</b></div></div>`;
   else html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Dept</th>${cols.map(c=>`<th class="n">${c[1]}</th>`).join('')}</tr></thead><tbody>
   ${items.map(x=>{const r=rowOf(x);return`<tr class="click" data-act="payslip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td class="stick"><b>${h(empName(x.e))}</b>${!x.hasRate?' <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' <span class="chip acc" title="Included in BIR Purposes">BIR</span>':''}${tk(x).pendingOt?' <span class="chip warn" title="Pending OT">OT?</span>':''}${(tab==='M'?(x.k1.edited||x.k2.edited):r.edited)?' <span class="chip acc" title="Amounts edited manually">Edited</span>':''}${r.net<0?' <span class="chip bad">Negative net</span>':''}</td><td>${h(x.e.department)}</td>
   ${cols.map(([k,,isNeg])=>`<td class="n">${k==='net'?'<b>'+amt(r[k])+'</b>':(isNeg?neg(r[k]):amt(r[k]))}</td>`).join('')}</tr>`}).join('')}
@@ -3550,10 +3662,10 @@ function payslipHtml(x,tab){
     <div class="stat"><b style="font-size:18px">${fmtMin(t.ot)}</b><span>Approved OT</span></div>
   </div>
   <table><thead><tr><th>Earnings</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}
+  ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}${(r.adjPlus||0)?line('Adjustment from previous cut-off',r.adjPlus):''}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line('Company advances',r.adv)}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
+  ${line('Company advances',r.adv)}${(r.adjMinus||0)?line('Adjustment from previous cut-off',r.adjMinus):''}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
   <p class="cert">I, the undersigned hereby certify to the best of my knowledge and belief that the amounts indicated above are the exact payments of my services rendered for the period covered by this payroll receipt of which I hereby acknowledge.</p>
   
@@ -4173,6 +4285,11 @@ const actions={
     openDlg('Print all payslips',`<form data-form="printsel"><p class="muted small" style="margin-top:0">Untick the employees whose payslip should not be printed. Each page holds 2 employees, with a company copy and an employee copy.</p><div class="row" style="margin-bottom:10px"><button type="button" class="btn sm" data-act="selSlips" data-v="all">Select all</button><button type="button" class="btn sm" data-act="selSlips" data-v="none">Select none</button></div><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr))">${items.map(x=>`<label class="chk"><input type="checkbox" name="pk" value="${x.e.id}" ${skip.has(String(x.e.id))?'':'checked'}> <span>${h(empName(x.e))} <span class="muted small">· ${h(x.e.department||'')}</span></span></label>`).join('')}</div><div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Print selected</button></div></form>`);
   },
   selSlips(el){document.querySelectorAll('#dlgBody input[name=pk]').forEach(c=>c.checked=el.dataset.v==='all')},
+  goAdj(el){S.ui.adjCut=Number(el.dataset.n)||1;location.hash='adjustments'},
+  adjCut(el){S.ui.adjCut=Number(el.dataset.v);render()},
+  delAdj(el){deleteAdjustment(el.dataset.id)},
+  releaseDlg(el){releaseDialog(el.dataset.key,Number(el.dataset.n),el.dataset.ps,el.dataset.pe)},
+  undoRelease(el){undoRelease(el.dataset.key,Number(el.dataset.n))},
   recRefresh(){S.ui.recList=null;S.ui.recListLoaded=false;loadRecordList()},
   recOpen(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';scheduleRender();window.scrollTo(0,0)},
   recBack(){S.ui.recKey=null;S.ui.recData=null;S.ui.recErr='';scheduleRender()},
@@ -4222,7 +4339,7 @@ const actions={
   delDept(el){removeDepartment(el.dataset.name)},
   async resetAccess(){if(await confirmDlg('Reset access to defaults?','HR, Payroll and Department heads go back to the standard access. People with Custom access keep their own settings.','Reset',true))saveRoleAccess(null,true)},
   async approvePayroll(el){const n=Number(el.dataset.n),c=S.period.cuts[n-1];if(await confirmDlg(`Approve ${n===1?'1st':'2nd'} cut-off?`,`Payroll ${fmtRange(c.payStart,c.payEnd)}. Attendance ${fmtRange(c.start,c.end)} and its company advances will be locked.`,'Approve'))setPayrollStatus(n,'APPROVED')},
-  async reopenPayroll(el){const n=Number(el.dataset.n);if(await confirmDlg('Reopen this cut-off?','Attendance and company advances become editable again and the approval is cleared.','Reopen',true))setPayrollStatus(n,'DRAFT')},
+  async reopenPayroll(el){const n=Number(el.dataset.n);if(S.rel[n]){toast('This cut-off was already released. Undo the release record first, then reopen.',true);return}if(await confirmDlg('Reopen this cut-off?','Attendance and company advances become editable again and the approval is cleared.','Reopen',true))setPayrollStatus(n,'DRAFT')},
   delHoliday(el){const d=el.dataset.date;saveHolidays((S.settings.holidays||[]).filter(x=>x.date!==d),'Holiday removed')},
   signOut(){signOut()},
   backupNow(el){backupNow(el)},
@@ -4313,6 +4430,8 @@ document.addEventListener('submit',e=>{
   if(k==='sumOne'){sumSaveOne(f);return}
   if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
+  if(k==='adj'){saveAdjustment(f);return}
+  if(k==='release'){saveRelease(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
   if(k==='coopAdd'){saveCoop(f);return}
   if(k==='loanRec'){saveLoan(f);return}
@@ -4344,12 +4463,14 @@ let unsubDtr=null,unsubPay=[],unsubAudit=null;
 function onSubErr(e){console.warn('subscription',e);if(errCode(e)==='revoked'){toast('Access to this data was removed.',true)}}
 function watchPeriod(){
   if(unsubDtr)unsubDtr();for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];
-  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.coop={};S.dsum={};S.edits={};S.recIdx={};
+  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.adj={};S.rel={};S.coop={};S.dsum={};S.edits={};S.recIdx={};
   unsubDtr=Store.watchCollection(cp('dtr'),[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
   for(const c of S.period.cuts){
     unsubPay.push(Store.watchDoc(cp('payroll/')+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('payedits/')+c.key,d=>{S.edits[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('advances/')+c.key,d=>{S.adv[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('adjustments/')+c.key,d=>{S.adj[c.n]=(d&&d.items)||[];scheduleRender()},onSubErr));
+    unsubPay.push(Store.watchDoc(cp('payroll_release/')+c.key,d=>{S.rel[c.n]=d||null;scheduleRender()},()=>{}));
     unsubPay.push(Store.watchDoc(cp('coop_savings/')+c.key,d=>{S.coop[c.n]=(d&&d.items)||{};scheduleRender()},onSubErr));
     unsubPay.push(Store.watchDoc(cp('dtr_summary/')+c.key,d=>{S.dsum={...S.dsum,[c.n]:(d&&d.items)||{}};scheduleRender()},()=>{S.dsum={...S.dsum,[c.n]:{}}}));
     unsubPay.push(Store.watchDoc(cp('payroll_record_index/')+c.key,d=>{S.recIdx[c.n]=d;scheduleRender()},()=>{}));
@@ -4400,7 +4521,7 @@ function startData(){
 function stopData(){
   for(const u of unsubBase)try{u()}catch(e){}unsubBase=[];
   if(unsubDtr){unsubDtr();unsubDtr=null}for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];if(unsubAudit){unsubAudit();unsubAudit=null}
-  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.coop={};S.dsum={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
+  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.adj={};S.rel={};S.coop={};S.dsum={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
   Object.assign(S.ui,{recKey:null,recData:null,recErr:'',recList:null,recListLoaded:false,recListBusy:false,recLoading:null,advForm:false,advEdit:null,advEmp:null,advConfirm:null});
 }
 
