@@ -2013,18 +2013,219 @@ function dashHead(){
     ${pend===0&&rows&&rows.length?'<p class="banner ok" style="margin:12px 0 0">All done — every record in this cut-off is approved. Thank you!</p>':''}
     ${rows&&!rows.length?'<p class="muted small" style="margin:10px 0 0">HR hasn’t imported attendance for this cut-off yet. You’ll see it here once they do.</p>':''}
     ${monthNote(c)}</div>`;
-  html+=`<div class="panel"><h2>What to do</h2><ol class="steps">
+  html+=headGuide();
+  html+=headSummary(emps);
+  html+=headNotes();
+  const all=visibleDtr();
+  html+=statsHtml(all,emps);
+  return html;
+}
+/* Department head: how-to guide. Each part opens on tap; parts for features the account doesn't have say who to ask instead. */
+function headGuide(){
+  const ed=can('editTimes')&&!S.readOnly,imp=can('importDtr')&&!S.readOnly,sch=canSched(),open=S.ui.dhGuide||'review';
+  const part=(k,title,body,tag)=>`<details class="guide" data-guide="${k}" ${open===k?'open':''}><summary>${title}${tag||''}</summary><div class="guide-body">${body}</div></details>`;
+  const noAccess=what=>`<span class="chip" style="margin-left:6px">${what}</span>`;
+  let html=`<div class="panel"><h2>How to use this</h2><p class="muted small" style="margin:0 0 6px">Tap a topic to open the steps.</p>`;
+  html+=part('review','1. Review and approve attendance',`<ol class="steps">
     <li>Tap <b>Start reviewing</b> (or open <b>Attendance</b>). Only your department’s employees are shown.</li>
     <li>Tap <b>✓ Approve clean days</b> first. It approves every day with complete punches and no late, undertime, overtime or absence, so only the days that need a decision are left.</li>
     <li>For the rest, use the buttons on each row: <b>✓ Approve</b>, <b>✓ Approve + OT</b> / <b>Approve, no OT</b>, or pick the <b>Absence reason</b>. Use <b>⚠ Issue</b> when something is wrong and write what HR should fix.</li>
     <li><b>Overtime is only paid when you approve it.</b> To approve only part of it (for example 1 hour of 2h 30m), tap the row and type the hours in <b>OT hours to approve</b>.</li>
-    <li>Need to change something else? Tap the row to open it, make the change and tap <b>Save review</b>.</li>
-    <li>Finish before the deadline above.</li>
-  </ol>
-  <p class="muted small" style="margin-bottom:0"><b>You don’t need to:</b> import the DTR, change time records, or work on payroll — HR and Payroll handle those.</p></div>`;
-  const all=visibleDtr();
-  html+=statsHtml(all,emps);
+    <li>Need to change something else? Tap the row to open it, make the change and tap <b>${ed?'Save changes':'Save review'}</b>.</li>
+    <li>Check the <b>Attendance summary</b> below (topic 4), then finish before the deadline above.</li></ol>`);
+  html+=part('fix','2. Correct an employee’s time record',ed?`<ol class="steps">
+    <li>Open <b>Attendance</b> → <b>By employee</b> and pick the employee (or use <b>By date</b> and search the name).</li>
+    <li>Tap the day to open it.</li>
+    <li>Fix <b>Time in</b> and/or <b>Time out</b>. Use the 24-hour clock: <b>08:00</b>, <b>17:30</b> (5:30 PM and 1730 are converted for you). For a missing punch, type only the missing time.</li>
+    <li>Wrong schedule on that day?${sch?` Change <b>Shift in / Shift out this day</b>, or tick <b>Rest day this date</b> if it was the employee’s day off.`:` Send a note to HR (topic 5) — your account can’t change schedules.`}</li>
+    <li>Leave <b>Day status</b> on <b>Automatic</b>. Set it to Present, Absent, Half day or Rest day only when the punches can’t show it (for example official business with no punch, or a half-day leave).</li>
+    <li>Write in <b>Remarks</b> why it was corrected — this is required. Example: <i>“Forgot to punch out, logbook shows 17:05.”</i></li>
+    <li>Set <b>Review</b> to <b>Approved</b> if the day is now correct, then tap <b>Save changes</b>.</li></ol>
+    <ul class="steps small muted" style="margin-top:8px"><li>Days with <b>no time record</b> show as Absent. If the employee worked, open the day, enter the time in and time out, add a remark and save.</li>
+    <li>Check the logbook or the staff schedule before changing a time. Every change is saved in the activity log with your name.</li>
+    <li>If the cut-off is already <b>approved and locked</b>, it can’t be changed. Send a note to Payroll (topic 5) to reopen it.</li></ul>`
+    :`<p class="small" style="margin:0">Your account can’t change time records. Instead:</p><ol class="steps small"><li>Open the day in <b>Attendance</b> and set <b>Review</b> to <b>With issue</b>.</li><li>In <b>Remarks</b>, write the correct times and why, e.g. <i>“Time out should be 17:05 — forgot to punch out.”</i></li><li>Save. HR will correct it. You can also send a note to HR (topic 5).</li></ol><p class="muted small" style="margin:6px 0 0">If you should be correcting times yourself, ask the admin to turn on <b>Correct time records</b> for your account.</p>`,ed?'':noAccess('HR does this'));
+  html+=part('import','3. Import attendance (file, single entry, multiple days)',imp?`<p class="small" style="margin:0 0 6px">Use this only when attendance is missing — for example a branch with no biometric, a device that was down, or days HR hasn’t brought in. Before you start, check the <b>company</b> and <b>payroll month</b> at the top. Only employees of your department can be imported here; rows for other departments are left out.</p>
+    <h3 class="gh">A. Upload a file (many employees or many days)</h3><ol class="steps">
+      <li>Open <b>Import DTR</b> → <b>Upload file</b>.</li>
+      <li>Use the export from the timekeeping app (Hik-Connect time card exports work as they are), or tap <b>Download template</b> and fill it in. Needed columns: <b>First Name</b>, <b>Date</b> (yyyy-mm-dd, e.g. 2026-10-01), <b>Time In</b>, <b>Time Out</b>.</li>
+      <li>Choose the file. A <b>Preview</b> appears — matched rows are ticked for you.</li>
+      <li>Check the rows marked <b>Confirm</b> (only partly matched) and the red rows. Tap <b>Change</b> to pick the right employee for a name.</li>
+      <li>Tap <b>Import selected</b> (or <b>Import all matched</b>). Days already imported with the same times are skipped. Days saved with <b>different</b> times are left unticked — tick one only if the new times should replace the saved ones.</li>
+      <li>Open <b>Attendance</b> and review the imported days — they come in as <b>For review</b>.</li></ol>
+    <h3 class="gh">B. Single entry (one employee, one day)</h3><ol class="steps">
+      <li>Open <b>Import DTR</b> → <b>Single entry</b>.</li>
+      <li>Choose the <b>Employee</b> and the <b>Date</b>.</li>
+      <li>Type <b>Time in</b> and <b>Time out</b> (24-hour, e.g. 08:00 and 17:00).</li>
+      <li>Write in <b>Remarks</b> why it is added by hand, e.g. <i>“No biometric at the branch — per logbook.”</i></li>
+      <li>Tap <b>Save entry</b>. If that day already has a record, its times are replaced. Then review the day in Attendance.</li></ol>
+    <h3 class="gh">C. Multiple days (one employee, several days)</h3><ol class="steps">
+      <li>Open <b>Import DTR</b> → <b>Multiple days</b> and choose the <b>Employee</b>.</li>
+      <li>Type a remark in <b>Remarks for all days</b> (a row’s own remark takes its place).</li>
+      <li>Add the days: tap <b>Add a day</b> for each one, <b>or</b> open <b>Fill a range of dates</b>, set <b>From</b> and <b>To</b>, the usual time in and time out, keep <b>Skip rest days</b> and <b>Skip holidays</b> ticked, and tap <b>Add these dates</b>.</li>
+      <li>Adjust the times per day and <b>Remove</b> days the employee didn’t work. The <b>Day</b> column shows rest days, holidays, and days already saved (“will be replaced”).</li>
+      <li>Tap <b>Save … days</b>. If some days already have times, you’re asked before they are replaced. Days in an approved cut-off are skipped.</li>
+      <li>Review the saved days in Attendance.</li></ol>
+    <p class="muted small" style="margin:6px 0 0">Imported the wrong file or matched the wrong person? Open <b>Import history</b> to move or remove what that import brought in.</p>`
+    :`<p class="small" style="margin:0">HR imports the attendance. If days are missing, send a note to HR (topic 5) with the employee, the dates and the times from the logbook or schedule.</p><p class="muted small" style="margin:6px 0 0">If you should be importing yourself, ask the admin to turn on <b>Import DTR</b> for your account.</p>`,imp?'':noAccess('HR does this'));
+  html+=part('recon','4. Reconcile attendance before payroll',`<p class="small" style="margin:0 0 6px">Do this every cut-off so no worked day goes unpaid and no unworked day gets paid. Use the <b>Attendance summary</b> below.</p>
+    <h3 class="gh">A. Against the schedule your staff sent</h3><ol class="steps">
+      <li>In <b>Attendance summary</b>, pick the cut-off (1st or 2nd).</li>
+      <li>For each employee, compare <b>Scheduled workdays</b> with the schedule they sent. If a rest day or shift is different, fix it on that day (topic 2)${sch?'':' or send a note to HR'}, so the day is counted correctly.</li>
+      <li>Every scheduled workday should be accounted for: <b>Worked</b> + <b>Absent</b> + <b>For review</b> + <b>With issue</b> + <b>No record</b> = <b>Scheduled workdays</b>.</li>
+      <li><b>No record</b> = days not in the DTR at all. If the employee worked, add the day (topic 3)${imp?'':' — or send a note to HR'}. If not, approve the absence in Attendance with the right reason.</li>
+      <li><b>Missing punch</b> days are not paid as a full day. Complete the time in or time out (topic 2) before approving.</li>
+      <li><b>Rest day / holiday worked</b>: make sure it was on the schedule or was allowed — it is paid with a premium.</li>
+      <li><b>OT approved</b> should match the overtime you allowed.</li></ol>
+    <h3 class="gh">B. Approved attendance vs actual attendance</h3><ol class="steps">
+      <li>Tap <b>Days</b> on an employee to see each day: schedule, time in and out, status and review.</li>
+      <li>Compare each <b>Approved</b> day with what really happened — logbook, branch report, CCTV, biometric printout or the staff schedule.</li>
+      <li>Approved as worked but the employee was actually absent? Open the day in <b>Attendance</b>, set <b>Review</b> back to <b>With issue</b> and write the correction (or fix it yourself if you can correct times).</li>
+      <li>Approved as absent but the employee worked? Enter the times (topic 2 or 3) or send a note to HR.</li>
+      <li>Check that the <b>Absence reason</b> matches the leave filed (sick or vacation leave vs. leave without pay or AWOL).</li>
+      <li>When every employee shows <span class="chip ok">Complete</span>, your department is ready for payroll. Download the summary if you need to keep or send a copy.</li></ol>`);
+  html+=part('notes','5. Ask HR or Payroll to do something',`<ol class="steps">
+    <li>Scroll to <b>Notes to HR / Payroll</b> below.</li>
+    <li>Choose who it is for, the type of request, and the employee and dates if it is about one person.</li>
+    <li>Write exactly what needs to be done, e.g. <i>“Please add Oct 3 and Oct 4 for Juan, 08:00–17:00, biometric was down.”</i> and tap <b>Send note</b>.</li>
+    <li>HR or Payroll sees it on their dashboard. When they finish, the note shows <span class="chip ok">Done</span> with their reply.</li></ol>`);
+  html+=`<p class="muted small" style="margin:10px 0 0"><b>HR and Payroll handle:</b> ${[!imp&&'importing the DTR',!ed&&'changing time records','payroll'].filter(Boolean).join(', ').replace(/, ([^,]*)$/,' and $1')}.</p></div>`;
   return html;
+}
+/* Department head: attendance per employee for one cut-off, to reconcile with the staff schedule and with actual attendance. */
+function dhCutN(){const ac=activeCut();let n=S.ui.dhCut;if(n!==1&&n!==2)n=inPeriod(ac)?ac.n:1;return n}
+function headSummaryData(c,emps){
+  const hol=holidayMap(),today=todayISO(),rows=cutRows(c,null),by=new Map();
+  for(const r of rows){const k=String(r.employee_id);(by.get(k)||by.set(k,[]).get(k)).push(r)}
+  return emps.filter(e=>e.active!==false||by.has(String(e.id))).sort((a,b)=>(a.department||'').localeCompare(b.department||'')||empName(a).localeCompare(empName(b))).map(e=>{
+    const recs=by.get(String(e.id))||[],have=new Set(recs.map(r=>r.work_date)),sm=dtrSummaryOf(c.n,e.id);
+    const t={e,sm,sched:0,upcoming:0,worked:0,absent:0,rdw:0,review:0,issue:0,norec:0,chk:0,ot:0,lateut:0};
+    for(let d=c.start;d<=c.end;d=addDays(d,1)){
+      if(isRestDay(e,d)||hol[d])continue;
+      t.sched++;if(!have.has(d)){if(d>=today)t.upcoming++;else t.norec++}
+    }
+    for(const r of recs){
+      const k=calcEntry(r,e),rs=r.review_status||'FOR REVIEW',reg=k.dayClass==='REG';
+      if(rs==='APPROVED'){if(reg){if(k.status==='P')t.worked+=1;else if(k.status==='HD'){t.worked+=.5;t.absent+=.5}else if(k.status==='A')t.absent+=1}}
+      else if(rs==='WITH ISSUE')t.issue++;else t.review++;
+      if(!reg&&(k.status==='P'||k.status==='HD'))t.rdw++;
+      if(k.status==='CHK')t.chk++;
+      t.ot+=k.otApproved;t.lateut+=k.late+k.ut;
+    }
+    if(sm){t.worked=r2(Number(sm.days)||0);t.absent=sm.absent!=null&&sm.absent!==''?r2(Number(sm.absent)||0):summaryAutoAbsent(e,c,t.worked);t.ot=Number(sm.ot_min)||0;t.lateut=(Number(sm.late_min)||0)+(Number(sm.ut_min)||0);t.review=t.issue=t.norec=t.chk=0}
+    t.todo=t.review+t.issue+t.norec+t.chk;
+    return t;
+  });
+}
+const dhStatus=x=>x.sm?'DTR summary':(x.todo?`${x.todo} to check`:(x.upcoming?'In progress':'Complete'));
+function headSummary(emps){
+  const n=dhCutN(),c=S.period.cuts[n-1],two=depts().length>1;
+  let html=`<div class="panel" id="dhSummary"><div class="row" style="flex-wrap:wrap;gap:10px"><h2 style="margin:0">Attendance summary</h2><span class="spacer"></span>
+    <div class="seg" role="group" aria-label="Cut-off">${S.period.cuts.map(k=>`<button data-act="dhCut" data-v="${k.n}" aria-pressed="${n===k.n}">${k.n===1?'1st':'2nd'} cut-off</button>`).join('')}</div></div>
+    <p class="muted small" style="margin:6px 0 10px">${h(fmtMonth(S.period.ym))} payroll · attendance ${h(fmtRange(c.start,c.end))}. Compare this with the schedule your staff sent and with their actual attendance (topic 4 above). Change the month at the top.</p>`;
+  if(!S.ready.dtr||!S.ready.employees)return html+'<div class="loading">Loading attendance…</div></div>';
+  const data=headSummaryData(c,emps);
+  if(!data.length)return html+'<p class="muted small" style="margin:0">No employees in your department.</p></div>';
+  const nOk=data.filter(x=>!x.sm&&!x.todo&&!x.upcoming).length,nTodo=data.reduce((a,x)=>a+x.todo,0);
+  html+=`<div class="row" style="gap:8px;margin-bottom:10px;flex-wrap:wrap"><span class="chip ok">${nOk} of ${data.length} complete</span>${nTodo?`<span class="chip warn">${nTodo} ${nTodo===1?'day':'days'} to check</span>`:''}<span class="spacer"></span><button class="btn sm" data-act="dhCsv">Download summary (CSV)</button></div>`;
+  const open=S.ui.dhOpen||(S.ui.dhOpen=new Set());
+  const num=v=>v?h(String(r2(v))):'<span class="muted">0</span>',flag=(v,cls)=>v?`<span class="chip ${cls}">${h(String(r2(v)))}</span>`:'<span class="muted">0</span>';
+  html+=`<div class="tablewrap"><table><thead><tr><th>Employee</th>${two?'<th>Department</th>':''}<th class="n">Scheduled workdays</th><th class="n">Worked</th><th class="n">Absent</th><th class="n">Rest day / holiday worked</th><th class="n">For review</th><th class="n">With issue</th><th class="n">No record</th><th class="n">Missing punch</th><th class="n">OT approved (h)</th><th class="n">Late + UT (min)</th><th>Status</th><th></th></tr></thead><tbody>
+    ${data.map(x=>{const s=dhStatus(x),st=`<span class="chip ${x.sm?'acc':(x.todo?'warn':(x.upcoming?'':'ok'))}">${h(s)}</span>`,isOpen=open.has(String(x.e.id));
+      return `<tr><td><b>${h(empName(x.e))}</b>${x.e.active===false?' <span class="chip">Inactive</span>':''}</td>${two?`<td>${h(x.e.department||'')}</td>`:''}<td class="n">${x.sched}${x.upcoming?` <span class="muted small">(${x.upcoming} upcoming)</span>`:''}</td><td class="n">${num(x.worked)}</td><td class="n">${num(x.absent)}</td><td class="n">${num(x.rdw)}</td><td class="n">${flag(x.review,'acc')}</td><td class="n">${flag(x.issue,'bad')}</td><td class="n">${flag(x.norec,'bad')}</td><td class="n">${flag(x.chk,'warn')}</td><td class="n">${x.ot?h(fmtHM(x.ot)):'<span class="muted">0</span>'}</td><td class="n">${x.lateut?Math.round(x.lateut):'<span class="muted">0</span>'}</td><td>${st}</td><td style="text-align:right">${x.sm?'':`<button class="btn sm" data-act="dhDays" data-id="${x.e.id}" aria-expanded="${isOpen}">${isOpen?'Hide days':'Days'}</button>`}</td></tr>`}).join('')}
+    </tbody></table></div>
+    <p class="muted small" style="margin:8px 0 0"><b>Worked</b> and <b>Absent</b> count approved days only (a half day counts ½ in each). <b>No record</b> = scheduled workdays up to yesterday that are not in the DTR. Employees marked <b>DTR summary</b> are paid from the totals HR entered for this cut-off.</p>`;
+  for(const x of data)if(!x.sm&&open.has(String(x.e.id)))html+=headDays(x.e,c);
+  return html+'</div>';
+}
+function headDays(e,c){
+  const hol=holidayMap(),today=todayISO(),recs=new Map(cutRows(c,null).filter(r=>String(r.employee_id)===String(e.id)).map(r=>[r.work_date,r]));
+  const RV={APPROVED:['ok','Approved'],'WITH ISSUE':['bad','With issue'],'FOR REVIEW':['acc','For review']};
+  let rows='';
+  for(let d=c.start;d<=c.end;d=addDays(d,1)){
+    const r=recs.get(d),rest=isRestDay(e,d),sh=shiftOf(e,d),k=r?calcEntry(r,e):null;
+    if(!r&&(rest||hol[d]))continue;
+    const sched=hol[d]?`Holiday (${hol[d]==='RH'?'regular':'special'})`:(rest?'Rest day':`${h(sh.in)}–${h(sh.out)}${sh.own?' <span class="chip acc">this day</span>':''}`);
+    let status,rv;
+    if(!r){status=d>=today?'<span class="muted">Upcoming</span>':'<span class="chip bad">No record</span>';rv='<span class="muted">—</span>'}
+    else{status=h(STATUS_LABEL[k.status]||k.status)+(r._auto?' <span class="muted small">(no time record)</span>':'')+(k.late?` <span class="chip warn">late ${k.late}m</span>`:'')+(k.ut?` <span class="chip warn">UT ${k.ut}m</span>`:'')+(k.otApproved?` <span class="chip ok">OT ${fmtHM(k.otApproved)}</span>`:(k.otPending?' <span class="chip warn">OT pending</span>':''));
+      const x=RV[r.review_status||'FOR REVIEW']||RV['FOR REVIEW'];rv=`<span class="chip ${x[0]}">${x[1]}</span>`}
+    rows+=`<tr><td>${WD[dow(d)]}, ${h(fmtD(d))}</td><td>${sched}</td><td class="num">${h(r&&r.time_in||'—')}</td><td class="num">${h(r&&r.time_out||'—')}</td><td>${status}</td><td>${rv}</td><td class="small" style="white-space:normal">${h(r&&r.remarks||'')}${r&&r.absent_reason?` <span class="muted">(${h(absLabel(r.absent_reason))})</span>`:''}</td></tr>`;
+  }
+  return `<div class="dh-days"><div class="row" style="flex-wrap:wrap;gap:8px"><h3 style="margin:0">${h(empName(e))} · ${h(fmtRange(c.start,c.end))}</h3><span class="spacer"></span><button class="btn sm" data-act="dhOpenDtr" data-id="${e.id}" data-n="${c.n}">Open in Attendance</button><button class="btn sm" data-act="dhDays" data-id="${e.id}">Hide</button></div>
+    <div class="tablewrap"><table><thead><tr><th>Date</th><th>Schedule</th><th>In</th><th>Out</th><th>Status</th><th>Review</th><th>Remarks</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="muted">No workdays in this cut-off.</td></tr>'}</tbody></table></div></div>`;
+}
+function headSummaryCsv(){
+  const n=dhCutN(),c=S.period.cuts[n-1],data=headSummaryData(c,S.employees.filter(e=>depts().includes(e.department)));
+  const q=v=>{const s=String(v==null?'':v);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+  const lines=[['Employee','Department','Scheduled workdays','Upcoming','Worked (approved)','Absent (approved)','Rest day/holiday worked','For review','With issue','No record','Missing punch','OT approved (h)','Late + UT (min)','Status'].join(',')];
+  for(const x of data)lines.push([empName(x.e),x.e.department||'',x.sched,x.upcoming,r2(x.worked),r2(x.absent),x.rdw,x.review,x.issue,x.norec,x.chk,fmtHM(x.ot),Math.round(x.lateut),dhStatus(x)].map(q).join(','));
+  offerFile(`attendance-summary_${(dept()||'dept').replace(/[^A-Za-z0-9]+/g,'-')}_${c.start}_${c.end}.csv`,lines.join('\n'));
+}
+/* ---------- Notes to HR / Payroll ----------
+   Department heads send requests (hr_notes/<id>); HR, Payroll and Admin see them on their dashboard and mark them done with a reply. */
+const NOTE_KINDS=[['TIME','Correct a time record'],['IMPORT','Add / import attendance'],['SCHEDULE','Change a schedule or rest day'],['LEAVE','Leave or absence'],['OT','Overtime'],['PAYROLL','Payroll concern'],['EMPLOYEE','Employee details'],['OTHER','Other']];
+const noteKind=k=>(NOTE_KINDS.find(x=>x[0]===k)||[,'Other'])[1];
+const NOTE_TO={HR:'HR',PAYROLL:'Payroll'};
+function noteCard(x,manage){
+  const done=x.status==='DONE',e=x.employee_id!=null?empById(x.employee_id):null;
+  return `<li class="note ${done?'done':''}"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="chip ${done?'ok':'warn'}">${done?'Done':'Open'}</span><span class="chip acc">To ${h(NOTE_TO[x.to]||x.to||'HR')}</span><b>${h(noteKind(x.kind))}</b>${e||x.emp_name?` · ${h(e?empName(e):x.emp_name)}`:''}${x.dates?` · ${h(x.dates)}`:''}<span class="spacer"></span><span class="muted small">${h(x.by_name||x.by||'')}${x.dept?' · '+h(x.dept):''} · ${h(fmtStamp(x.created_at))}</span></div>
+    <p style="margin:6px 0 0;white-space:pre-wrap">${h(x.message||'')}</p>
+    ${x.reply||done?`<p class="small" style="margin:6px 0 0"><b>Reply${x.done_name||x.done_by?' from '+h(x.done_name||x.done_by):''}:</b> ${h(x.reply||'—')}${x.done_at?` <span class="muted">· ${h(fmtStamp(x.done_at))}</span>`:''}</p>`:''}
+    ${manage&&!done?`<form data-form="noteDone" data-id="${h(x._id)}" class="row" style="margin-top:8px;gap:8px"><input name="reply" maxlength="500" placeholder="Reply (optional), e.g. Added Oct 3 and 4" style="flex:1;min-width:200px"><button class="btn sm primary">Mark done</button></form>`:''}
+    ${manage&&done?`<div class="row" style="margin-top:6px"><span class="spacer"></span><button class="btn sm" data-act="noteReopen" data-id="${h(x._id)}">Reopen</button></div>`:''}
+    ${!manage&&!done&&!S.readOnly?`<div class="row" style="margin-top:6px"><span class="spacer"></span><button class="btn sm danger" data-act="noteDel" data-id="${h(x._id)}">Withdraw</button></div>`:''}</li>`;
+}
+function headNotes(){
+  const ds=depts(),mine=(S.notes||[]).filter(x=>ds.includes(x.dept)||x.by===actor()).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
+  const emps=S.employees.filter(e=>ds.includes(e.department)&&e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  const openN=mine.filter(x=>x.status!=='DONE').length,showAll=S.ui.dhNotesAll;
+  let html=`<div class="panel" id="dhNotes"><div class="row"><h2 style="margin:0">Notes to HR / Payroll</h2>${openN?`<span class="chip warn">${openN} open</span>`:''}</div>
+    <p class="muted small" style="margin:6px 0 10px">Ask HR or Payroll to do something you can’t do here — correct or add attendance, change a schedule, fix a payroll amount. They see your note on their dashboard.</p>`;
+  if(!S.readOnly)html+=`<form data-form="note"><div class="grid">
+      <label class="f">For<select name="to">${Object.entries(NOTE_TO).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select></label>
+      <label class="f">Request<select name="kind">${NOTE_KINDS.map(([k,l])=>`<option value="${k}">${h(l)}</option>`).join('')}</select></label>
+      <label class="f">Employee <span class="muted small">(optional)</span><select name="employee_id"><option value="">—</option>${emps.map(e=>`<option value="${e.id}">${h(empName(e))}</option>`).join('')}</select></label>
+      <label class="f">Date(s) <span class="muted small">(optional)</span><input name="dates" maxlength="80" placeholder="e.g. Oct 3–4"></label>
+      <label class="f wide">What needs to be done<textarea name="message" rows="3" maxlength="1000" required style="font-family:inherit;font-size:15px" placeholder="e.g. Please add Oct 3 and Oct 4, 08:00–17:00 — the biometric was down."></textarea></label>
+    </div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary">Send note</button></div></form>`;
+  const list=showAll?mine:mine.filter(x=>x.status!=='DONE'||(Date.now()-new Date(x.done_at||0).getTime())<14*864e5);
+  html+=list.length?`<ul class="notes">${list.slice(0,showAll?200:20).map(x=>noteCard(x,false)).join('')}</ul>`:`<p class="muted small" style="margin:10px 0 0">${mine.length?'No recent notes.':'No notes sent yet.'}</p>`;
+  if(mine.length>list.length||showAll)html+=`<button class="btn sm" data-act="dhNotesAll" style="margin-top:8px">${showAll?'Show recent only':'Show all notes'}</button>`;
+  return html+'</div>';
+}
+/* HR / Payroll / Admin: notes from department heads. */
+function dashNotes(){
+  const r=role(),manage=!S.readOnly&&['ADMIN','HR','PAYROLL'].includes(r);
+  const all=(S.notes||[]).slice().sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
+  const mineFirst=x=>r==='ADMIN'||x.to===r?0:1,open=all.filter(x=>x.status!=='DONE').sort((a,b)=>mineFirst(a)-mineFirst(b));
+  const showDone=S.ui.notesDone,done=all.filter(x=>x.status==='DONE').slice(0,30);
+  if(!open.length&&!done.length)return '';
+  let html=`<div class="panel"><div class="row"><h2 style="margin:0">Notes from department heads</h2>${open.length?`<span class="chip warn">${open.length} open</span>`:''}<span class="spacer"></span>${done.length?`<button class="btn sm" data-act="notesDone">${showDone?'Hide done':'Show done'}</button>`:''}</div>`;
+  html+=open.length?`<ul class="notes">${open.map(x=>noteCard(x,manage)).join('')}</ul>`:'<p class="muted small" style="margin:8px 0 0">No open notes.</p>';
+  if(showDone&&done.length)html+=`<h3 style="margin:14px 0 0">Done</h3><ul class="notes">${done.map(x=>noteCard(x,manage)).join('')}</ul>`;
+  return html+'</div>';
+}
+async function saveNote(form){
+  const fd=new FormData(form),msg=String(fd.get('message')||'').trim();
+  if(!msg){toast('Write what needs to be done.',true);return}
+  const eid=fd.get('employee_id')?Number(fd.get('employee_id')):null,e=eid!=null?empById(eid):null;
+  if(e&&!inMyDept(e)){toast('Choose an employee from your department.',true);return}
+  const at=nowISO(),id=at.replace(/[^0-9]/g,'')+'_'+Math.random().toString(36).slice(2,7);
+  const doc={to:fd.get('to')==='PAYROLL'?'PAYROLL':'HR',kind:String(fd.get('kind')||'OTHER'),employee_id:eid,emp_name:e?empName(e):'',dates:String(fd.get('dates')||'').trim(),message:msg,
+    dept:(e&&e.department)||depts()[0]||'',by:actor(),by_name:(S.account&&S.account.full_name)||actor(),created_at:at,status:'OPEN',reply:'',done_by:null,done_name:'',done_at:null};
+  try{await Store.set(cp('hr_notes/')+id,doc);logAction('NOTE','note',id,`To ${NOTE_TO[doc.to]}: ${noteKind(doc.kind)}${e?' · '+empName(e):''} — ${msg.slice(0,120)}`);form.reset();toast(`Note sent to ${NOTE_TO[doc.to]}`)}catch(err){writeError(err)}
+}
+async function noteDone(form){
+  const id=form.dataset.id,cur=(S.notes||[]).find(x=>x._id===id);if(!cur)return;
+  const reply=String(new FormData(form).get('reply')||'').trim();
+  try{await Store.update(cp('hr_notes/')+id,{status:'DONE',reply,done_by:actor(),done_name:(S.account&&S.account.full_name)||actor(),done_at:nowISO()});logAction('NOTE_DONE','note',id,`${noteKind(cur.kind)} from ${cur.by_name||cur.by}${reply?': '+reply.slice(0,120):''}`);toast('Note marked done')}catch(err){writeError(err)}
+}
+async function noteReopen(id){try{await Store.update(cp('hr_notes/')+id,{status:'OPEN',done_at:null});toast('Note reopened')}catch(err){writeError(err)}}
+async function noteDel(id){
+  const cur=(S.notes||[]).find(x=>x._id===id);if(!cur)return;
+  if(!(await confirmDlg('Withdraw this note?','HR and Payroll will no longer see it.','Withdraw',true)))return;
+  try{await Store.del(cp('hr_notes/')+id);logAction('NOTE_WITHDRAWN','note',id,noteKind(cur.kind));toast('Note withdrawn')}catch(err){writeError(err)}
 }
 
 /* ---------- Attendance (DTR) ---------- */
