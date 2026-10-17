@@ -282,6 +282,15 @@ tr.unsel td{color:var(--muted)}
 .steps{margin:0;padding-left:20px}
 .steps li{margin:4px 0}
 .attn{list-style:none;padding:0;margin:0}
+details.guide{border-top:1px solid var(--line);padding:2px 0}details.guide:first-of-type{border-top:0}
+details.guide>summary{cursor:pointer;font-weight:650;padding:10px 0;list-style-position:outside}
+details.guide .guide-body{padding:0 0 12px 2px}
+h3.gh{font-size:14px;margin:12px 0 4px}
+ul.notes{list-style:none;padding:0;margin:12px 0 0}
+li.note{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px 12px;margin:0 0 8px;background:var(--surface)}
+li.note.done{opacity:.8}
+.dh-days{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.dh-days .tablewrap{margin-top:8px}
 .attn li{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
 .attn li:last-child{border-bottom:0}
 
@@ -645,7 +654,7 @@ let Store=Local;
 /* ---------------- State ---------------- */
 const S={
   mode:'loading', company:null, ready:{employees:false,dtr:false},
-  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, adj:{}, rel:{}, coop:{}, dsum:{}, loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
+  employees:[], dtr:[], settings:{...DEFAULTS}, accounts:[], accountDocs:[], roleAccess:{}, deadlines:{}, auditToday:[], payDocs:{}, adv:{}, adj:{}, rel:{}, coop:{}, dsum:{}, notes:[], loans:[], edits:{}, audit:[], auditMonth:todayISO().slice(0,7),
   me:{id:null,name:'',avatar:'',isOwner:false}, user:null, downloads:null,
   account:null, viewAs:null, period:null, route:'dashboard', profiles:{}, readOnly:false,
   ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
@@ -1772,12 +1781,17 @@ const personName=id=>{if(!id)return'—';if(id==='local')return'This device';con
 
 /* ---------------- Rendering ---------------- */
 let renderPending=false,renderDeferred=false;
+let pointerDown=false;
+document.addEventListener('pointerdown',()=>{pointerDown=true},true);
+const pointerEnd=()=>{pointerDown=false;if(renderDeferred)setTimeout(()=>{const a=document.activeElement;if(!pointerDown&&!(a&&$('#view').contains(a)&&/INPUT|SELECT|TEXTAREA/.test(a.tagName))){renderDeferred=false;scheduleRender()}},60)};
+document.addEventListener('pointerup',pointerEnd,true);document.addEventListener('pointercancel',pointerEnd,true);
 function scheduleRender(){
+  if(pointerDown){renderDeferred=true;return}
   const a=document.activeElement;
   if(a&&$('#view').contains(a)&&/INPUT|SELECT|TEXTAREA/.test(a.tagName)&&a.type!=='checkbox'&&a.type!=='file'){renderDeferred=true;return}
   if(renderPending)return;renderPending=true;requestAnimationFrame(()=>{renderPending=false;render()});
 }
-document.addEventListener('focusout',()=>{if(renderDeferred){setTimeout(()=>{const a=document.activeElement;if(!(a&&$('#view').contains(a)&&/INPUT|SELECT|TEXTAREA/.test(a.tagName))){renderDeferred=false;scheduleRender()}},150)}});
+document.addEventListener('focusout',()=>{if(renderDeferred){setTimeout(()=>{const a=document.activeElement;if(!pointerDown&&!(a&&$('#view').contains(a)&&/INPUT|SELECT|TEXTAREA/.test(a.tagName))){renderDeferred=false;scheduleRender()}},150)}});
 
 let brandSig='';
 function renderBrand(){
@@ -1915,6 +1929,7 @@ function pageDashboard(){
   if(r==='HR'&&can('importDtr'))html+=dashImportReminder();
   if(r==='PAYROLL'&&can('viewPayroll'))html+=dashPayrollReminder();
   if(r!=='ADMIN'&&r!=='HR'&&can('setDeadline'))html+=dashDeadlines();
+  html+=dashNotes();
   html+=statsHtml(rows,emps)+attentionHtml(rows,emps);
   if(r==='HR')html+=dashDeadlineStatus();
   return html;
@@ -2072,7 +2087,7 @@ function headGuide(){
     <h3 class="gh">A. Against the schedule your staff sent</h3><ol class="steps">
       <li>In <b>Attendance summary</b>, pick the cut-off (1st or 2nd).</li>
       <li>For each employee, compare <b>Scheduled workdays</b> with the schedule they sent. If a rest day or shift is different, fix it on that day (topic 2)${sch?'':' or send a note to HR'}, so the day is counted correctly.</li>
-      <li>Every scheduled workday should be accounted for: <b>Worked</b> + <b>Absent</b> + <b>For review</b> + <b>With issue</b> + <b>No record</b> = <b>Scheduled workdays</b>.</li>
+      <li>Every scheduled workday should be accounted for: <b>Worked</b> + <b>Absent</b> + <b>For review</b> + <b>With issue</b> + <b>No record</b> (+ approved <b>Missing punch</b> days) = <b>Scheduled workdays</b>. A day marked absent because it had no time record shows under For review until you approve it.</li>
       <li><b>No record</b> = days not in the DTR at all. If the employee worked, add the day (topic 3)${imp?'':' — or send a note to HR'}. If not, approve the absence in Attendance with the right reason.</li>
       <li><b>Missing punch</b> days are not paid as a full day. Complete the time in or time out (topic 2) before approving.</li>
       <li><b>Rest day / holiday worked</b>: make sure it was on the schedule or was allowed — it is paid with a premium.</li>
@@ -2182,13 +2197,14 @@ function headNotes(){
   const openN=mine.filter(x=>x.status!=='DONE').length,showAll=S.ui.dhNotesAll;
   let html=`<div class="panel" id="dhNotes"><div class="row"><h2 style="margin:0">Notes to HR / Payroll</h2>${openN?`<span class="chip warn">${openN} open</span>`:''}</div>
     <p class="muted small" style="margin:6px 0 10px">Ask HR or Payroll to do something you can’t do here — correct or add attendance, change a schedule, fix a payroll amount. They see your note on their dashboard.</p>`;
-  if(!S.readOnly)html+=`<form data-form="note"><div class="grid">
-      <label class="f">For<select name="to">${Object.entries(NOTE_TO).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select></label>
-      <label class="f">Request<select name="kind">${NOTE_KINDS.map(([k,l])=>`<option value="${k}">${h(l)}</option>`).join('')}</select></label>
-      <label class="f">Employee <span class="muted small">(optional)</span><select name="employee_id"><option value="">—</option>${emps.map(e=>`<option value="${e.id}">${h(empName(e))}</option>`).join('')}</select></label>
-      <label class="f">Date(s) <span class="muted small">(optional)</span><input name="dates" maxlength="80" placeholder="e.g. Oct 3–4"></label>
-      <label class="f wide">What needs to be done<textarea name="message" rows="3" maxlength="1000" required style="font-family:inherit;font-size:15px" placeholder="e.g. Please add Oct 3 and Oct 4, 08:00–17:00 — the biometric was down."></textarea></label>
-    </div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary">Send note</button></div></form>`;
+  const dr=S.ui.noteDraft||{},sel=(a,b)=>String(a??'')===String(b)?'selected':'';
+  if(!S.readOnly)html+=`<form data-form="note" id="noteForm"><div class="grid">
+      <label class="f">For<select name="to">${Object.entries(NOTE_TO).map(([k,l])=>`<option value="${k}" ${sel(dr.to,k)}>${l}</option>`).join('')}</select></label>
+      <label class="f">Request<select name="kind">${NOTE_KINDS.map(([k,l])=>`<option value="${k}" ${sel(dr.kind,k)}>${h(l)}</option>`).join('')}</select></label>
+      <label class="f">Employee <span class="muted small">(optional)</span><select name="employee_id"><option value="">—</option>${emps.map(e=>`<option value="${e.id}" ${sel(dr.employee_id,e.id)}>${h(empName(e))}</option>`).join('')}</select></label>
+      <label class="f">Date(s) <span class="muted small">(optional)</span><input name="dates" maxlength="80" placeholder="e.g. Oct 3–4" value="${h(dr.dates||'')}"></label>
+      <label class="f wide">What needs to be done<textarea name="message" rows="3" maxlength="1000" style="font-family:inherit;font-size:15px" placeholder="e.g. Please add Oct 3 and Oct 4, 08:00–17:00 — the biometric was down.">${h(dr.message||'')}</textarea></label>
+    </div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary" ${S.ui.noteBusy?'disabled':''}>${S.ui.noteBusy?'Sending…':'Send note'}</button></div></form>`;
   const list=showAll?mine:mine.filter(x=>x.status!=='DONE'||(Date.now()-new Date(x.done_at||0).getTime())<14*864e5);
   html+=list.length?`<ul class="notes">${list.slice(0,showAll?200:20).map(x=>noteCard(x,false)).join('')}</ul>`:`<p class="muted small" style="margin:10px 0 0">${mine.length?'No recent notes.':'No notes sent yet.'}</p>`;
   if(mine.length>list.length||showAll)html+=`<button class="btn sm" data-act="dhNotesAll" style="margin-top:8px">${showAll?'Show recent only':'Show all notes'}</button>`;
@@ -2206,15 +2222,22 @@ function dashNotes(){
   if(showDone&&done.length)html+=`<h3 style="margin:14px 0 0">Done</h3><ul class="notes">${done.map(x=>noteCard(x,manage)).join('')}</ul>`;
   return html+'</div>';
 }
+/* Keeps the note being written in S.ui.noteDraft as it is typed. */
+function noteSync(el){const f=el&&el.closest&&el.closest('#noteForm');if(!f||!el.name)return;S.ui.noteDraft={...(S.ui.noteDraft||{}),[el.name]:el.value}}
+document.addEventListener('input',e=>noteSync(e.target));document.addEventListener('change',e=>noteSync(e.target));
 async function saveNote(form){
+  if(S.ui.noteBusy)return;
   const fd=new FormData(form),msg=String(fd.get('message')||'').trim();
-  if(!msg){toast('Write what needs to be done.',true);return}
+  if(!msg){toast('Write what needs to be done before sending.',true);const t=form.querySelector('textarea');if(t)t.focus();return}
   const eid=fd.get('employee_id')?Number(fd.get('employee_id')):null,e=eid!=null?empById(eid):null;
   if(e&&!inMyDept(e)){toast('Choose an employee from your department.',true);return}
   const at=nowISO(),id=at.replace(/[^0-9]/g,'')+'_'+Math.random().toString(36).slice(2,7);
   const doc={to:fd.get('to')==='PAYROLL'?'PAYROLL':'HR',kind:String(fd.get('kind')||'OTHER'),employee_id:eid,emp_name:e?empName(e):'',dates:String(fd.get('dates')||'').trim(),message:msg,
     dept:(e&&e.department)||depts()[0]||'',by:actor(),by_name:(S.account&&S.account.full_name)||actor(),created_at:at,status:'OPEN',reply:'',done_by:null,done_name:'',done_at:null};
-  try{await Store.set(cp('hr_notes/')+id,doc);logAction('NOTE','note',id,`To ${NOTE_TO[doc.to]}: ${noteKind(doc.kind)}${e?' · '+empName(e):''} — ${msg.slice(0,120)}`);form.reset();toast(`Note sent to ${NOTE_TO[doc.to]}`)}catch(err){writeError(err)}
+  S.ui.noteBusy=true;scheduleRender();
+  try{await Store.set(cp('hr_notes/')+id,doc);S.ui.noteDraft=null;logAction('NOTE','note',id,`To ${NOTE_TO[doc.to]}: ${noteKind(doc.kind)}${e?' · '+empName(e):''} — ${msg.slice(0,120)}`);toast(`Note sent to ${NOTE_TO[doc.to]}`)}
+  catch(err){console.warn('note',err);writeError(err)}
+  finally{S.ui.noteBusy=false;scheduleRender()}
 }
 async function noteDone(form){
   const id=form.dataset.id,cur=(S.notes||[]).find(x=>x._id===id);if(!cur)return;
@@ -2645,7 +2668,7 @@ function pageImport(){
   } else if(u.importTab==='paste'){
     html+=`<div class="panel"><h2>Paste DTR rows</h2><p class="muted small">Paste under the header row, or paste your own copy with its header — copying straight from Excel works. Dates are read as yyyy-mm-dd (for example 2026-10-01). Times use the 24-hour clock, e.g. 07:55 and 17:10; AM/PM entries are converted automatically.</p><textarea id="pasteArea" rows="10" spellcheck="false" placeholder="JUNE&#9;2026-10-01&#9;07:55&#9;17:10"></textarea><div class="row" style="margin-top:10px"><button class="btn primary" data-act="parsePaste">Check rows</button></div></div>`;
   } else {
-    const emps=[...S.employees].sort((a,b)=>a.id-b.id);
+    const emps=[...myEmps()].sort((a,b)=>a.id-b.id);
     html+=`<form class="panel" data-form="single"><h2>Add or correct one day</h2><div class="grid">
       <label class="f">Employee<select name="employee_id" required><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}">#${e.id} · ${h(empName(e))}</option>`).join('')}</select></label>
       <label class="f">Date<input type="date" name="date" required value="${todayISO()}"></label>
@@ -2680,6 +2703,9 @@ function pageImport(){
    Employee ID is optional and is only used as a tie-breaker. */
 const normName=v=>String(v||'').toUpperCase().replace(/\./g,' ').replace(/[^A-Z0-9Ñ ]/g,' ').replace(/\b(JR|SR|II|III|IV)\b/g,' ').replace(/\s+/g,' ').trim();
 const canPick=x=>x.match==='OK'||x.match==='CONFIRM';
+/* Department heads with import or correction access only work on their own department's employees. */
+const myEmps=()=>role()==='DEPT_HEAD'?S.employees.filter(inMyDept):S.employees;
+const NOT_MINE='Not in your department — HR imports this row';
 /* Re-importing (the same file, or the synced portal report again) never brings a day in twice.
    'same'  saved with the same times (or the row adds nothing new): skipped
    'fill'  the saved day is missing its time in or time out and this row has it: the missing time is added, review kept
@@ -2959,7 +2985,7 @@ function impNameCell(x,i){
   const u=S.ui;
   if(u.importBusy)return h(x.name);
   if(!(x.editing||x.manual||!canPick(x)||x.match==='CONFIRM'))return `${h(x.name)} <button class="btn sm" data-act="impEdit" data-i="${i}" title="Choose a different employee for this name">Change</button>`;
-  const emps=[...S.employees].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  const emps=[...myEmps()].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
   return `<select data-change="impAssign" data-i="${i}" aria-label="Employee for ${h(x.src||'this row')}"><option value="">${x.manual?'Use the automatic match again':(canPick(x)?'Keep: '+h(x.name):'Choose employee…')}</option>${emps.map(e=>`<option value="${e.id}" ${x.manual&&String(x.employee_id)===String(e.id)?'selected':''}>${h(empName(e))}</option>`).join('')}</select>${x.manual?' <span class="chip acc">Edited</span>':''}`;
 }
 function impAssign(i,val){
@@ -2971,7 +2997,7 @@ function impAssign(i,val){
       if(r.orig){Object.assign(r,r.orig);delete r.orig}
       r.manual=false;r.editing=false;n++;continue;
     }
-    const e=empById(val);if(!e)continue;
+    const e=empById(val);if(!e||(role()==='DEPT_HEAD'&&!inMyDept(e)))continue;
     if(!r.orig)r.orig={employee_id:r.employee_id,name:r.name,department:r.department,match:r.match,note:r.note,sel:r.sel};
     Object.assign(r,{employee_id:e.id,name:empName(e),department:e.department,match:'OK',note:`Assigned by you: “${r.src}” → ${empName(e)}`,manual:true,editing:false,sel:true});n++;
   }
@@ -3006,7 +3032,8 @@ function rowsFromObjects(objs){
       if(coId===null)coNote=`Company “${String(o[cCo]).trim()}” not recognised — use ${COMPANIES.map(c=>c.short).join(', ')}`;
       else if(coId!==S.company)coNote=`For ${coById(coId).short} — switch to that company at the top to import this row`;
     }
-    const [e,match,note]=coNote?[null,coNote]:findEmployee(cId?o[cId]:null,o[cName]);
+    let [e,match,note]=coNote?[null,coNote]:findEmployee(cId?o[cId]:null,o[cName]);
+    if(e&&role()==='DEPT_HEAD'&&!inMyDept(e)){match=`${NOT_MINE} (${empName(e)}, ${e.department||'no department'})`;e=null}
     out.push({employee_id:e?e.id:null,name:e?empName(e):src,src,department:e?e.department:'',date,time_in:parseTime(o[cIn]),time_out:parseTime(o[cOut]),match:!date?'Date not readable — use yyyy-mm-dd, e.g. 2026-10-01':match,note:note||''});
   }
   if(!out.length)throw new Error('No usable rows found.');
@@ -3374,6 +3401,7 @@ async function doImport(mode){
 async function saveSingle(form){
   const fd=new FormData(form);const eid=Number(fd.get('employee_id')),date=fd.get('date');
   if(!eid||!date){toast('Choose an employee and a date.',true);return}
+  if(role()==='DEPT_HEAD'&&!inMyDept(empById(eid))){toast('You can only add attendance for your own department.',true);return}
   const pd=await Store.get(cp('payroll/')+cutoffFor(date).key).catch(()=>null);
   if(pd&&pd.status==='APPROVED'){toast('That cut-off is approved and locked.',true);return}
   const id=`${eid}_${date}`, ti=fd.get('time_in')||null, to=fd.get('time_out')||null, rem=(fd.get('remarks')||'').trim();
@@ -3432,7 +3460,8 @@ function summaryRows(grid){
     const v={days:iDays>=0?sumNum(c[iDays],'num'):null,late:iLate>=0?sumNum(c[iLate],'min'):null,ut:iUt>=0?sumNum(c[iUt],'min'):null,
       ot:iOt>=0?sumNum(c[iOt],'hrs'):null,nd:iNd>=0?sumNum(c[iNd],'hrs'):null,absent:iAbs>=0?sumNum(c[iAbs],'num'):null};
     const bad=Object.entries(v).filter(([k,x])=>Number.isNaN(x)).map(([k])=>SUM_COLS.find(z=>z[0]===k)[1]);
-    const [e,match]=findEmployee(id,name);
+    let [e,match]=findEmployee(id,name);
+    if(e&&role()==='DEPT_HEAD'&&!inMyDept(e)){match=`${NOT_MINE} (${empName(e)})`;e=null}
     out.push({src:name||String(id),employee_id:e?e.id:null,match:bad.length?`Not a number: ${bad.join(', ')}`:(e?match:match||'No match'),...v});
   }
   if(!out.length)throw new Error('No data rows under the header.');
@@ -3457,7 +3486,7 @@ const fmtH=m=>m==null?'':String(r2(m/60));
 function summaryPanel(){
   const u=sumState(),n=u.cut,c=S.period.cuts[n-1],items=(S.dsum||{})[n]||{},locked=cutLocked(n),edit=can('importDtr')&&!S.readOnly&&!locked;
   const saved=Object.entries(items).filter(([,v])=>v&&!v.removed).map(([id,v])=>({id,e:empById(id),v})).sort((a,b)=>empName(a.e||{first_name:a.id}).localeCompare(empName(b.e||{first_name:b.id})));
-  const emps=[...S.employees].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
+  const emps=[...myEmps()].filter(e=>e.active!==false).sort((a,b)=>empName(a).localeCompare(empName(b)));
   let html=`<div class="panel"><h2>DTR summary</h2>
     <p class="muted small" style="margin:0 0 10px">For employees whose attendance comes as totals per cut-off instead of daily time in and time out. Payroll uses these totals in place of the daily records of that cut-off: <b>days worked</b>, <b>late</b> and <b>undertime</b> in minutes, <b>overtime</b> and <b>night differential (NSD)</b> in hours (2.5 or 2:30). Overtime is paid at the regular-day OT rate and NSD at the regular-day night differential. Leave <b>Absences</b> blank to compute it for monthly-paid staff (working days of the cut-off less days worked). Holiday and rest-day premiums are not included — add them in Payroll with <b>Edit</b> if needed.</p>
     <div class="row" style="flex-wrap:wrap;gap:10px"><div class="seg" role="group" aria-label="Cut-off">${S.period.cuts.map(k=>`<button data-act="sumCut" data-v="${k.n}" aria-pressed="${n===k.n}">${k.n===1?'1st':'2nd'} cut-off</button>`).join('')}</div>
@@ -3515,6 +3544,7 @@ const sumItem=(x,src)=>({days:x.days!=null?r2(x.days):0,late_min:x.late!=null?Ma
 async function sumSave(){
   const u=sumState(),rows=(u.rows||[]).filter(x=>x.sel&&x.employee_id!=null&&!/^Not a number/.test(x.match));
   if(!rows.length){toast('Tick at least one matched row.',true);return}
+  if(role()==='DEPT_HEAD'&&rows.some(x=>!inMyDept(empById(x.employee_id)))){toast('You can only enter attendance for your own department.',true);return}
   const ids=rows.map(x=>x.employee_id);if(new Set(ids).size!==ids.length){toast('The same employee is ticked on more than one row. Keep one row per employee.',true);return}
   const ok=await writeSummary(u.cut,items=>{for(const x of rows)items[x.employee_id]=sumItem(x,u.file||'Import')},`${rows.length} employees from ${u.file||'import'} (${rows.slice(0,8).map(x=>empName(empById(x.employee_id))).join(', ')}${rows.length>8?'…':''})`);
   if(ok){u.rows=null;toast(`Summary saved for ${rows.length} ${rows.length===1?'employee':'employees'}`);scheduleRender()}
@@ -3522,6 +3552,7 @@ async function sumSave(){
 async function sumSaveOne(form){
   const u=sumState(),fd=new FormData(form),eid=Number(fd.get('employee_id')),e=empById(eid);
   if(!e){toast('Choose an employee.',true);return}
+  if(role()==='DEPT_HEAD'&&!inMyDept(e)){toast('You can only enter attendance for your own department.',true);return}
   const x={days:sumNum(fd.get('days'),'num'),late:sumNum(fd.get('late'),'min'),ut:sumNum(fd.get('ut'),'min'),ot:sumNum(fd.get('ot'),'hrs'),nd:sumNum(fd.get('nd'),'hrs'),absent:sumNum(fd.get('absent'),'num')};
   const bad=Object.entries(x).filter(([,v])=>Number.isNaN(v)).map(([k])=>SUM_COLS.find(z=>z[0]===k)[1]);
   if(bad.length){toast(`Not a number: ${bad.join(', ')}. Overtime and NSD are hours (2.5 or 2:30); late and undertime are minutes.`,true);return}
@@ -3541,7 +3572,7 @@ function multiState(){
 }
 function multiPanel(){
   const m=multiState(),st=S.settings,hol=holidayMap();
-  const emps=[...S.employees].sort((a,b)=>a.id-b.id);
+  const emps=[...myEmps()].sort((a,b)=>a.id-b.id);
   const have=new Map(S.dtr.map(r=>[String(r.employee_id)+'_'+r.work_date,r]));
   const count=new Map();for(const r of m.rows)if(r.d)count.set(r.d,(count.get(r.d)||0)+1);
   const nDays=m.rows.filter(r=>r.d).length,dis=m.busy?'disabled':'';
@@ -3638,6 +3669,7 @@ async function saveMulti(){
   const m=multiState();mSyncAll();if(m.busy)return;
   const eid=Number(m.eid),emp=empById(eid);
   if(!eid||!emp){toast('Choose an employee first.',true);return}
+  if(role()==='DEPT_HEAD'&&!inMyDept(emp)){toast('You can only add attendance for your own department.',true);return}
   const list=[],seen=new Set();
   for(const[n,r]of m.rows.entries()){
     if(!(r.d||r.i||r.o||r.r))continue;
@@ -4535,6 +4567,14 @@ const actions={
   skip(){$('#view').focus()},
   goPayroll(el){if(el.dataset.ym&&el.dataset.ym!==S.period.ym){S.period=monthPeriods(el.dataset.ym);watchPeriod()}S.ui.payTab=el.dataset.tab||'1';location.hash='payroll'},
   goReview(el){if(el.dataset.ym&&el.dataset.ym!==S.period.ym){S.period=monthPeriods(el.dataset.ym);watchPeriod()}S.ui.dtrFilter='review';S.ui.dtrCut=Number(el.dataset.n)||0;location.hash='dtr'},
+  dhCut(el){S.ui.dhCut=Number(el.dataset.v)||1;scheduleRender()},
+  dhDays(el){const o=S.ui.dhOpen||(S.ui.dhOpen=new Set()),id=String(el.dataset.id);if(o.has(id))o.delete(id);else o.add(id);scheduleRender()},
+  dhCsv(){headSummaryCsv()},
+  dhOpenDtr(el){S.ui.dtrView='emp';S.ui.dtrEmp=String(el.dataset.id);S.ui.dtrFilter='all';S.ui.dtrCut=Number(el.dataset.n)||0;S.ui.openRow=null;location.hash='dtr'},
+  dhNotesAll(){S.ui.dhNotesAll=!S.ui.dhNotesAll;scheduleRender()},
+  notesDone(){S.ui.notesDone=!S.ui.notesDone;scheduleRender()},
+  noteReopen(el){noteReopen(el.dataset.id)},
+  noteDel(el){noteDel(el.dataset.id)},
   goImport(el){if(el.dataset.ym&&el.dataset.ym!==S.period.ym){S.period=monthPeriods(el.dataset.ym);watchPeriod()}location.hash='import'},
   clearDeadline(el){clearDeadline(el.dataset.key)},
   delDept(el){removeDepartment(el.dataset.name)},
@@ -4607,6 +4647,7 @@ document.addEventListener('change',async e=>{
   else if(k==='recYear'){S.ui.recYear=el.value;render()}
   else if(k==='acctCo'){S.ui.acctCo=el.value;render()}
 });
+document.addEventListener('toggle',e=>{const d=e.target;if(d&&d.matches&&d.matches('details.guide')){if(d.open){S.ui.dhGuide=d.dataset.guide;for(const o of document.querySelectorAll('details.guide[open]'))if(o!==d)o.open=false}else if(S.ui.dhGuide===d.dataset.guide)S.ui.dhGuide='none'}},true);
 /* All times use the 24-hour clock (HH:MM). Entries like 7:5, 0755, 1730 or 5:30 PM are converted. */
 document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24')&&i.value.trim()){const t=parseTime(i.value);if(t)i.value=t}});
 document.addEventListener('submit',e=>{
@@ -4629,6 +4670,8 @@ document.addEventListener('submit',e=>{
   if(k==='payedit'){savePayEdit(f);return}
   if(k==='sched'){saveSchedule(f);return}
   if(k==='sumOne'){sumSaveOne(f);return}
+  if(k==='note'){saveNote(f);return}
+  if(k==='noteDone'){noteDone(f);return}
   if(k==='printsel'){printSelected(f);return}
   if(k==='adv'){saveAdvances(f);return}
   if(k==='adj'){saveAdjustment(f);return}
@@ -4715,6 +4758,7 @@ function startData(){
   unsubBase.push(Store.watchDoc('settings/access',d=>{S.roleAccess=(d&&d.roles)||{};scheduleRender()},onSubErr));
   unsubBase.push(Store.watchCollection(cp('loan_ledger'),[],rows=>{S.loans=rows;scheduleRender()},onSubErr));
   unsubBase.push(Store.watchCollection(cp('advance_ledger'),[],rows=>{S.ledger=rows;S.ledgerErr='';scheduleRender()},e=>{S.ledgerErr=e&&e.message||String(e);onSubErr(e);scheduleRender()}));
+  unsubBase.push(Store.watchCollection(cp('hr_notes'),[],rows=>{S.notes=rows;scheduleRender()},()=>{S.notes=[]}));
   unsubBase.push(Store.watchCollection(cp('deadlines'),[],rows=>{const m={};for(const r of rows)m[r._id]=r;S.deadlines=m;scheduleRender()},onSubErr));
   unsubBase.push(Store.watchDoc(cp('audit/')+todayISO().slice(0,7),d=>{S.auditToday=(d&&d.entries)||[];scheduleRender()},onSubErr));
   watchPeriod();watchAudit();
@@ -4722,7 +4766,7 @@ function startData(){
 function stopData(){
   for(const u of unsubBase)try{u()}catch(e){}unsubBase=[];
   if(unsubDtr){unsubDtr();unsubDtr=null}for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];if(unsubAudit){unsubAudit();unsubAudit=null}
-  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.adj={};S.rel={};S.coop={};S.dsum={};S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
+  S.employees=[];S.dtr=[];S.accounts=[];S.audit=[];S.payDocs={};S.adv={};S.adj={};S.rel={};S.coop={};S.dsum={};S.notes=[];S.loans=[];S.edits={};S.deadlines={};S.auditToday=[];S.roleAccess={};S.ready={employees:false,dtr:false};S.ledger=[];S.ledgerErr='';S.recIdx={};S.ui.impList=null;S.ui.impOpen=null;S.ui.impBatch=null;S.linkReqs=[];
   Object.assign(S.ui,{recKey:null,recData:null,recErr:'',recList:null,recListLoaded:false,recListBusy:false,recLoading:null,advForm:false,advEdit:null,advEmp:null,advConfirm:null});
 }
 
