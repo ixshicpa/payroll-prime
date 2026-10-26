@@ -660,8 +660,8 @@ const S={
   ui:{dtrDept:'',dtrFilter:'all',dtrSearch:'',dtrView:'date',dtrEmp:'',dtrEmpOpen:new Set(),openRow:null,empEdit:null,empForm:false,importTab:'upload',importRows:null,importBusy:false,importProgress:0,importResult:null,otherCo:null,dtrSelMode:false,dtrSel:new Set(),payslip:null,searchHits:[],auditMonth:null}
 };
 const role=()=>S.viewAs?S.viewAs.role:(S.account?S.account.role:'NONE');
-/* A department head can manage up to 2 departments: department (main) + department2 (optional). */
-function acctDepts(a){if(!a)return[];return[...new Set([a.department,a.department2].filter(Boolean))]}
+/* A department head can manage up to 3 departments: department (main) + department2 + department3 (both optional). */
+function acctDepts(a){if(!a)return[];return[...new Set([a.department,a.department2,a.department3].filter(Boolean))]}
 const depts=()=>S.viewAs?(S.viewAs.dept?[S.viewAs.dept]:[]):acctDepts(S.account);
 const dept=()=>depts().join(' & ')||null;
 const inMyDept=e=>!!e&&depts().includes(e.department);
@@ -1527,7 +1527,7 @@ async function pbkdf2(pw,saltB64,iter){
 async function makeHash(pw){const salt=b64(crypto.getRandomValues(new Uint8Array(16)));const iter=210000;return{salt,iter,hash:await pbkdf2(pw,salt,iter)}}
 const ctEq=(a,b)=>{if(a.length!==b.length)return false;let r=0;for(let i=0;i<a.length;i++)r|=a.charCodeAt(i)^b.charCodeAt(i);return r===0};
 const acctId=email=>String(email||'').trim().toLowerCase().replace(/[^a-z0-9_\-.~:@+]/g,'_');
-const publicAccount=a=>({email:a.email,full_name:a.full_name||a.email,role:a.role,department:a.department||null,department2:a.department2||null,builtin:!!(a.builtin||a.main),custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null});
+const publicAccount=a=>({email:a.email,full_name:a.full_name||a.email,role:a.role,department:a.department||null,department2:a.department2||null,department3:a.department3||null,builtin:!!(a.builtin||a.main),custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null});
 async function findAccount(email){
   const id=acctId(email);
   let doc=null;try{doc=await Store.get('accounts/'+id)}catch(e){doc=null}
@@ -2284,7 +2284,7 @@ function pageDtr(){
   html+=`<div class="row" style="margin-bottom:14px">
     <select data-change="dtrCut" aria-label="Cut-off"><option value="0">Whole month</option>${S.period.cuts.map(c=>`<option value="${c.n}" ${f.dtrCut===c.n?'selected':''}>${c.n===1?'1st':'2nd'} cut-off · ${h(fmtD(c.start))}–${h(fmtD(c.end))}</option>`).join('')}</select>
     <div class="seg" role="group" aria-label="Filter">${segs.map(([k,l])=>`<button data-act="dtrFilter" data-v="${k}" aria-pressed="${f.dtrFilter===k}">${l}</button>`).join('')}</div>
-    ${!isHead||depts().length>1?`<select data-change="dtrDept" aria-label="Department"><option value="">${isHead?'Both departments':'All departments'}</option>${(isHead?depts():DEPARTMENTS).map(d=>`<option ${f.dtrDept===d?'selected':''}>${h(d)}</option>`).join('')}</select>`:''}
+    ${!isHead||depts().length>1?`<select data-change="dtrDept" aria-label="Department"><option value="">${isHead?'All my departments':'All departments'}</option>${(isHead?depts():DEPARTMENTS).map(d=>`<option ${f.dtrDept===d?'selected':''}>${h(d)}</option>`).join('')}</select>`:''}
     ${byEmp?dtrEmpSelect(allCalc):`<input type="search" placeholder="Search name" value="${h(f.dtrSearch)}" data-change="dtrSearch" aria-label="Search name" style="width:160px">`}
     <span class="spacer"></span>
     ${canAppr&&clean.length&&!f.dtrSelMode?`<button class="btn ok" data-act="approveClean" title="Approves only days with complete punches and no late, undertime, overtime or absence">✓ Approve ${clean.length} clean ${clean.length===1?'day':'days'}</button>`:''}
@@ -4185,13 +4185,14 @@ function pageUsers(){
   const accts=all.filter(a=>{const c=companiesOf(a);return c.some(id=>mine.includes(id))&&(!fco||c.includes(fco))});
   const edCos=ed?companiesOf(ed):[S.company];
   const opt=(arr,cur)=>arr.map(([v,l])=>`<option value="${v}" ${String(cur||'')===v?'selected':''}>${h(l)}</option>`).join('');
-  let html=`<div class="row"><div><h1>User accounts</h1><p class="sub">Everyone signs in with their own email and password. Each account opens only the companies ticked for it. Department heads only see their own department.</p></div><span class="spacer"></span>${!u.acctForm?'<button class="btn primary" data-act="newAcct">Add account</button>':''}</div>`;
+  let html=`<div class="row"><div><h1>User accounts</h1><p class="sub">Everyone signs in with their own email and password. Each account opens only the companies ticked for it. Department heads only see their own department (up to 3 departments each).</p></div><span class="spacer"></span>${!u.acctForm?'<button class="btn primary" data-act="newAcct">Add account</button>':''}</div>`;
   if(u.acctForm)html+=`<form class="panel" data-form="acct"><h2>${ed?'Edit '+h(ed.email):'New account'}</h2><div class="grid">
     <label class="f">Email${ed?' (sign-in email)':''}<input name="email" type="email" required autocomplete="off" value="${h(ed?ed.email:'')}"></label>
     <label class="f">Full name<input name="full_name" required value="${h(ed?ed.full_name||'':'')}"></label>
     <label class="f">Role<select name="role" ${ed&&ed.builtin?'disabled':''}>${opt([['DEPT_HEAD','Department head'],['HR','HR'],['PAYROLL','Payroll'],['ADMIN','Admin']],ed?ed.role:'DEPT_HEAD')}</select></label>
     <label class="f">Department (heads only)<select name="department">${opt([['','Not applicable'],...[...new Set([...DEPARTMENTS,...(ed&&ed.department?[ed.department]:[])])].map(d=>[d,d])],ed?ed.department:'')}</select></label>
     <label class="f">2nd department (optional)<select name="department2">${opt([['','None'],...[...new Set([...DEPARTMENTS,...(ed&&ed.department2?[ed.department2]:[])])].map(d=>[d,d])],ed?ed.department2||'':'')}</select></label>
+    <label class="f">3rd department (optional)<select name="department3">${opt([['','None'],...[...new Set([...DEPARTMENTS,...(ed&&ed.department3?[ed.department3]:[])])].map(d=>[d,d])],ed?ed.department3||'':'')}</select></label>
     ${fbMode()?loginField(ed):`<label class="f">${ed?'New password (leave blank to keep)':'Password'}<input name="password" type="password" minlength="8" autocomplete="new-password" ${ed?'':'required'}></label>`}
     <label class="f">Status<select name="active" ${ed&&ed.builtin?'disabled':''}>${opt([['YES','Active'],['NO','Disabled']],ed&&ed.active===false?'NO':'YES')}</select></label>
   </div>
@@ -4234,8 +4235,9 @@ async function saveAcct(form){
   if((!ed||changed)&&taken){toast(old&&old.deleted?'This email belongs to a deleted account. Restore it under Account history instead.':(old&&old.moved_to?'This email was used before and is kept for the activity trail. Use a different email.':'An account with this email already exists.'),true);return}
   if(fbMode()&&changed&&S.account&&oldEmail===S.account.email){toast('You can’t change the email you are signed in with. Ask another administrator, or add a new account with the new email.',true);return}
   if(changed&&!(await confirmDlg('Change sign-in email?',`From ${oldEmail}\nTo ${email}\n\n${S.account&&oldEmail===S.account.email?'You':'This person'} will sign in with the new email from now on. The old email stops working, but its history stays in the Activity log.`,'Change email')))return;
-  const roleV=ed&&ed.builtin?'ADMIN':fd.get('role'), dep=fd.get('department')||null, dep2=fd.get('department2')||null, pw=fd.get('password')||'';
-  if(roleV==='DEPT_HEAD'&&!dep&&dep2){toast('Put the main department in “Department” first, then the 2nd one.',true);return}
+  const roleV=ed&&ed.builtin?'ADMIN':fd.get('role'), dep=fd.get('department')||null, dep2=fd.get('department2')||null, dep3=fd.get('department3')||null, pw=fd.get('password')||'';
+  if(roleV==='DEPT_HEAD'&&!dep&&(dep2||dep3)){toast('Put the main department in “Department” first, then the 2nd and 3rd.',true);return}
+  if(roleV==='DEPT_HEAD'&&!dep2&&dep3){toast('Fill in the 2nd department first before the 3rd.',true);return}
   if(roleV==='DEPT_HEAD'&&!dep){toast('Choose the department this head manages.',true);return}
   let cos;
   if(ed&&ed.builtin)cos=ALL_CO.slice();
@@ -4246,7 +4248,7 @@ async function saveAcct(form){
   }
   if(!fbMode()&&pw&&!pwOk(pw)){toast('Password needs at least 8 characters with a letter and a number.',true);return}
   if(!fbMode()&&!ed&&!pw){toast('Set a password for the new account.',true);return}
-  const doc={email,full_name:String(fd.get('full_name')||'').trim(),role:roleV,department:roleV==='DEPT_HEAD'?dep:null,department2:roleV==='DEPT_HEAD'&&dep2&&dep2!==dep?dep2:null,
+  const doc={email,full_name:String(fd.get('full_name')||'').trim(),role:roleV,department:roleV==='DEPT_HEAD'?dep:null,department2:roleV==='DEPT_HEAD'&&dep2&&dep2!==dep?dep2:null,department3:roleV==='DEPT_HEAD'&&dep3&&dep3!==dep&&dep3!==dep2?dep3:null,
     active:ed&&ed.builtin?true:fd.get('active')!=='NO',main:!!(ed&&ed.builtin),companies:cos,updated_at:nowISO()};
   if(!(ed&&ed.builtin)&&roleV!=='ADMIN'&&fd.get('access_mode')==='custom'){const m={};for(const[k]of PERMS)m[k]=fd.get('p_'+k)==='on';doc.custom=true;doc.perms=withDeps(m)}
   else{doc.custom=false;doc.perms=null}
@@ -4441,7 +4443,7 @@ async function savePw(form){
   }
   const a=await findAccount(S.account.email);
   if(!a||!ctEq(await pbkdf2(cur,a.salt,a.iter||210000),a.hash)){toast('Current password is incorrect.',true);return}
-  const doc={email:a.email,full_name:a.full_name,role:a.role,department:a.department||null,department2:a.department2||null,active:a.active!==false,main:!!a.builtin,custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null,updated_at:nowISO(),...(await makeHash(next))};
+  const doc={email:a.email,full_name:a.full_name,role:a.role,department:a.department||null,department2:a.department2||null,department3:a.department3||null,active:a.active!==false,main:!!a.builtin,custom:!!a.custom,perms:a.perms||null,companies:Array.isArray(a.companies)?a.companies:null,updated_at:nowISO(),...(await makeHash(next))};
   try{await Store.set('accounts/'+acctId(a.email),doc);logAction('CHANGE_PASSWORD','account',a.email,'');closeDlg();toast('Password changed')}
   catch(e){acctWriteError(e)}
 }
@@ -4734,8 +4736,8 @@ function startData(){
     scheduleRender();
   },onSubErr));
   unsubBase.push(Store.watchCollection('accounts',[],rows=>{
-    S.accountDocs=rows.map(r=>({email:r.email||r._id,full_name:r.full_name||'',role:r.role,department:r.department||null,department2:r.department2||null,moved_to:r.moved_to||null,moved_at:r.moved_at||null,moved_by:r.moved_by||null,deleted:!!r.deleted,deleted_at:r.deleted_at||null,deleted_by:r.deleted_by||null,has_hash:!!(r.hash||r.salt)}));
-    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,department2:r.department2||null,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,uid:r.uid||null,must_change:!!r.must_change,linked_at:r.linked_at||null,main:!!r.main,custom:!!r.custom,perms:r.perms||null,companies:Array.isArray(r.companies)?r.companies:null}));
+    S.accountDocs=rows.map(r=>({email:r.email||r._id,full_name:r.full_name||'',role:r.role,department:r.department||null,department2:r.department2||null,department3:r.department3||null,moved_to:r.moved_to||null,moved_at:r.moved_at||null,moved_by:r.moved_by||null,deleted:!!r.deleted,deleted_at:r.deleted_at||null,deleted_by:r.deleted_by||null,has_hash:!!(r.hash||r.salt)}));
+    S.accounts=rows.filter(r=>!r.moved_to&&!r.deleted).map(r=>({email:r.email||r._id,full_name:r.full_name,role:r.role,department:r.department,department2:r.department2||null,department3:r.department3||null,active:r.active,updated_at:r.updated_at,salt:r.salt,iter:r.iter,hash:r.hash,uid:r.uid||null,must_change:!!r.must_change,linked_at:r.linked_at||null,main:!!r.main,custom:!!r.custom,perms:r.perms||null,companies:Array.isArray(r.companies)?r.companies:null}));
     const me=S.account&&S.accounts.find(a=>a.email===S.account.email);
     if(S.account&&!me&&!(acctId(S.account.email)===BOOT_ACCOUNT.email&&!(S.accountDocs||[]).some(d=>d.email===BOOT_ACCOUNT.email))){
       const em=S.account.email;findAccount(em).then(a=>{if(S.account&&S.account.email===em&&!a)signOut('Your account was removed or its sign-in email was changed. Please sign in again.')});
@@ -4750,7 +4752,7 @@ function startData(){
         if(!nowCos.includes(S.company)){const nx=nowCos[0];setTimeout(()=>{toast('Your access to this company was removed.',true);switchCompany(nx)},0)}
       }
       if(JSON.stringify([me.custom,me.perms||null])!==JSON.stringify([S.account.custom,S.account.perms||null]))S.account={...S.account,custom:me.custom,perms:me.perms||null};
-      if(me.role!==S.account.role||(me.department||null)!==S.account.department||(me.department2||null)!==(S.account.department2||null)){S.account={...S.account,role:me.role,department:me.department||null,department2:me.department2||null,full_name:me.full_name||S.account.full_name};if(S.account.role!=='ADMIN')S.viewAs=null}
+      if(me.role!==S.account.role||(me.department||null)!==S.account.department||(me.department2||null)!==(S.account.department2||null)||(me.department3||null)!==(S.account.department3||null)){S.account={...S.account,role:me.role,department:me.department||null,department2:me.department2||null,department3:me.department3||null,full_name:me.full_name||S.account.full_name};if(S.account.role!=='ADMIN')S.viewAs=null}
     }
     scheduleRender();
   },onSubErr));
