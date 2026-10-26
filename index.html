@@ -923,6 +923,7 @@ function computePayroll(){
     const phicEr=bir?r2(Math.min(Math.max(phicBasis,st.phic_floor),st.phic_ceiling)*st.phic_rate)-phicEe:0;
     let hdmfEe=bir?Number(st.hdmf_ee):0, hdmfEr=bir?Number(st.hdmf_er):0;
     if(bir&&st.hdmf_mode==='percent'){const b=Math.min(hdmfBasis,Number(st.hdmf_max_salary)||10000);hdmfEe=r2(b*(hdmfBasis<=1500?0.01:0.02));hdmfEr=r2(b*0.02)}
+    if(e.hdmf_exempt){hdmfEe=0;hdmfEr=0} // employee set to “No Pag-IBIG deduction” (employee and employer share)
     const sssEeTot=r2(sss.ee+sss.mpfEe), contribEe=r2(sssEeTot+phicEe+hdmfEe);
     const mwe=e.subject_tax===false;
     const taxable=bir&&!mwe?Math.max(0,r2(taxComp-contribEe)):0;
@@ -1439,13 +1440,14 @@ function withRec(rec,fn){
 }
 const recSecList=rec=>rec.n===1?['dtr','cut','slips']:['dtr','cut','slips','M','BIR'];
 const recSecLabel=(rec,s)=>({dtr:'DTR summary',cut:rec.n===1?'1st cut-off':'2nd cut-off',slips:'Payslips',M:'Monthly',BIR:'BIR Purposes'}[s]);
-function recDtrData(rec){
-  const n=rec.n,c=rec.period.cuts[n-1];
+function recDtrData(rec){return dtrDataFor(rec.n,rec.period,rec.items,rec.company||S.settings.company)}
+function dtrDataFor(n,period,items,company){
+  const c=period.cuts[n-1];
   const head=['EE No','Employee','Department','Monthly rate','Daily rate','Days present','Absences (days)','Late + undertime (min)','Approved OT (min)','Night diff (min)','Holiday / RD days worked','Missing punches','Not yet approved','Workdays without DTR'];
-  const rows=rec.items.map(x=>{const k=n===1?x.k1:x.k2,r=(x.raw&&x.raw[n-1])||{t:k.t,absentNet:k.absentNet,missing:k.missing},t=r.t||{};
+  const rows=items.map(x=>{const k=n===1?x.k1:x.k2,r=(x.raw&&x.raw[n-1])||{t:k.t,absentNet:k.absentNet,missing:k.missing},t=r.t||{};
     return[x.e.id,empName(x.e),x.e.department||'',r2(Number(x.k1.monthly)||0),r2(Number(x.daily)||0),t.present||0,r2(r.absentNet||0),Math.round((t.late||0)+(t.ut||0)),Math.round(t.ot||0),Math.round(t.nd||0),t.holDays||0,t.chk||0,t.review||0,r.missing||0]});
   const tot=['','TOTAL','','','',...[5,6,7,8,9,10,11,12,13].map(i=>r2(rows.reduce((a,r)=>a+(Number(r[i])||0),0)))];
-  return{name:'DTR Summary',hdr:[rec.company||S.settings.company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],head,rows,tot,extra:[],count:true,money:[3,4]};
+  return{name:'DTR Summary',hdr:[company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],head,rows,tot,extra:[],count:true,money:[3,4]};
 }
 function recSecData(rec,s){
   if(s==='dtr')return recDtrData(rec);
@@ -3769,6 +3771,7 @@ function empForm(e){
     <div class="wide row" style="gap:18px">
       <label class="chk"><input type="checkbox" name="allowance_taxable" ${e&&e.allowance_taxable?'checked':''}> Allowance is taxable</label>
       <label class="chk"><input type="checkbox" name="deducted_government" ${!e||e.deducted_government!==false?'checked':''}> Include in BIR Purposes (SSS, PhilHealth, Pag-IBIG, withholding tax)</label>
+      <label class="chk"><input type="checkbox" name="hdmf_exempt" ${e&&e.hdmf_exempt?'checked':''}> No Pag-IBIG deduction (employee has no Pag-IBIG contribution)</label>
       <label class="chk"><input type="checkbox" name="subject_tax" ${!e||e.subject_tax!==false?'checked':''}> Subject to withholding tax (untick for minimum wage earners)</label>
       <label class="chk"><input type="checkbox" name="ot_eligible" ${!e||e.ot_eligible!==false?'checked':''}> Eligible for overtime</label>
       <label class="chk"><input type="checkbox" name="active" ${!e||e.active!==false?'checked':''}> Active</label>
@@ -3782,7 +3785,7 @@ async function saveEmp(form){
   if(!S.ui.empEdit&&existing){toast(`Employee ID ${id} is already used by ${empName(existing)}.`,true);return}
   const doc={id,first_name:String(fd.get('first_name')).trim().toUpperCase(),surname:String(fd.get('surname')).trim().toUpperCase(),department:fd.get('department'),position:String(fd.get('position')||'').trim(),portal_name:String(fd.get('portal_name')||'').trim(),
     branch:String(fd.get('branch')||'').trim(),employment_status:fd.get('employment_status'),pay_basis:fd.get('pay_basis'),pay_frequency:['first','second'].includes(fd.get('pay_frequency'))?fd.get('pay_frequency'):'both',rest_day:fd.get('rest_day')==='none'?'none':(/^[0-6]$/.test(fd.get('rest_day')||'')?Number(fd.get('rest_day')):null),monthly_rate:numOrNull(fd.get('monthly_rate')),daily_rate:numOrNull(fd.get('daily_rate')),
-    monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',
+    monthly_allowance:Number(fd.get('monthly_allowance'))||0,shift_in:fd.get('shift_in')||null,shift_out:fd.get('shift_out')||null,allowance_taxable:fd.get('allowance_taxable')==='on',subject_tax:fd.get('subject_tax')==='on',deducted_government:fd.get('deducted_government')==='on',hdmf_exempt:fd.get('hdmf_exempt')==='on',
     ot_eligible:fd.get('ot_eligible')==='on',active:fd.get('active')==='on',updated_at:nowISO()};
   if(doc.pay_basis==='Daily'&&doc.daily_rate==null&&doc.monthly_rate==null){toast('Daily-paid employees need a daily rate.',true);return}
   if(existing&&existing.day_shifts)doc.day_shifts=existing.day_shifts; // per-day shifts are kept
@@ -3959,7 +3962,8 @@ async function saveFile(filename,data,mime){
   return false;
 }
 async function exportExcel(tabs){
-  const all=computePayroll(),secs=tabs.map(t=>sectionData(t,payItems(all,t)));
+  const all=computePayroll(),dtr=tabs.length>1?[1,2].map(n=>({...dtrDataFor(n,S.period,all,S.settings.company),name:(n===1?'1st':'2nd')+' DTR Summary'})):[]; // all sections: DTR summary of both cut-offs first, like in Payroll records
+  const secs=[...dtr,...tabs.map(t=>sectionData(t,payItems(all,t)))];
   const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
   if(typeof XLSX!=='undefined'){
     const wb=XLSX.utils.book_new();
