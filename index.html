@@ -940,6 +940,7 @@ function computePayroll(){
       k.advLedger=r2(k.advItems.reduce((t,x)=>t+x.amount,0));k.adv=r2(k.adv+k.advLedger);
     });
     [[k1,1],[k2,2]].forEach(([k,n])=>{k.auto={...k.auto,adv:k.adv};const o=((S.edits[n]||{})[e.id]||{}).v||{};if(!k.off&&o.adv!=null){k.adv=r2(Number(o.adv));k.edited=true;const before=k.advLedger||0;let left=k.adv;for(const it of (k.advItems||[])){it.amount=r2(Math.min(it.amount,left));left=r2(left-it.amount)}k.advItems=(k.advItems||[]).filter(it=>it.amount>0);k.advLedger=r2(k.advItems.reduce((t,it)=>t+it.amount,0));k.advOther=r2(k.adv-k.advLedger);k.advBal=r2((k.advBal||0)+before-k.advLedger)}});
+    [k1,k2].forEach(k=>{const cs=r2(Math.min(k.coop||0,k.adv||0));k.coopD=cs;k.advA=r2((k.adv||0)-cs)}); // payroll columns: actual company advances vs coop savings (adv stays the total deducted)
     const gk=freq==='first'?k1:k2,ok=freq==='first'?k2:k1; // government contributions and tax come off the last payout of the month
     Object.assign(gk,{sss:sssEeTot,phic:phicEe,hdmf:hdmfEe,tax});
     ok.sss=ok.phic=ok.hdmf=ok.tax=0;
@@ -949,7 +950,7 @@ function computePayroll(){
     gk.ded=r2(gk.adv+(gk.adjMinus||0)+gk.sss+gk.phic+gk.hdmf+gk.tax+gk.loan);gk.net=r2(gk.gross-gk.ded);
     ok.ded=r2(ok.adv+(ok.adjMinus||0)+ok.loan);ok.net=r2(ok.gross-ok.ded);
     const sum=f=>r2(k1[f]+k2[f]);
-    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
+    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
       sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net,advBal:(freq==='first'?k1:k2).advBal};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
     return {e,freq,raw,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
@@ -1457,6 +1458,7 @@ function secTable(d){
   <div class="tablewrap" data-noresp style="margin-top:8px"><table><thead><tr>${d.head.map((x,i)=>`<th${i>2?' class="n"':''}>${h(x)}</th>`).join('')}</tr></thead>
   <tbody>${d.rows.map(r=>`<tr>${r.map((v,i)=>`<td${typeof v==='number'&&i>0?' class="n"':''}>${cell(v,i)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${d.head.length}" class="muted">No employees in this section.</td></tr>`}</tbody>
   <tfoot><tr>${d.tot.map((v,i)=>`<td${typeof v==='number'?' class="n"':''}><b>${cell(v,i)}</b></td>`).join('')}</tr></tfoot></table></div>
+  ${d.dept&&d.dept.rows.length?`<h3 style="margin:16px 0 6px">Summary per department</h3><div class="tablewrap" data-noresp><table><thead><tr>${d.dept.head.map((x,i)=>`<th${i>0?' class="n"':''}>${h(x)}</th>`).join('')}</tr></thead><tbody>${d.dept.rows.map(r=>`<tr>${r.map((v,i)=>`<td${i>0?' class="n"':''}>${i>1?amt(v):h(v)}</td>`).join('')}</tr>`).join('')}</tbody><tfoot><tr>${d.dept.tot.map((v,i)=>`<td${i>0?' class="n"':''}><b>${i>1?amt(v):h(v)}</b></td>`).join('')}</tr></tfoot></table></div>`:''}
   ${d.extra&&d.extra.length?`<table style="margin-top:12px;max-width:560px"><tbody>${d.extra.filter(r=>r.length).map(r=>r.length===1?`<tr><td colspan="2"><b>${h(r[0])}</b></td></tr>`:`<tr><td>${h(r[0])}</td><td class="n">${amt(r[1])}</td></tr>`).join('')}</tbody></table>`:''}</div>`;
 }
 function recSlipItems(rec){return payItems(rec.items,String(rec.n))}
@@ -3795,8 +3797,9 @@ async function saveEmp(form){
 /* ---------- Payroll ---------- */
 const TABS=[['1','1st cut-off'],['2','2nd cut-off'],['M','Monthly'],['BIR','BIR Purposes']];
 const neg=(v)=>v?'−'+amt(v):amt(0);
+const advSplit=r=>{if(!r||r.advA!=null)return r;const cs=r2(Math.min(r.coop||0,r.adv||0));return{...r,coopD:cs,advA:r2((r.adv||0)-cs)}}; // older saved records: derive actual advances vs coop from adv and coop
 function sectionCols(tab,items){
-  const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['adv','Company advances',1]];
+  const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['advA','Company advances',1],['coopD','Coop savings',1]];
   if(items&&items.some(x=>x.mo&&((x.mo.adjPlus||0)||(x.mo.adjMinus||0)))){base.splice(base.findIndex(c=>c[0]==='gross'),0,['adjPlus','Adjustments (+)']);base.push(['adjMinus','Adjustments (−)',1])}
   if(items&&items.some(x=>((x.mo&&x.mo.sssLoan)||0)+((x.mo&&x.mo.hdmfLoan)||0)>0))base.push(['sssLoan','SSS loan',1],['hdmfLoan','Pag-IBIG loan',1]);
   const gov=[['sss','SSS',1],['phic','PhilHealth',1],['hdmf','Pag-IBIG',1],['tax','W/tax',1]];
@@ -3832,7 +3835,7 @@ function pagePayroll(){
   if(warn.length&&!appr)html+=`<div class="banner warn">Before approving: ${h(warn.join(' · '))}.</div>`;
   const cols=sectionCols(tab,items);
   const tot={};for(const x of items){const r=rowOf(x);for(const[k]of cols)tot[k]=(tot[k]||0)+(r[k]||0)}
-  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.adv||0)+(tot.adjMinus||0)+(tot.sssLoan||0)+(tot.hdmfLoan||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(tot.gross)}</b><span>Gross pay</span></div><div class="stat"><b class="money">${peso((tot.advA||0)+(tot.coopD||0)+(tot.adjMinus||0)+(tot.sssLoan||0)+(tot.hdmfLoan||0)+(tot.sss||0)+(tot.phic||0)+(tot.hdmf||0)+(tot.tax||0))}</b><span>Deductions</span></div><div class="stat hl"><b class="money">${peso(tot.net)}</b><span>Net pay</span></div></div>`;
   const showCards=isPhone()&&S.ui.payView!=='table';
   html+=isPhone()?`<div class="row" style="margin-bottom:10px"><div class="seg" role="group" aria-label="View"><button data-act="payView" data-v="cards" aria-pressed="${showCards}">Cards</button><button data-act="payView" data-v="table" aria-pressed="${!showCards}">Full table</button></div></div>`:'';
   if(showCards)html+=`<div class="pcards">${items.map(x=>{const r=rowOf(x),dd=(r.adv||0)+(r.adjMinus||0)+(r.sssLoan||0)+(r.hdmfLoan||0)+(r.sss||0)+(r.phic||0)+(r.hdmf||0)+(r.tax||0);return`<button class="pcard" data-act="payslip" data-id="${x.e.id}"><div class="top-row"><span class="nm"><b>#${x.e.id} · ${h(empName(x.e))}</b><span>${h(x.e.department)}${!x.hasRate?' · <span class="chip warn">No rate</span>':''}${x.bir&&tab!=='1'?' · BIR':''}</span></span><span class="net"><b>${amt(r.net)}</b><span>Net pay</span></span></div><div class="fig"><div><span>Gross</span><b>${amt(r.gross)}</b></div><div><span>Deductions</span><b>${amt(dd)}</b></div><div><span>Late/Abs.</span><b>${amt((r.lateUt||0)+(r.absence||0))}</b></div></div></button>`}).join('')}</div><div class="panel" style="margin-top:10px;padding:12px 14px"><div class="row" style="justify-content:space-between"><b>Total net pay</b><b class="money">${peso(tot.net)}</b></div></div>`;
@@ -3898,7 +3901,7 @@ function payslipHtml(x,tab){
   ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}${(r.adjPlus||0)?line('Adjustment from previous cut-off',r.adjPlus):''}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line('Company advances',r.adv)}${(r.adjMinus||0)?line('Adjustment from previous cut-off',r.adjMinus):''}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
+  ${(()=>{const q=advSplit(r);return line('Company advances',q.advA)+(q.coopD?line('Coop savings',q.coopD):'')})()}${(r.adjMinus||0)?line('Adjustment from previous cut-off',r.adjMinus):''}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
   <p class="cert">I, the undersigned hereby certify to the best of my knowledge and belief that the amounts indicated above are the exact payments of my services rendered for the period covered by this payroll receipt of which I hereby acknowledge.</p>
   
@@ -3914,7 +3917,7 @@ function sectionData(tab,items){
   if(c)hdr.push(`Payroll period: ${fmtLong(c.payStart,c.payEnd)} (${c.n===1?'1st':'2nd'} cut-off)`);
   hdr.push(`Payroll cut-off: ${c?fmtLong(c.start,c.end):fmtLong(P.start,P.end)}`);
   hdr.push(`${SECTION_NAME[tab]}${c&&c.n===2?' · government contributions and withholding tax deducted':''}${tab==='BIR'?' · employees subject to government deductions':''}`);
-  let head,rows,tot,extra=[];
+  let head,rows,tot,extra=[],dept=null;
   if(tab==='BIR'){
     const L=items.filter(x=>x.bir),k=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfEr','hdmfEe','taxComp','netContrib','tax'];
     head=['EE No','Employee','Department','Tax Type','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Taxable Allowance','SSS Basis','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PhilHealth Basis','PHIC ER','PHIC EE','HDMF ER','HDMF EE','Tax Basis','Net of Contributions','Withholding Tax (1601-C)'];
@@ -3923,15 +3926,21 @@ function sectionData(tab,items){
     const sm=f=>r2(L.reduce((a,x)=>a+(x.birRow[f]||0),0));
     extra=[[],['REMITTANCES PAYABLE'],['SSS regular (ER + EE)',r2(sm('sssEr')+sm('sssEe'))],['SSS provident fund / MPF (ER + EE)',r2(sm('mpfEr')+sm('mpfEe'))],['SSS EC (employer)',sm('ec')],['PhilHealth (ER + EE)',r2(sm('phicEr')+sm('phicEe'))],['Pag-IBIG (ER + EE)',r2(sm('hdmfEr')+sm('hdmfEe'))],['Withholding tax (1601-C)',sm('tax')],['Total',r2(sm('sssEr')+sm('sssEe')+sm('mpfEr')+sm('mpfEe')+sm('ec')+sm('phicEr')+sm('phicEe')+sm('hdmfEr')+sm('hdmfEe')+sm('tax'))]];
   } else {
-    const cols=sectionCols(tab,items),rowOf=x=>tab==='1'?x.k1:(tab==='2'?x.k2:x.mo);
+    const cols=sectionCols(tab,items),rowOf=x=>advSplit(tab==='1'?x.k1:(tab==='2'?x.k2:x.mo));
     head=['EE No','Employee','Department','Pay Basis',...cols.map(c=>c[1])];
     rows=items.map(x=>{const r=rowOf(x);return[x.e.id,empName(x.e),x.e.department,x.e.pay_basis||'Monthly',...cols.map(c=>r[c[0]]||0)]});
     tot=['','TOTAL','','',...cols.map(c=>r2(items.reduce((a,x)=>a+(rowOf(x)[c[0]]||0),0)))];
+    const dm=new Map();
+    for(const x of items){const dn=String(x.e.department||'').trim()||'No department',r=rowOf(x);let o=dm.get(dn);if(!o){o={n:0,v:cols.map(()=>0)};dm.set(dn,o)}o.n++;cols.forEach((c,i)=>{o.v[i]+=r[c[0]]||0})}
+    const names=[...dm.keys()].sort((a,b)=>a.localeCompare(b));
+    dept={head:['Department','Employees',...cols.map(c=>c[1])],
+      rows:names.map(k=>{const o=dm.get(k);return[k,String(o.n),...o.v.map(r2)]}),
+      tot:['TOTAL',String(items.length),...cols.map((c,i)=>r2(names.reduce((a,k)=>a+dm.get(k).v[i],0)))]};
   }
-  return{name:SECTION_NAME[tab],hdr,head,rows,tot,extra};
+  return{name:SECTION_NAME[tab],hdr,head,rows,tot,extra,dept};
 }
 function sheetFor(d){
-  const aoa=[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra];
+  const aoa=[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra,...(d.dept&&d.dept.rows.length?[[],['SUMMARY PER DEPARTMENT'],d.dept.head,...d.dept.rows,d.dept.tot]:[])];
   const ws=XLSX.utils.aoa_to_sheet(aoa),ncol=d.head.length,top=d.hdr.length+1;
   ws['!merges']=d.hdr.map((_,i)=>({s:{r:i,c:0},e:{r:i,c:Math.max(0,ncol-1)}}));
   ws['!cols']=d.head.map((hd,i)=>({wch:i===1?30:(i===0?7:Math.max(12,String(hd).length+2))}));
@@ -3961,7 +3970,7 @@ async function exportExcel(tabs){
   }
   // Fallback: the same content as CSV text
   const esc=v=>{const s=String(v??'');return/[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
-  const csv=secs.map(d=>[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra].map(r=>r.map(esc).join(',')).join('\n')).join('\n\n');
+  const csv=secs.map(d=>[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra,...(d.dept&&d.dept.rows.length?[[],['SUMMARY PER DEPARTMENT'],d.dept.head,...d.dept.rows,d.dept.tot]:[])].map(r=>r.map(esc).join(',')).join('\n')).join('\n\n');
   toast('Excel export isn’t available here, so the payroll is offered as CSV.',true);
   offerFile(base+'.csv',csv);
 }
