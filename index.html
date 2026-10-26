@@ -1012,16 +1012,24 @@ const paidOnKey=(e,k)=>{const f=payFreq(e);return f==='both'||(f==='first'?Strin
 const advId=a=>a._id||a.id;
 const advPaid=a=>r2(Object.values(a.payments||{}).reduce((t,v)=>t+(Number(v)||0),0));
 const advBalance=a=>a.status==='closed'?0:Math.max(0,r2((Number(a.amount)||0)-advPaid(a)));
+/* Advances of the same employee given before this one (by date given, then when recorded). */
+function advEarlier(a){
+  const ord=(x,y)=>String(x.date||'').localeCompare(String(y.date||''))||String(x.created_at||'').localeCompare(String(y.created_at||''))||String(advId(x)).localeCompare(String(advId(y)));
+  return (S.ledger||[]).filter(o=>advId(o)!==advId(a)&&String(o.employee_id)===String(a.employee_id)&&ord(o,a)<0);
+}
 function advSchedule(a,e,key){
   const total=r2(Number(a.amount)||0),per=r2(Number(a.per_pay)||0)||total,pays=a.payments||{},start=a.start_key||key;
-  const proj=(k,bal)=>a.status!=='paused'&&a.status!=='closed'&&k>=start&&paidOnKey(e,k)&&bal>0?r2(Math.min(per,bal)):0;
+  // queue: this advance is deducted only once every earlier advance of the employee has been fully paid (closed or paused ones don't hold it back)
+  const prevs=a.queue?advEarlier(a):[];
+  const gate=k=>prevs.every(o=>o.status==='closed'||o.status==='paused'||o.for_13th||advSchedule(o,e,k).before<=0);
+  const proj=(k,bal)=>a.status!=='paused'&&a.status!=='closed'&&!a.for_13th&&k>=start&&paidOnKey(e,k)&&bal>0&&gate(k)?r2(Math.min(per,bal)):0;
   let bal=total,k=[start,...Object.keys(pays)].sort()[0],guard=0;
   while(k<key&&guard++<1200){bal=r2(bal-(pays[k]!=null?Number(pays[k])||0:proj(k,bal)));k=cutKeyNext(k)}
   bal=Math.max(0,bal);
   const ded=pays[key]!=null?r2(Number(pays[key])||0):proj(key,bal);
   return{before:bal,ded,after:Math.max(0,r2(bal-ded))};
 }
-function advStatus(a){if(a.status==='closed')return['Closed',''];if(advBalance(a)<=0)return['Fully paid','ok'];if(a.status==='paused')return['Paused','warn'];return['Active','acc']}
+function advStatus(a){if(a.status==='closed')return['Closed',''];if(advBalance(a)<=0)return['Fully paid','ok'];if(a.for_13th)return['For 13th month','warn'];if(a.status==='paused')return['Paused','warn'];return['Active','acc']}
 function advStartKeys(a){
   const ac=activeCut();let k=ac.key;if(inPeriod(ac)&&cutLocked(ac.n))k=cutKeyNext(k);
   const out=[];if(a&&a.start_key&&a.start_key<k)out.push(a.start_key);
@@ -1039,6 +1047,8 @@ function advForm(a){
     <label class="f">Amount (₱)<input name="amount" type="number" min="0.01" step="0.01" required value="${a?h(a.amount):''}"></label>
     <label class="f">Deduction per payday (₱)<input name="per_pay" type="number" min="0" step="0.01" value="${a&&a.per_pay?h(a.per_pay):''}" placeholder="Blank = whole amount at once"></label>
     <label class="f">Start deducting on<select name="start_key">${keys.map(k=>`<option value="${k}" ${k===cur?'selected':''}>${h(cutKeyLabel(k))}</option>`).join('')}</select></label>
+    <label class="chk wide" style="align-self:end"><input type="checkbox" name="for_13th" ${a&&a.for_13th?'checked':''}> Deduct from the 13th month pay instead (nothing is taken from payroll; the balance stays on this page until you close it)</label>
+    <label class="chk wide" style="align-self:end"><input type="checkbox" name="queue" ${a?(a.queue?'checked':''):'checked'}> Start deducting only after this employee’s earlier advances are fully paid</label>
     <label class="f wide">Note<input name="note" maxlength="160" value="${a?h(a.note||''):''}" placeholder="e.g. Cash advance, uniform, emergency loan"></label>
   </div>
   ${paid>0?`<p class="small muted" style="margin:8px 0 0">${peso(paid)} has already been deducted on approved cut-offs, so the amount can’t go below that.</p>`:''}
@@ -1057,7 +1067,7 @@ async function saveAdvRec(form){
   if(prev&&amount<advPaid(prev)){toast(`The amount can’t be lower than what was already deducted (${peso(advPaid(prev))}).`,true);return}
   const id=prev?advId(prev):'ADV'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   const base=prev?(({_id,...r})=>r)(prev):{status:'active',payments:{},created_by:actor(),created_at:nowISO()};
-  const doc={...base,id,employee_id:empId,date,amount,per_pay:per,start_key:start,note,updated_by:actor(),updated_at:nowISO()};
+  const doc={...base,id,employee_id:empId,date,amount,per_pay:per,start_key:start,queue:fd.get('queue')==='on',for_13th:fd.get('for_13th')==='on',note,updated_by:actor(),updated_at:nowISO()};
   try{
     const jr=journal();
     await jr.set(cp('advance_ledger/')+id,doc,prev?base:null);
@@ -1091,7 +1101,7 @@ function pageAdvancesMain(){
   }).sort((a,b)=>empName(a.e).localeCompare(empName(b.e)));
   const shown=u.advAll?rows:rows.filter(r=>r.bal>0||r.id===u.advEmp);
   const T=f=>r2(shown.reduce((t,r)=>t+r[f],0));
-  html+=`<div class="stats"><div class="stat"><b>${rows.filter(r=>r.bal>0).length}</b><span>Employees with a balance</span></div><div class="stat"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.total,0)))}</b><span>Total advanced</span></div><div class="stat"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.paid,0)))}</b><span>Deducted so far</span></div><div class="stat hl"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.bal,0)))}</b><span>Outstanding balance</span></div></div>`;
+  html+=`<div class="stats"><div class="stat"><b>${rows.filter(r=>r.bal>0).length}</b><span>Employees with a balance</span></div><div class="stat"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.total,0)))}</b><span>Total advanced</span></div><div class="stat"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.paid,0)))}</b><span>Deducted so far</span></div><div class="stat hl"><b class="money">${peso(r2(rows.reduce((t,r)=>t+r.bal,0)))}</b><span>Outstanding balance</span></div>${(()=>{const t=r2((S.ledger||[]).filter(a=>a.for_13th&&a.status!=='closed').reduce((q,a)=>q+advBalance(a),0));return t>0?`<div class="stat"><b class="money">${peso(t)}</b><span>To deduct from 13th month</span></div>`:''})()}</div>`;
   html+=`<div class="panel"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">Summary of advances per employee</h2><span class="spacer"></span><label class="chk small"><input type="checkbox" data-change="advAll" ${u.advAll?'checked':''}> Show fully paid / closed</label></div>`;
   if(!shown.length)return html+`<div class="empty"><b>${rows.length?'No outstanding advances.':'No company advances recorded yet.'}</b>${edit?'Press “Record an advance” to add one.':''}</div></div>`;
   html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Department</th><th class="n">Advances</th><th class="n">Total advanced</th><th class="n">Deducted so far</th><th class="n">Balance</th><th class="n">${h(cutName(ac))} ${h(fmtMonth(ac.ym))}</th></tr></thead><tbody>`;
