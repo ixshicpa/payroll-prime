@@ -882,10 +882,11 @@ function cutCalc(e,rows,cutoff){
   const taxAllow=e.allowance_taxable?allowance:0;
   const aj=(S.adj[cutoff.n]||[]).filter(a=>String(a.emp)===String(e.id));
   const adjPlus=r2(aj.filter(a=>a.kind==='add').reduce((q,a)=>q+Number(a.amount||0),0)), adjMinus=r2(aj.filter(a=>a.kind!=='add').reduce((q,a)=>q+Number(a.amount||0),0));
-  const gross=netLA+allowance+t.hol+t.otPay+t.ndPay+adjPlus;
+  const fold=r2(foldOf(cutoff.n,e.id)); // fold incentive of this cut-off (Laundry / Inhouse Department)
+  const gross=netLA+allowance+t.hol+t.otPay+t.ndPay+adjPlus+fold;
   const adv=Number(((S.adv[cutoff.n]||{})[e.id]||{}).amount)||0;
   return {t,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
-    hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv),adjPlus,adjMinus};
+    hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv),adjPlus,adjMinus,fold};
 }
 /* ---------- DTR summary (totals per employee and cut-off instead of daily time records) ----------
    Stored in dtr_summary/<cut-off key> as { items: { <employee id>: {days, late_min, ut_min, ot_min, nd_min, absent, hol_pay, ...} } }. */
@@ -900,15 +901,15 @@ function applyEdit(e,k,n){
   if(k.off||!it||!it.v||!Object.keys(it.v).length)return k;
   for(const f of Object.keys(k.auto))if(it.v[f]!=null)k[f]=r2(Number(it.v[f]));
   k.netLA=r2(Math.max(0,k.basic-k.lateUt-k.absence));
-  k.gross=r2(k.netLA+k.allowance+k.hol+k.otPay+k.ndPay+(Number(k.adjPlus)||0));
+  k.gross=r2(k.netLA+k.allowance+k.hol+k.otPay+k.ndPay+(Number(k.adjPlus)||0)+(Number(k.fold)||0));
   if(e.allowance_taxable)k.taxAllow=k.allowance;
   k.govBasis=r2(k.netLA+k.hol+k.taxAllow);
   k.edited=true;k.editNote=it.note||'';
   return k;
 }
 /* Payroll frequency: most staff are paid on both cut-offs. Staff paid once a month ('first' or 'second') get the whole month in that one payout: both cut-offs are added together there and the other cut-off shows nothing. */
-const CUT_SUM=['basic','lateUt','absence','netLA','allowance','taxAllow','hol','otPay','ndPay','gross','govBasis','adv','adjPlus','adjMinus'];
-function mergeCuts(a,b){const o={...a,t:{},missing:a.missing+b.missing,absentNet:a.absentNet+b.absentNet};for(const f of CUT_SUM)o[f]=r2(a[f]+b[f]);for(const k of Object.keys(a.t))o.t[k]=a.t[k]+b.t[k];return o}
+const CUT_SUM=['basic','lateUt','absence','netLA','allowance','taxAllow','hol','otPay','ndPay','gross','govBasis','adv','adjPlus','adjMinus','fold'];
+function mergeCuts(a,b){const o={...a,t:{},missing:a.missing+b.missing,absentNet:a.absentNet+b.absentNet};for(const f of CUT_SUM)o[f]=r2((Number(a[f])||0)+(Number(b[f])||0));for(const k of Object.keys(a.t))o.t[k]=a.t[k]+b.t[k];return o}
 function zeroCut(a){const o={...a,t:{},missing:0,absentNet:0,off:true};for(const f of CUT_SUM)o[f]=0;for(const k of Object.keys(a.t))o.t[k]=0;return o}
 const payFreq=e=>e&&(e.pay_frequency==='first'||e.pay_frequency==='second')?e.pay_frequency:'both';
 const payItems=(items,tab)=>tab==='1'||tab==='2'?items.filter(x=>!x['k'+tab].off):items;
@@ -976,7 +977,7 @@ function computePayrollLive(){
     gk.ded=r2(gk.adv+(gk.adjMinus||0)+gk.sss+gk.phic+gk.hdmf+gk.tax+gk.loan);gk.net=r2(gk.gross-gk.ded);
     ok.ded=r2(ok.adv+(ok.adjMinus||0)+ok.loan);ok.net=r2(ok.gross-ok.ded);
     const sum=f=>r2(k1[f]+k2[f]);
-    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
+    const mo={basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),fold:sum('fold'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
       sss:gk.sss,phic:gk.phic,hdmf:gk.hdmf,tax:gk.tax,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net,advBal:(freq==='first'?k1:k2).advBal};
     const tt={};for(const k of Object.keys(k1.t))tt[k]=k1.t[k]+k2.t[k];
     return {e,freq,raw,hasRate,bir,mwe,k1,k2,mo,t:tt,missing:k1.missing+k2.missing,absentNet:k1.absentNet+k2.absentNet,daily:k1.daily,
@@ -1624,7 +1625,7 @@ async function fetchRecordItems(key){
 function moFromApproved(a,x){ // a: employee item of the approved 1st-cut-off record, x: same employee in the approved 2nd-cut-off record
   if(!a||!x||!a.k1||!x.k2)return null;
   const k1=a.k1,k2=x.k2,sum=f=>r2((Number(k1[f])||0)+(Number(k2[f])||0)),gk=(x.freq||a.freq)==='first'?k1:k2;
-  return {...(x.mo||{}),basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
+  return {...(x.mo||{}),basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),fold:sum('fold'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
     sss:Number(gk.sss)||0,phic:Number(gk.phic)||0,hdmf:Number(gk.hdmf)||0,tax:Number(gk.tax)||0,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net};
 }
 function consolidateMonth(items2,items1){
@@ -4487,6 +4488,7 @@ const advSplit=r=>{if(!r||r.advA!=null)return r;const cs=r2(Math.min(r.coop||0,r
 function sectionCols(tab,items){
   const base=[['basic',tab==='M'?'Basic salary':'Basic / half salary'],['lateUt','Late / UT',1],['absence','Absences',1],['netLA','Net of L&A'],['allowance','Allowance'],['hol','Holiday / RD'],['otPay','Overtime'],['ndPay','Night diff'],['gross','Gross'],['advA','Company advances',1],['coopD','Coop savings',1]];
   if(items&&items.some(x=>x.mo&&((x.mo.adjPlus||0)||(x.mo.adjMinus||0)))){base.splice(base.findIndex(c=>c[0]==='gross'),0,['adjPlus','Adjustments (+)']);base.push(['adjMinus','Adjustments (−)',1])}
+  if(items&&items.some(x=>x.mo&&(x.mo.fold||0)))base.splice(base.findIndex(c=>c[0]==='gross'),0,['fold','Fold incentive']);
   if(items&&items.some(x=>((x.mo&&x.mo.sssLoan)||0)+((x.mo&&x.mo.hdmfLoan)||0)>0))base.push(['sssLoan','SSS loan',1],['hdmfLoan','Pag-IBIG loan',1]);
   const gov=[['sss','SSS',1],['phic','PhilHealth',1],['hdmf','Pag-IBIG',1],['tax','W/tax',1]];
   if(tab==='1')return[...base,...(items&&items.some(x=>x.freq==='first')?gov:[]),['net','Net pay']]; // staff paid once a month on the 1st cut-off have their deductions here
@@ -4585,7 +4587,7 @@ function payslipHtml(x,tab){
     <div class="stat"><b style="font-size:18px">${fmtMin(t.ot)}</b><span>Approved OT</span></div>
   </div>
   <table><thead><tr><th>Earnings</th><th class="n">Amount</th></tr></thead><tbody>
-  ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}${(r.adjPlus||0)?line('Adjustment from previous cut-off',r.adjPlus):''}
+  ${line(e.pay_basis==='Daily'?`Salary (${r2(t.payDays!=null?t.payDays:t.present)} days × ${amt(x.daily)})`:(tab==='M'||x.freq!=='both'?'Monthly salary':'Half-month salary'),r.basic)}${line('Late / undertime',r.lateUt,1)}${line('Absences',r.absence,1)}${line('Allowance',r.allowance)}${line('Holiday / rest-day pay',r.hol)}${line('Overtime pay',r.otPay)}${line('Night differential',r.ndPay)}${(r.adjPlus||0)?line('Adjustment from previous cut-off',r.adjPlus):''}${(r.fold||0)?line('Fold incentive',r.fold):''}
   <tr class="tot"><td>Gross earnings</td><td class="n">${amt(r.gross)}</td></tr></tbody></table>
   <table style="margin-top:14px"><thead><tr><th>Deductions</th><th class="n">Amount</th></tr></thead><tbody>
   ${(()=>{const q=advSplit(r);return line('Company advances',q.advA)+(q.coopD?line('Coop savings',q.coopD):'')})()}${(r.adjMinus||0)?line('Adjustment from previous cut-off',r.adjMinus):''}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
