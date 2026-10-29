@@ -1731,7 +1731,21 @@ async function deletePayrollRecord(key){
   }catch(e){writeError(e)}
 }
 
+/* Monthly record: a virtual record built from the approved 1st and 2nd cut-off records of one month (key "M:YYYY-MM"). */
+async function loadMonthRecord(key){
+  const u=S.ui,ym=String(key).slice(2);u.recLoading=key;u.recErr='';
+  try{
+    const pc=monthPeriods(ym).cuts;
+    const [f1,f2]=await Promise.all([fetchRecordItems(pc[0].key),fetchRecordItems(pc[1].key)]);
+    if(!f1||!f2)throw new Error('The monthly record needs both the 1st and the 2nd cut-off records. '+(!f1?'The 1st cut-off record was not found.':'The 2nd cut-off record was not found.'));
+    const m=f2.meta,reopened=f1.meta.status==='REOPENED'||m.status==='REOPENED';
+    const rec={...m,key,ym,n:'M',isMonth:true,status:reopened?'REOPENED':'APPROVED',items:consolidateMonth(f2.items,f1.items),r1:{...f1.meta,items:f1.items},r2:{...m,items:f2.items}};
+    if(u.recKey===key)u.recData=rec;
+  }catch(e){if(u.recKey===key)u.recErr=e.message||String(e)}
+  u.recLoading=null;scheduleRender();
+}
 async function loadRecord(key){
+  if(String(key).startsWith('M:'))return loadMonthRecord(key);
   const u=S.ui;u.recLoading=key;u.recErr='';
   try{
     const m=await Store.get(cp('payroll_records/')+key);if(!m)throw new Error('This record was not found.');
@@ -1746,11 +1760,11 @@ async function loadRecord(key){
 /* Render with the record's own month, company name and approval instead of the month on screen. */
 function withRec(rec,fn){
   const sp=S.period,ss=S.settings,pd=S.payDocs;
-  S.period=rec.period;S.settings={...ss,company:rec.company||ss.company,address:rec.address||''};S.payDocs={...pd,[rec.n]:{status:rec.status==='REOPENED'?'DRAFT':'APPROVED'}};
+  S.period=rec.period;S.settings={...ss,company:rec.company||ss.company,address:rec.address||''};S.payDocs=rec.isMonth?{...pd,1:{status:'APPROVED'},2:{status:'APPROVED'}}:{...pd,[rec.n]:{status:rec.status==='REOPENED'?'DRAFT':'APPROVED'}};
   try{return fn()}finally{S.period=sp;S.settings=ss;S.payDocs=pd}
 }
-const recSecList=rec=>rec.n===1?['dtr','cut','slips']:['dtr','cut','slips','M','BIR'];
-const recSecLabel=(rec,s)=>({dtr:'DTR summary',cut:rec.n===1?'1st cut-off':'2nd cut-off',slips:'Payslips',M:'Monthly',BIR:'BIR Purposes'}[s]);
+const recSecList=rec=>rec.isMonth?['M','dtr1','dtr2','cut1','cut2','BIR','slips']:(rec.n===1?['dtr','cut','slips']:['dtr','cut','slips','M','BIR']);
+const recSecLabel=(rec,s)=>({dtr:'DTR summary',cut:rec.n===1?'1st cut-off':'2nd cut-off',slips:'Payslips',M:rec.isMonth?'Monthly payroll':'Monthly',BIR:'BIR Purposes',dtr1:'DTR summary · 1st cut-off',dtr2:'DTR summary · 2nd cut-off',cut1:'1st cut-off',cut2:'2nd cut-off'}[s]);
 function recDtrData(rec){return dtrDataFor(rec.n,rec.period,rec.items,rec.company||S.settings.company)}
 function dtrDataFor(n,period,items,company){
   const c=period.cuts[n-1];
@@ -1761,6 +1775,14 @@ function dtrDataFor(n,period,items,company){
   return{name:'DTR Summary',hdr:[company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],head,rows,tot,extra:[],count:true,money:[3,4]};
 }
 function recSecData(rec,s){
+  if(rec.isMonth){
+    const co=rec.company||S.settings.company;
+    if(s==='dtr1')return {...dtrDataFor(1,rec.period,rec.r1.items,co),name:'DTR Summary 1st Cut-off'};
+    if(s==='dtr2')return {...dtrDataFor(2,rec.period,rec.r2.items,co),name:'DTR Summary 2nd Cut-off'};
+    if(s==='cut1')return withRec(rec,()=>sectionData('1',payItems(rec.r1.items,'1')));
+    if(s==='cut2')return withRec(rec,()=>sectionData('2',payItems(rec.r2.items,'2')));
+    return withRec(rec,()=>sectionData(s,rec.items)); // Monthly payroll and BIR
+  }
   if(s==='dtr')return recDtrData(rec);
   if(s==='cut')return withRec(rec,()=>sectionData(String(rec.n),payItems(rec.items,String(rec.n))));
   return withRec(rec,()=>sectionData(s,s==='M'?recMonthItems(rec):rec.items));
@@ -1784,7 +1806,7 @@ async function exportRecord(rec){
   if(typeof XLSX==='undefined'){toast('Excel export isn’t available here. Use Print instead.',true);return}
   const wb=XLSX.utils.book_new();for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d),String(d.name).slice(0,31));
   const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
-  if(!await saveFile(`${curCo().file}-payroll-record-${rec.key}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))toast('Could not save the file.',true);
+  if(!await saveFile(`${curCo().file}-payroll-record-${rec.isMonth?'month-'+rec.ym:rec.key}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))toast('Could not save the file.',true);
 }
 function pageRecords(){
   const u=S.ui;
@@ -1801,7 +1823,7 @@ function pageRecords(){
   if(years.length>1)html+=`<div class="row" style="margin-bottom:10px"><label class="f">Year<select data-change="recYear"><option value="">All years</option>${years.map(y=>`<option ${y===yr?'selected':''}>${y}</option>`).join('')}</select></label></div>`;
   if(!L.length)html+=`<div class="panel empty"><b>No approved payroll records yet.</b>A record is saved when a cut-off is approved. For a cut-off approved before this feature, open it in Payroll and press “Save to Payroll records”.</div>`;
   else html+=`<div class="tablewrap"><table><thead><tr><th>Payroll month</th><th>Cut-off</th><th>Payroll period</th><th>Attendance</th><th class="n">Employees</th><th class="n">Gross</th><th class="n">Net pay</th><th>Approved</th><th>Status</th><th>Released</th></tr></thead><tbody>
-  ${L.map(r=>`<tr class="click" data-act="recOpen" data-key="${h(r.key)}"><td><b>${h(fmtMonth(r.ym||String(r.key).slice(0,7)))}</b></td><td>${r.n===1?'1st':'2nd'} cut-off</td><td>${h(fmtRange(r.pay_start,r.pay_end))}</td><td>${h(fmtRange(r.att_start,r.att_end))}</td><td class="n">${(r.totals||{}).employees||0}</td><td class="n">${amt((r.totals||{}).gross)}</td><td class="n"><b>${amt((r.totals||{}).net)}</b></td><td class="small">${h(personName(r.approved_by))}<br><span class="muted">${h(fmtStamp(r.approved_at))}</span></td><td>${r.status==='REOPENED'?'<span class="chip warn">Reopened</span>':'<span class="chip ok">Approved</span>'}</td><td class="small">${relCell((u.recRel||{})[r.key])}</td></tr>`).join('')}
+  ${L.map(r=>{const r1=r.n===2?list.find(x=>x.n===1&&String(x.ym||x.key).slice(0,7)===String(r.ym||r.key).slice(0,7)):null;const ym=String(r.ym||r.key).slice(0,7);return (r1?`<tr class="click" data-act="recOpen" data-key="M:${h(ym)}"><td><b>${h(fmtMonth(ym))}</b></td><td><span class="chip ok">Monthly</span> 1st + 2nd</td><td>${h(fmtRange(r1.pay_start,r.pay_end))}</td><td>${h(fmtRange(r1.att_start,r.att_end))}</td><td class="n">${(r.totals||{}).employees||0}</td><td class="n muted">—</td><td class="n muted">—</td><td class="small muted">1st + 2nd cut-off records</td><td>${r.status==='REOPENED'||r1.status==='REOPENED'?'<span class="chip warn">Reopened</span>':'<span class="chip ok">Approved</span>'}</td><td></td></tr>`:'')+`<tr class="click" data-act="recOpen" data-key="${h(r.key)}"><td><b>${h(fmtMonth(r.ym||String(r.key).slice(0,7)))}</b></td><td>${r.n===1?'1st':'2nd'} cut-off</td><td>${h(fmtRange(r.pay_start,r.pay_end))}</td><td>${h(fmtRange(r.att_start,r.att_end))}</td><td class="n">${(r.totals||{}).employees||0}</td><td class="n">${amt((r.totals||{}).gross)}</td><td class="n"><b>${amt((r.totals||{}).net)}</b></td><td class="small">${h(personName(r.approved_by))}<br><span class="muted">${h(fmtStamp(r.approved_at))}</span></td><td>${r.status==='REOPENED'?'<span class="chip warn">Reopened</span>':'<span class="chip ok">Approved</span>'}</td><td class="small">${relCell((u.recRel||{})[r.key])}</td></tr>`;}).join('')}
   </tbody></table></div>`;
   if(u.prevPayErr)html+=`<div class="banner bad">Could not load previous payroll imports: ${h(u.prevPayErr)}</div>`;
   if(u.prevPayLoading)html+=`<div class="panel"><div class="loading">Loading previous payroll imports…</div></div>`;
@@ -2137,12 +2159,28 @@ function previousPayrollView(){
   ${tabHtml}${body}`;
 }
 
+function monthRecordView(rec,html){
+  const u=S.ui,secs=recSecList(rec),sec=secs.includes(u.recSec)?u.recSec:'M',cs=rec.period.cuts;
+  const gross=r2(rec.items.reduce((a,x)=>a+(x.mo.gross||0),0)),net=r2(rec.items.reduce((a,x)=>a+(x.mo.net||0),0));
+  html+=`<div class="row" style="margin-top:8px"><div><h1>${h(fmtMonth(rec.ym))} · Monthly payroll</h1><p class="sub">Payroll ${h(fmtRange(cs[0].payStart,cs[1].payEnd))} · attendance ${h(fmtRange(cs[0].start,cs[1].end))} · the approved 1st and 2nd cut-off records, each exactly as approved</p></div><span class="spacer"></span><button class="btn" data-act="recPrint">Print this section</button><button class="btn" data-act="recExport" title="One workbook: Monthly payroll, DTR summary of each cut-off, 1st and 2nd cut-off payroll, BIR Purposes">Export Excel (whole month)</button></div>`;
+  if(rec.status==='REOPENED')html+=`<div class="banner warn">The 1st or the 2nd cut-off of this month was reopened. The figures below are the records as they were approved; they are replaced when the cut-off is approved again.</div>`;
+  html+=`<div class="stats"><div class="stat"><b>${rec.items.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(gross)}</b><span>Gross pay for the month</span></div><div class="stat hl"><b class="money">${peso(net)}</b><span>Net pay for the month</span></div></div>`;
+  html+=`<div class="seg" role="tablist" style="margin-bottom:14px">${secs.map(x=>`<button role="tab" data-act="recSec" data-v="${x}" aria-pressed="${x===sec}">${h(recSecLabel(rec,x))}</button>`).join('')}</div>`;
+  if(sec==='slips'){
+    html+=`<div class="panel"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">Monthly payslips · ${rec.items.length}</h2><span class="spacer"></span><button class="btn" data-act="recPrint">Print all payslips</button></div>
+    <div class="tablewrap"><table><thead><tr><th>ID</th><th>Employee</th><th>Department</th><th class="n">Gross</th><th class="n">Deductions</th><th class="n">Net pay</th></tr></thead><tbody>
+    ${rec.items.map(x=>`<tr class="click" data-act="recSlip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td><b>${h(empName(x.e))}</b></td><td>${h(x.e.department)}</td><td class="n">${amt(x.mo.gross)}</td><td class="n">${amt(x.mo.ded)}</td><td class="n"><b>${amt(x.mo.net)}</b></td></tr>`).join('')}
+    </tbody></table></div><p class="muted small">Tap an employee to see the monthly payslip.</p></div>`;
+  }else html+=`<div class="panel">${secTable(recSecData(rec,sec))}</div>`;
+  return html;
+}
 function recordView(){
   const u=S.ui,key=u.recKey,rec=u.recData&&u.recData.key===key?u.recData:null;
   if(!rec&&u.recLoading!==key&&!u.recErr)loadRecord(key);
   let html=`<div class="row"><button class="btn sm" data-act="recBack">← All records</button></div>`;
   if(u.recErr)return html+`<div class="banner bad">${h(u.recErr)}</div>`;
   if(!rec)return html+'<div class="loading">Loading the record…</div>';
+  if(rec.isMonth)return monthRecordView(rec,html);
   const c=rec.period.cuts[rec.n-1],secs=recSecList(rec),sec=secs.includes(u.recSec)?u.recSec:'dtr';
   html+=`<div class="row" style="margin-top:8px"><div><h1>${h(fmtMonth(rec.ym))} · ${rec.n===1?'1st':'2nd'} cut-off</h1><p class="sub">Payroll ${h(fmtRange(c.payStart,c.payEnd))} · attendance ${h(fmtRange(c.start,c.end))} · approved by ${h(personName(rec.approved_by))} on ${h(fmtStamp(rec.approved_at))}</p></div><span class="spacer"></span><button class="btn" data-act="recPrint">Print this section</button><button class="btn" data-act="recExport">Export Excel</button>${role()==='ADMIN'&&!S.readOnly&&!S.viewAs?(rec.status==='REOPENED'?`<button class="btn danger" data-act="recDelete" data-key="${h(key)}">Delete payroll record</button>`:`<button class="btn" data-act="recReopen" data-key="${h(key)}">Reopen payroll</button>`):''}</div>`;
   if(rec.status!=='REOPENED')html+=releaseBanner((u.recRel||{})[key],key,rec.n,c.payStart,c.payEnd,can('approvePayroll')&&!S.readOnly);
@@ -5196,7 +5234,7 @@ const actions={
   recOpen(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';scheduleRender();window.scrollTo(0,0)},
   recBack(){S.ui.recKey=null;S.ui.recData=null;S.ui.recErr='';scheduleRender()},
   recSec(el){S.ui.recSec=el.dataset.v;scheduleRender()},
-  recPrint(){const r=S.ui.recData;if(r)printHtml(recPrintHtml(r,recSecList(r).includes(S.ui.recSec)?S.ui.recSec:'dtr'))},
+  recPrint(){const r=S.ui.recData;if(r){const sl=recSecList(r);printHtml(recPrintHtml(r,sl.includes(S.ui.recSec)?S.ui.recSec:sl[0]))}},
   recExport(){if(S.ui.recData)exportRecord(S.ui.recData)},
   recSlip(el){const r=S.ui.recData;if(!r)return;const x=r.items.find(i=>String(i.e.id)===el.dataset.id);if(!x)return;openDlg('Payslip',withRec(r,()=>payslipHtml(x,String(r.n))),'<button class="btn sm" data-act="printSlip">Print</button>')},
   async recSave(el){const n=Number(el.dataset.n);if(!cutLocked(n)){toast('Approve the cut-off first.',true);return}try{await saveRecord(n,computePayroll());S.ui.recListLoaded=false;S.ui.recList=null;toast('Saved in Payroll records')}catch(e){toast('Could not save the record: '+(e.message||e),true)}},
