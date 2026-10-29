@@ -472,7 +472,7 @@ const CAN={
   viewEmployees:['ADMIN','HR','PAYROLL'], editEmployees:['ADMIN','HR'], importDtr:['ADMIN','HR'],
   viewDtr:['ADMIN','HR','PAYROLL','DEPT_HEAD'], editTimes:['ADMIN','HR'], approveDtr:['ADMIN','HR','DEPT_HEAD'],
   viewPayroll:['ADMIN','HR','PAYROLL'], approvePayroll:['ADMIN','PAYROLL'], editAdvances:['ADMIN','HR'], editAdjustments:['ADMIN','HR','PAYROLL'], editFold:['ADMIN','HR','PAYROLL'], editPayroll:['ADMIN','PAYROLL'], setDeadline:['ADMIN'], audit:['ADMIN','HR'],
-  settings:['ADMIN','HR'], access:['ADMIN']
+  settings:['ADMIN','HR'], access:['ADMIN'], notes:['ADMIN','PAYROLL']
 };
 /* Features the admin can switch on or off per role, or per person. "access" (User accounts) stays Admin-only. */
 const PERMS=[
@@ -481,6 +481,7 @@ const PERMS=[
   ['viewEmployees','View employees and salary rates','Employees'],['editEmployees','Add and edit employees','Employees',['viewEmployees']],
   ['viewPayroll','View payroll and payslips, export to Excel','Payroll'],['approvePayroll','Approve and reopen payroll cut-offs','Payroll',['viewPayroll']],
   ['editAdvances','Set company advances','Payroll',['viewPayroll']],['editAdjustments','Add payroll adjustments','Payroll',['viewPayroll']],['editFold','Enter fold incentives (Laundry and Inhouse)','Payroll',['viewPayroll']],['editPayroll','Edit computed payroll amounts','Payroll',['viewPayroll']],
+  ['notes','Read and write Reminders (notes for Payroll and Admin)','Payroll'],
   ['audit','View activity log','Admin tools'],['settings','Change payroll settings and holidays','Admin tools'],['setDeadline','Set approval deadlines','Admin tools']
 ];
 const EDIT_ROLES=['HR','PAYROLL','DEPT_HEAD'];
@@ -489,7 +490,7 @@ function withDeps(map){const o={...map};for(const[k,,,deps]of PERMS)if(o[k]&&dep
 function roleAccess(r){const st=(S.roleAccess||{})[r];return st?{...roleDefaults(r),...st}:roleDefaults(r)}
 const NAV=[
   ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],['imports','Import history','importDtr'],
-  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Company advances','viewPayroll'],['audit','Activity log','audit'],
+  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Company advances','viewPayroll'],['notes','Reminders','notes'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
 const ABS_REASONS=[['SL','Sick leave'],['VL','Vacation leave'],['EL','Emergency leave'],['LWOP','Leave without pay'],['AWOL','AWOL / no notice'],['OTHER','Other reason']];
@@ -1507,7 +1508,7 @@ async function loadThirteenth(){
     // Historical previous-payroll imports are also valid sources for 13th month.
     // Monthly imports represent the complete month; cutoff imports can fill the
     // first/second halves. Imported values are used as-is (no recalculation).
-    const prevList=await Store.getAll(cp('previous_payroll'));
+    const prevList=(await Store.getAll(cp('previous_payroll'))).sort((a,b)=>String(a[1]?.at||'').localeCompare(String(b[1]?.at||''))); // oldest first, so the latest import of a month wins
     const prevByMonth={};
     for(const [id,d] of prevList){
       const ym=String(d.ym||'').slice(0,7); if(!wanted.has(ym))continue;
@@ -1546,6 +1547,17 @@ async function loadThirteenth(){
       return (imp.rows||[]).find(x=>nameKey(x.employee_name||x.name||'')===target)||null;
     };
     const num=v=>parseMoney(v);
+    // 13th-month basis = basic salary NET of lates and absences (never the gross basic).
+    const approvedNet=k=>k?(k.netLA!=null&&k.netLA!==''?r2(num(k.netLA)):Math.max(0,r2(num(k.basic)-num(k.lateUt)-num(k.absence)))):0;
+    const importedNet=(imp,row)=>{
+      if(!row)return 0;
+      const hd=imp?.headers||[];
+      if(hd.includes('net_of_la')&&row.net_of_la!==''&&row.net_of_la!=null)return Math.max(0,r2(num(row.net_of_la))); // the file's own "NET of L&A" column
+      let la=0; // older imports stored a wrong late_absence total for text amounts like "1,234.50", so use the raw Lates / Absences
+      if(hd.includes('late')||hd.includes('absence'))la=num(row.late)+num(row.absence);
+      else if(hd.includes('late_absence'))la=num(row.late_absence);
+      return Math.max(0,r2(num(row.basic)-la));
+    };
 
     const rows=[...employees.values()].sort((a,b)=>empName(a).localeCompare(empName(b))||String(a.id).localeCompare(String(b.id))).map(e=>{
       const monthly=months.map(ym=>{
@@ -1560,14 +1572,14 @@ async function loadThirteenth(){
         // A complete Monthly historical import is used as the whole month's value.
         let basic=0,first=0,second=0,source='Missing',firstOk=false,secondOk=false,complete=false;
         if(f && s && (fi||si)){
-          first=num(fi?.k1?.basic);second=num(si?.k2?.basic);basic=r2(first+second);firstOk=true;secondOk=true;complete=true;source='Approved 1st + 2nd';
+          first=approvedNet(fi?.k1);second=approvedNet(si?.k2);basic=r2(first+second);firstOk=true;secondOk=true;complete=true;source='Approved 1st + 2nd';
         }else if(monthlyImp && mi){
-          basic=r2(num(mi.basic));first=0;second=0;firstOk=true;secondOk=true;complete=true;source='Imported Monthly';
+          basic=importedNet(monthlyImp,mi);first=0;second=0;firstOk=true;secondOk=true;complete=true;source='Imported Monthly';
         }else{
-          if(f && fi){first=num(fi.k1?.basic);firstOk=true}
-          else if(fii){first=num(fii.basic);firstOk=true}
-          if(s && si){second=num(si.k2?.basic);secondOk=true}
-          else if(sii){second=num(sii.basic);secondOk=true}
+          if(f && fi){first=approvedNet(fi.k1);firstOk=true}
+          else if(fii){first=importedNet(firstImp,fii);firstOk=true}
+          if(s && si){second=approvedNet(si.k2);secondOk=true}
+          else if(sii){second=importedNet(secondImp,sii);secondOk=true}
           basic=r2(first+second);complete=firstOk&&secondOk;source=complete?'Imported/Approved 1st + 2nd':(firstOk?'1st only':(secondOk?'2nd only':'Missing'));
         }
         return {ym,first,second,basic,firstOk,secondOk,complete,source};
@@ -1583,16 +1595,16 @@ function pageThirteenth(){
   const u=S.ui,d=u.thirteenthData,year=Number(u.thirteenthYear)||2026;
   if(!d&&!u.thirteenthBusy&&!u.thirteenthErr)loadThirteenth();
   let html=`<div class="row"><div><h1>13th Month Pay</h1><p class="sub">Company computation period: <b>December ${year-1} – November ${year}</b>. Each month's amount uses approved payroll records or imported historical payroll. A Monthly import may represent the complete month; otherwise 1st + 2nd cut-offs are consolidated.</p></div><span class="spacer"></span><label class="f" style="min-width:170px">Period<select data-change="thirteenthYear">${[year-1,year,year+1].map(y=>`<option value="${y}" ${y===year?'selected':''}>Dec ${y-1} – Nov ${y}</option>`).join('')}</select></label><button class="btn" data-act="thirteenthRefresh">Refresh</button></div>`;
-  html+=`<div class="banner info"><b>13th-month source:</b> approved payroll is used when available. Historical <b>Monthly</b> imports are also included as the complete month, while imported/approved 1st and 2nd cut-offs are consolidated when a Monthly record is not available. Missing payroll is never assumed as zero.</div>`;
+  html+=`<div class="banner info"><b>13th-month basis:</b> each month's <b>basic salary net of lates and absences</b> (the "NET of L&amp;A" column), added up over the 12 months and divided by 12. Allowances, holiday, overtime and night differential are not included.</div><div class="banner info"><b>13th-month source:</b> approved payroll is used when available. Historical <b>Monthly</b> imports are also included as the complete month, while imported/approved 1st and 2nd cut-offs are consolidated when a Monthly record is not available. Missing payroll is never assumed as zero.</div>`;
   if(u.thirteenthErr)html+=`<div class="banner bad">Could not load the 13th-month records: ${h(u.thirteenthErr)}</div>`;
   if(u.thirteenthBusy&&!d)return html+'<div class="loading">Loading approved payroll records…</div>';
   if(!d)return html+'<div class="panel empty"><b>No 13th-month data loaded.</b> Press Refresh.</div>';
   const complete=d.months.filter(ym=>d.byMonth[ym]?.first&&d.byMonth[ym]?.second).length;
   const total13=r2(d.rows.reduce((a,x)=>a+x.computed,0)),released13=r2(d.rows.filter(x=>x.release.released).reduce((a,x)=>a+x.computed,0));
   html+=`<div class="stats"><div class="stat"><b>${complete}/12</b><span>Complete months</span></div><div class="stat"><b>${d.rows.length}</b><span>Employees in computation</span></div><div class="stat hl"><b class="money">${peso(total13)}</b><span>Total computed 13th month</span></div><div class="stat"><b class="money">${peso(released13)}</b><span>Already released</span></div><div class="stat"><b class="money">${peso(r2(total13-released13))}</b><span>Not yet released</span></div></div>`;
-  html+=`<div class="tablewrap" data-noresp><table><thead><tr><th class="stick">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total basic</th><th class="n">13th month</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead><tbody>`;
+  html+=`<div class="tablewrap" data-noresp><table><thead><tr><th class="stick">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total net of L&amp;A</th><th class="n">13th month</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead><tbody>`;
   html+=d.rows.map(x=>{const r=x.release||{};return `<tr><td><b>${h(empName(x.e))}</b><div class="muted small">#${h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td><button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button></td></tr>`}).join('');
-  html+=`</tbody></table></div><p class="muted small" style="margin-top:8px">* A month is marked incomplete when a complete Monthly import is unavailable and both 1st and 2nd cut-off values are not available. Imported historical payroll values are used as stored and are not recalculated.</p>`;
+  html+=`</tbody></table></div><p class="muted small" style="margin-top:8px">* A month is marked incomplete when a complete Monthly import is unavailable and both 1st and 2nd cut-off values are not available. Imported payroll is read as stored (not recalculated); only its "NET of L&amp;A" is used, or basic less lates and absences when the file has no such column.</p>`;
   html+=`<div class="panel" style="margin-top:14px"><h2>Release status</h2><p class="muted small">For employees whose 13th-month pay was already released, check <b>Released</b>, enter the <b>actual release date</b>, and add a note if needed. This does not change the computed 13th-month amount. Former/resigned employees found in historical approved payroll records remain visible here even if they are no longer in Employee Master.</p></div>`;
   return html;
 }
@@ -1608,6 +1620,48 @@ async function saveThirteenthRelease(form){
   if(released&&!date){toast('Enter the actual release date.',true);return}
   const path=cp('thirteenth_releases/'+thirteenthKey(d.year)+'__'+id);
   try{await Store.set(path,{employee_id:row.e.id,employee_name:empName(row.e),released,release_date:released?date:'',note,computed_13th:row.computed,updated_by:actor(),updated_at:nowISO()});closeDlg();S.ui.thirteenthData=null;await loadThirteenth();toast(released?'13th-month release recorded.':'13th-month release status cleared.')}catch(e){toast('Could not save release status: '+(e.message||e),true)}
+}
+
+/* ---------------- Reminders (notes shared by Payroll and Admin) ---------------- */
+async function loadNotes(){
+  const u=S.ui;u.notesBusy=true;u.notesErr='';
+  try{u.notes=(await Store.getAll(cp('payroll_notes'))).map(([id,d])=>({...d,id})).sort((a,b)=>(a.done?1:0)-(b.done?1:0)||String(b.created_at||'').localeCompare(String(a.created_at||'')))}
+  catch(e){u.notesErr=e.message||String(e);u.notes=u.notes||[]}
+  u.notesBusy=false;scheduleRender();
+}
+function pageNotes(){
+  const u=S.ui,list=u.notes;
+  if(!list&&!u.notesBusy){u.notesBusy=true;loadNotes()}
+  const canEdit=can('notes')&&!S.readOnly,isAdmin=can('access');
+  let html=`<div class="row"><div><h1>Reminders</h1><p class="sub">Notes for Payroll and Admin only — for example what still needs to be checked before approving, or what to do next cut-off. They do not affect any computation.</p></div><span class="spacer"></span><button class="btn" data-act="notesRefresh">Refresh</button></div>`;
+  if(u.notesErr)html+=`<div class="banner bad">Could not load the reminders: ${h(u.notesErr)}</div>`;
+  if(canEdit)html+=`<div class="panel"><form data-form="note"><div class="grid"><label class="f wide">New reminder<textarea name="text" rows="3" maxlength="1000" required placeholder="e.g. Ask HR for the signed adjustment slip before approving the 2nd cut-off"></textarea></label><label class="f">Related to (optional)<input name="topic" maxlength="60" placeholder="e.g. Sept 2nd cut-off"></label></div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary">Add reminder</button></div></form></div>`;
+  if(!list)return html+'<div class="loading">Loading reminders…</div>';
+  if(!list.length)return html+'<div class="panel empty"><b>No reminders yet.</b>Add one above.</div>';
+  const open=list.filter(n=>!n.done).length;
+  html+=`<p class="muted small" style="margin:10px 0 6px">${open} open · ${list.length-open} done</p>`;
+  html+=list.map(n=>`<div class="panel" style="margin-bottom:10px;${n.done?'opacity:.65':''}"><div class="row"><div style="flex:1;min-width:0"><div style="white-space:pre-wrap;${n.done?'text-decoration:line-through':''}">${h(n.text)}</div><div class="muted small" style="margin-top:6px">${n.topic?`<span class="chip">${h(n.topic)}</span> `:''}${h(personName(n.created_by))} · ${h(fmtStamp(n.created_at))}${n.done?` · done by ${h(personName(n.done_by))} ${h(fmtStamp(n.done_at))}`:''}</div></div>${canEdit?`<button class="btn sm" data-act="notesDone" data-id="${h(n.id)}">${n.done?'Reopen':'Mark done'}</button>${isAdmin||n.created_by===actor()?`<button class="btn sm danger" data-act="notesDel" data-id="${h(n.id)}">Delete</button>`:''}`:''}</div></div>`).join('');
+  return html;
+}
+async function saveNote(form){
+  if(!can('notes')||S.readOnly){toast('You don’t have access to add reminders.',true);return}
+  const text=(form.querySelector('[name=text]')?.value||'').trim(),topic=(form.querySelector('[name=topic]')?.value||'').trim();
+  if(!text){toast('Write the reminder first.',true);return}
+  const id='n_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  try{await Store.set(cp('payroll_notes/')+id,{text,topic,done:false,created_by:actor(),created_at:nowISO()});form.reset();toast('Reminder added');await loadNotes()}
+  catch(e){toast('Could not save the reminder: '+(e.message||e),true)}
+}
+async function toggleNote(id){
+  const n=(S.ui.notes||[]).find(x=>x.id===id);if(!n||!can('notes')||S.readOnly)return;
+  const d={...n};delete d.id;
+  if(n.done){d.done=false;delete d.done_by;delete d.done_at}else{d.done=true;d.done_by=actor();d.done_at=nowISO()}
+  try{await Store.set(cp('payroll_notes/')+id,d);await loadNotes()}catch(e){toast('Could not update the reminder: '+(e.message||e),true)}
+}
+async function deleteNote(id){
+  const n=(S.ui.notes||[]).find(x=>x.id===id);if(!n||!can('notes')||S.readOnly)return;
+  if(!(can('access')||n.created_by===actor())){toast('Only the author or an Admin can delete this reminder.',true);return}
+  if(!(await confirmDlg('Delete reminder?','This reminder will be removed for everyone.','Delete',true)))return;
+  try{await Store.del(cp('payroll_notes/')+id);toast('Reminder deleted');await loadNotes()}catch(e){toast('Could not delete the reminder: '+(e.message||e),true)}
 }
 
 /* ---------------- Payroll records (saved automatically when a cut-off is approved) ---------------- */
@@ -1805,7 +1859,7 @@ function recPrintHtml(rec,s){
 async function exportRecord(rec){
   const secs=recSecList(rec).filter(s=>s!=='slips').map(s=>recSecData(rec,s));
   if(typeof XLSX==='undefined'){toast('Excel export isn’t available here. Use Print instead.',true);return}
-  const wb=XLSX.utils.book_new();for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d),String(d.name).slice(0,31));
+  const wb=XLSX.utils.book_new(),ctx=sheetCtx(secs);for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d,ctx),String(d.name).slice(0,31));wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
   const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
   if(!await saveFile(`${curCo().file}-payroll-record-${rec.isMonth?'month-'+rec.ym:rec.key}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))toast('Could not save the file.',true);
 }
@@ -1975,13 +2029,12 @@ async function savePreviousPayroll(form){
 
       // If the workbook has separate Lates and Absences, preserve them and
       // also provide the combined deduction used by the application.
-      if(!o.late_absence && (o.late!=='' || o.absence!=='')){
-        const a=Number(o.late)||0,b=Number(o.absence)||0;
-        o.late_absence=a+b;
+      // Cell text such as "1,234.50" or "(50.00)" must go through parseMoney (Number() turns it into NaN).
+      if((o.late_absence===''||o.late_absence==null) && (o.late!=='' || o.absence!=='')){
+        o.late_absence=r2(parseMoney(o.late)+parseMoney(o.absence));
       }
-      if(!o.net_of_la && o.basic!==''){
-        const b=Number(o.basic)||0,la=Number(o.late_absence)||0;
-        o.net_of_la=b-la;
+      if((o.net_of_la===''||o.net_of_la==null) && o.basic!==''){
+        o.net_of_la=r2(parseMoney(o.basic)-parseMoney(o.late_absence));
       }
 
       const importedName=pick(r,'employee_name');
@@ -2023,7 +2076,7 @@ async function savePreviousPayroll(form){
     await jr.set(cp('previous_payroll/'+id),data,null);
     await logAction('PREVIOUS_PAYROLL_IMPORT','payroll import',id,
       `Imported previous payroll: ${prevPayKindLabel(n)}, ${filteredRows.length} employees from ${file.name} · sheet "${sourceSheet}" (${ym})`,jr);
-    closeDlg();S.ui.prevPayList=null;S.ui.prevPayOpen=null;S.ui.prevPayData=null;
+    closeDlg();S.ui.prevPayList=null;S.ui.prevPayOpen=null;S.ui.prevPayData=null;S.ui.thirteenthData=null; // 13th month must re-read the new import
     await loadPreviousPayrollList();
     toast(`Previous payroll imported · ${filteredRows.length} employees · ${sourceSheet} sheet`);
   }catch(e){toast('Could not import previous payroll: '+(e.message||e),true)}
@@ -2038,7 +2091,7 @@ async function deletePreviousPayroll(id){
   try{
     await jr.del(cp('previous_payroll/'+id),d);
     await logAction('DELETE_PREVIOUS_PAYROLL','payroll import',id,`Deleted previous payroll import: ${label} (${d.rows?.length||d.row_count||0} rows)`,jr);
-    S.ui.prevPayList=null;S.ui.prevPayOpen=null;S.ui.prevPayData=null;await loadPreviousPayrollList();toast('Previous payroll import deleted. An Admin can undo this deletion from the Activity log.');
+    S.ui.prevPayList=null;S.ui.prevPayOpen=null;S.ui.prevPayData=null;S.ui.thirteenthData=null;await loadPreviousPayrollList();toast('Previous payroll import deleted. An Admin can undo this deletion from the Activity log.');
   }catch(e){toast('Could not delete previous payroll: '+(e.message||e),true)}
 }
 async function loadPreviousPayrollList(){
@@ -2526,7 +2579,7 @@ function render(){
   if(S.viewAs)html+=`<div class="banner warn">Previewing as ${h(ROLES[S.viewAs.role])}${S.viewAs.dept?' · '+h(S.viewAs.dept):''}. <span class="spacer"></span><button class="btn sm" data-act="stopPreview">Stop preview</button></div>`;
   if(S.readOnly)html+=`<div class="banner bad">Your changes can't be saved because you have view-only access to this page. Ask the owner to share it with you as a Contributor.</div>`;
   if(r==='NONE'){html+=pageNoAccess();$('#view').innerHTML=html;return}
-  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,adjustments:pageAdjustments,fold:pageFold,records:pageRecords,thirteenth:pageThirteenth,advances:pageAdvances,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
+  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,adjustments:pageAdjustments,fold:pageFold,records:pageRecords,thirteenth:pageThirteenth,advances:pageAdvances,notes:pageNotes,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
   const navItem=NAV.find(n=>n[0]===S.route);
   if(navItem&&navItem[2]&&!can(navItem[2])){html+=`<div class="empty"><b>This section isn't available for your role.</b>Use the tabs above to continue.</div>`}
   else html+=page();
@@ -4606,9 +4659,9 @@ function sectionData(tab,items){
   if(c)hdr.push(`Payroll period: ${fmtLong(c.payStart,c.payEnd)} (${c.n===1?'1st':'2nd'} cut-off)`);
   hdr.push(`Payroll cut-off: ${c?fmtLong(c.start,c.end):fmtLong(P.start,P.end)}`);
   hdr.push(`${SECTION_NAME[tab]}${c&&c.n===2?' · government contributions and withholding tax deducted':''}${tab==='BIR'?' · employees subject to government deductions':''}`);
-  let head,rows,tot,extra=[],dept=null;
+  let head,rows,tot,extra=[],dept=null,keys=null;
   if(tab==='BIR'){
-    const L=items.filter(x=>x.bir),k=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfEr','hdmfEe','taxComp','netContrib','tax'];
+    const L=items.filter(x=>x.bir),k=keys=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfEr','hdmfEe','taxComp','netContrib','tax'];
     head=['EE No','Employee','Department','Tax Type','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Taxable Allowance','SSS Basis','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PhilHealth Basis','PHIC ER','PHIC EE','HDMF ER','HDMF EE','Tax Basis','Net of Contributions','Withholding Tax (1601-C)'];
     rows=L.map(x=>[x.e.id,empName(x.e),x.e.department,x.birRow.taxType,...k.map(f=>x.birRow[f]??(f==='taxComp'?x.birRow.comp:''))]);
     tot=['','TOTAL','','',...k.map((f,i)=>f==='msc'?'':r2(L.reduce((a,x)=>a+(x.birRow[f]||0),0)))];
@@ -4617,27 +4670,81 @@ function sectionData(tab,items){
   } else {
     const cols=sectionCols(tab,items),rowOf=x=>advSplit(tab==='1'?x.k1:(tab==='2'?x.k2:x.mo));
     head=['EE No','Employee','Department','Pay Basis',...cols.map(c=>c[1])];
-    rows=items.map(x=>{const r=rowOf(x);return[x.e.id,empName(x.e),x.e.department,x.e.pay_basis||'Monthly',...cols.map(c=>r[c[0]]||0)]});
+    keys=cols.map(c=>c[0]);
+    rows=items.map(x=>{const r=rowOf(x);return[x.e.id,empName(x.e),String(x.e.department||'').trim(),x.e.pay_basis||'Monthly',...cols.map(c=>r[c[0]]||0)]});
     tot=['','TOTAL','','',...cols.map(c=>r2(items.reduce((a,x)=>a+(rowOf(x)[c[0]]||0),0)))];
     const dm=new Map();
     for(const x of items){const dn=String(x.e.department||'').trim()||'No department',r=rowOf(x);let o=dm.get(dn);if(!o){o={n:0,v:cols.map(()=>0)};dm.set(dn,o)}o.n++;cols.forEach((c,i)=>{o.v[i]+=r[c[0]]||0})}
     const names=[...dm.keys()].sort((a,b)=>a.localeCompare(b));
     dept={head:['Department','Employees',...cols.map(c=>c[1])],
-      rows:names.map(k=>{const o=dm.get(k);return[k,String(o.n),...o.v.map(r2)]}),
-      tot:['TOTAL',String(items.length),...cols.map((c,i)=>r2(names.reduce((a,k)=>a+dm.get(k).v[i],0)))]};
+      rows:names.map(k=>{const o=dm.get(k);return[k,o.n,...o.v.map(r2)]}),
+      tot:['TOTAL',items.length,...cols.map((c,i)=>r2(names.reduce((a,k)=>a+dm.get(k).v[i],0)))]};
   }
-  return{name:SECTION_NAME[tab],hdr,head,rows,tot,extra,dept};
+  return{name:SECTION_NAME[tab],tab,keys,hdr,head,rows,tot,extra,dept};
 }
-function sheetFor(d){
+/* Live Excel formulas for a payroll sheet (values stay as the cached result, so the file also re-imports).
+   ctx = {tab:{name,keys,top,n}} of the other payroll sheets in the same workbook (used by Monthly to pull the two cut-offs). */
+function addFormulas(ws,d,ctx){
+  if(d.count&&d.rows.length){ // DTR summary: the figures are inputs, the TOTAL row sums them
+    const top0=d.hdr.length+1,ra0=top0+2,rb0=top0+1+d.rows.length,tr=top0+2+d.rows.length;
+    for(let C=3;C<d.head.length;C++){const a=XLSX.utils.encode_cell({r:tr-1,c:C}),c=ws[a];if(c&&typeof c.v==='number'){const L=XLSX.utils.encode_col(C);ws[a]={t:'n',v:c.v,f:`SUM(${L}${ra0}:${L}${rb0})`}}}
+    return;
+  }
+  if(!d.keys||!d.tab)return;
+  const col=XLSX.utils.encode_col,K=d.keys,n=d.rows.length,top=d.hdr.length+1,ra=top+2,rb=top+1+n,totR=top+2+n;
+  const F=(R,C,f)=>{const a=XLSX.utils.encode_cell({r:R-1,c:C}),c=ws[a];if(!c||typeof c.v!=='number')return;ws[a]={t:'n',v:c.v,f}};
+  const I=k=>K.indexOf(k),L=k=>col(4+I(k));
+  if(d.tab==='BIR'){
+    for(let R=ra;R<=rb;R++){
+      F(R,4+I('netLA'),`ROUND(MAX(0,${L('basic')}${R}-${L('lateAbs')}${R}),2)`);
+      F(R,4+I('netContrib'),`ROUND(${L('taxComp')}${R}-(${L('sssEe')}${R}+${L('mpfEe')}${R}+${L('phicEe')}${R}+${L('hdmfEe')}${R}),2)`);
+    }
+    K.forEach((k,i)=>{if(k!=='msc'&&n)F(totR,4+i,`SUM(${col(4+i)}${ra}:${col(4+i)}${rb})`)});
+    const T=k=>`${L(k)}${totR}`,r0=totR+3; // REMITTANCES PAYABLE rows follow the total row (blank, title, then the lines)
+    const fx=[`${T('sssEr')}+${T('sssEe')}`,`${T('mpfEr')}+${T('mpfEe')}`,T('ec'),`${T('phicEr')}+${T('phicEe')}`,`${T('hdmfEr')}+${T('hdmfEe')}`,T('tax')];
+    fx.forEach((f,i)=>F(r0+i,1,f));
+    F(r0+fx.length,1,`SUM(B${r0}:B${r0+fx.length-1})`);
+    return;
+  }
+  const dedKeys=K.filter(k=>['advA','coopD','adjMinus','sssLoan','hdmfLoan','sss','phic','hdmf','tax'].includes(k));
+  let src=d.tab==='M'?['1','2'].map(t=>ctx&&ctx[t]).filter(Boolean):[];
+  if(src.length<2)src=[]; // both cut-off sheets are needed to rebuild the month
+  const pulled=new Set(['basic','lateUt','absence','netLA','allowance','hol','otPay','ndPay','adjPlus','fold','advA','coopD','adjMinus','sssLoan','hdmfLoan','sss','phic','hdmf','tax']);
+  const look=(s,k,R)=>{const j=s.keys.indexOf(k);if(j<0)return null;return`IFERROR(VLOOKUP($A${R},'${s.name}'!$A$${s.top+2}:$${col(3+s.keys.length)}$${s.top+1+s.n},${5+j},FALSE),0)`};
+  for(let R=ra;R<=rb;R++){
+    for(const k of K){
+      if(src.length&&pulled.has(k)){const p=src.map(s=>look(s,k,R)).filter(Boolean);if(p.length)F(R,4+I(k),p.join('+'));continue}
+      if(src.length&&(k==='net1'||k==='net2')){const s=ctx[k==='net1'?'1':'2'];const p=s&&look(s,'net',R);if(p)F(R,4+I(k),p);continue}
+    }
+    if(!src.length)F(R,4+I('netLA'),`ROUND(MAX(0,${L('basic')}${R}-${L('lateUt')}${R}-${L('absence')}${R}),2)`);
+    F(R,4+I('gross'),`ROUND(SUM(${L('netLA')}${R}:${col(3+I('gross'))}${R}),2)`);
+    if(dedKeys.length)F(R,4+I('net'),`ROUND(${L('gross')}${R}-SUM(${L(dedKeys[0])}${R}:${L(dedKeys[dedKeys.length-1])}${R}),2)`);
+  }
+  if(n)K.forEach((k,i)=>F(totR,4+i,`SUM(${col(4+i)}${ra}:${col(4+i)}${rb})`));
+  if(d.dept&&d.dept.rows.length){
+    const m=d.dept.rows.length,r1=totR+4,rEnd=r1+m-1; // blank, title, header, then one row per department
+    d.dept.rows.forEach((row,j)=>{
+      const R=r1+j,crit=row[0]==='No department'?'""':`$A${R}`;
+      F(R,1,`COUNTIF($C$${ra}:$C$${rb},${crit})`);
+      K.forEach((k,i)=>F(R,2+i,`SUMIF($C$${ra}:$C$${rb},${crit},${col(4+i)}$${ra}:${col(4+i)}$${rb})`));
+    });
+    for(let C=1;C<2+K.length;C++)F(rEnd+1,C,`SUM(${col(C)}${r1}:${col(C)}${rEnd})`);
+  }
+}
+function sheetFor(d,ctx){
   const aoa=[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra,...(d.dept&&d.dept.rows.length?[[],['SUMMARY PER DEPARTMENT'],d.dept.head,...d.dept.rows,d.dept.tot]:[])];
   const ws=XLSX.utils.aoa_to_sheet(aoa),ncol=d.head.length,top=d.hdr.length+1;
   ws['!merges']=d.hdr.map((_,i)=>({s:{r:i,c:0},e:{r:i,c:Math.max(0,ncol-1)}}));
   ws['!cols']=d.head.map((hd,i)=>({wch:i===1?30:(i===0?7:Math.max(12,String(hd).length+2))}));
+  addFormulas(ws,d,ctx);
   const rng=XLSX.utils.decode_range(ws['!ref']);
   for(let R=top+1;R<=rng.e.r;R++)for(let C=0;C<=rng.e.c;C++){const cell=ws[XLSX.utils.encode_cell({r:R,c:C})];if(cell&&cell.t==='n'&&!(C===0&&R<=top+d.rows.length))cell.z='#,##0.00'}
+  if(d.dept&&d.dept.rows.length){const r0=top+1+d.rows.length+4;for(let j=0;j<=d.dept.rows.length;j++){const cell=ws[XLSX.utils.encode_cell({r:r0+j,c:1})];if(cell&&cell.t==='n')cell.z='0'}} // employee counts
   ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:top,c:0},e:{r:top+d.rows.length,c:ncol-1}})};
   return ws;
 }
+/* Where each cut-off sheet sits in the workbook, so the Monthly sheet can look its figures up. */
+function sheetCtx(secs){const c={};for(const d of secs)if(d.tab&&d.keys)c[d.tab]={name:String(d.name).slice(0,31),keys:d.keys,top:d.hdr.length+1,n:d.rows.length};return c}
 async function saveFile(filename,data,mime){
   const blob=new Blob([data],{type:mime});
   if(S.downloads){
@@ -4649,11 +4756,15 @@ async function saveFile(filename,data,mime){
 }
 async function exportExcel(tabs){
   const all=computePayroll(),dtr=tabs.length>1?[1,2].map(n=>({...dtrDataFor(n,S.period,all,S.settings.company),name:(n===1?'1st':'2nd')+' DTR Summary'})):[]; // all sections: DTR summary of both cut-offs first, like in Payroll records
-  const secs=[...dtr,...tabs.map(t=>sectionData(t,payItems(all,t)))];
+  // The Monthly sheet is a formula over the two cut-off sheets, so they always travel with it.
+  const eff=['1','2','M','BIR'].filter(t=>tabs.includes(t)||(tabs.includes('M')&&(t==='1'||t==='2')));
+  const secs=[...dtr,...eff.map(t=>sectionData(t,payItems(all,t)))];
   const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
   if(typeof XLSX!=='undefined'){
     const wb=XLSX.utils.book_new();
-    for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d),d.name);
+    const ctx=sheetCtx(secs);
+    for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d,ctx),d.name);
+    wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
     wb.Props={Title:`${S.settings.company} payroll ${fmtMonth(S.period.ym)}`,Company:S.settings.company};
     const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
     if(await saveFile(base+'.xlsx',out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))return;
@@ -5242,6 +5353,9 @@ const actions={
   async recSave(el){const n=Number(el.dataset.n);if(!cutLocked(n)){toast('Approve the cut-off first.',true);return}try{await saveRecord(n,computePayroll());S.ui.recListLoaded=false;S.ui.recList=null;toast('Saved in Payroll records')}catch(e){toast('Could not save the record: '+(e.message||e),true)}},
   recGo(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';location.hash='records'},
   thirteenthRefresh(){S.ui.thirteenthData=null;loadThirteenth()},
+  notesRefresh(){loadNotes()},
+  notesDone(el){toggleNote(el.dataset.id)},
+  notesDel(el){deleteNote(el.dataset.id)},
   thirteenthRelease(el){thirteenthReleaseDialog(el.dataset.id)},
   prevPayImport(){previousPayrollDialog()},
   prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
@@ -5398,6 +5512,7 @@ document.addEventListener('submit',e=>{
   if(k==='fold'){saveFold(f);return}
   if(k==='release'){saveRelease(f);return}
   if(k==='thirteenthRelease'){saveThirteenthRelease(f);return}
+  if(k==='note'){saveNote(f);return}
   if(k==='prevPayroll'){savePreviousPayroll(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
   if(k==='coopAdd'){saveCoop(f);return}
