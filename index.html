@@ -512,7 +512,17 @@ const fmtD=s=>{const[y,m,d]=s.split('-').map(Number);return `${MON[m-1]} ${d}`};
 const fmtDY=s=>{const[y,m,d]=s.split('-').map(Number);return `${MON[m-1]} ${d}, ${y}`};
 const fmtPeriod=p=>{const sy=p.start.slice(0,4),ey=p.end.slice(0,4);return sy===ey?`${fmtD(p.start)} – ${fmtD(p.end)}, ${ey}`:`${fmtDY(p.start)} – ${fmtDY(p.end)}`};
 const peso=n=>'₱'+(Number(n)||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
-const amt=n=>(Number(n)||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
+const parseMoney=v=>{
+  if(v===null||v===undefined||v==='')return 0;
+  if(typeof v==='number')return Number.isFinite(v)?v:0;
+  const s=String(v).trim();
+  if(!s)return 0;
+  const neg=/^\(.*\)$/.test(s);
+  const cleaned=s.replace(/[₱$€£,\s]/g,'').replace(/[^0-9.\-]/g,'');
+  const n=Number(cleaned);
+  return Number.isFinite(n)?(neg?-Math.abs(n):n):0;
+};
+const amt=n=>parseMoney(n).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtMin=m=>{m=Math.round(m||0);if(m<60)return m+'m';const hh=Math.floor(m/60),mm=m%60;return mm?`${hh}h ${mm}m`:`${hh}h`};
 const r2=n=>Math.round((n+Number.EPSILON)*100)/100;
 const toMin=t=>{if(!t)return null;const[a,b]=String(t).split(':').map(Number);return isNaN(a)?null:a*60+(b||0)};
@@ -917,7 +927,8 @@ const GOV_GROUPS=[['sss','SSS'],['phic','PhilHealth'],['hdmf','Pag-IBIG'],['tax'
 const govKeys=g=>String(S.settings[g+'_basis']??DEFAULTS[g+'_basis']??'').split(',').map(x=>x.trim()).filter(Boolean);
 const govBasisOf=(g,parts)=>Math.max(0,r2(govKeys(g).reduce((a,k)=>a+(Number(parts[k])||0),0)));
 const govLabel=g=>{const k=govKeys(g);return k.length?GOV_ITEMS.filter(i=>k.includes(i[0])).map(i=>i[0]==='less'?'less late/absences':i[1].toLowerCase()).join(' + '):'nothing selected'};
-function computePayroll(){
+function computePayroll(){return applyApprovedMonth(computePayrollLive())}
+function computePayrollLive(){
   const st=S.settings,P=S.period;
   const byEmp={};for(const r of dtrAll())(byEmp[r.employee_id]=byEmp[r.employee_id]||[]).push(r);
   return S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id).map(e=>{
@@ -1479,6 +1490,8 @@ async function loadThirteenth(){
   const u=S.ui;u.thirteenthBusy=true;u.thirteenthErr='';scheduleRender();
   try{
     const year=Number(u.thirteenthYear)||2026, months=thirteenthMonths(year), wanted=new Set(months);
+
+    // Current payroll records: approved 1st + 2nd cut-offs.
     const idx=await Store.getAll(cp('payroll_record_index'));
     const records=idx.map(([id,d])=>({...d,key:d.key||id})).filter(r=>r.status==='APPROVED'&&wanted.has(String(r.ym||r.key).slice(0,7)));
     const byMonth={};
@@ -1489,30 +1502,87 @@ async function loadThirteenth(){
       for(let i=1;i<(m.parts||1);i++){const part=await Store.get(cp('payroll_records/')+r.key+'~'+i);if(part)items=items.concat(part.items||[])}
       (byMonth[ym] ||= {})[Number(r.n)===1?'first':'second']={record:r,items};
     }
-    const releaseRows=await Store.getAll(cp('thirteenth_releases/'+thirteenthKey(year)));
+
+    // Historical previous-payroll imports are also valid sources for 13th month.
+    // Monthly imports represent the complete month; cutoff imports can fill the
+    // first/second halves. Imported values are used as-is (no recalculation).
+    const prevList=await Store.getAll(cp('previous_payroll'));
+    const prevByMonth={};
+    for(const [id,d] of prevList){
+      const ym=String(d.ym||'').slice(0,7); if(!wanted.has(ym))continue;
+      const n=String(d.n)==='M'?'monthly':(Number(d.n)===1?'first':'second');
+      (prevByMonth[ym] ||= {})[n]={id,...d};
+    }
+
+    // Flat collection (a Firestore collection path needs an odd number of segments): one document per period + employee.
+    const relPre=thirteenthKey(year)+'__';
+    const releaseRows=(await Store.getAll(cp('thirteenth_releases'))).filter(([id])=>String(id).startsWith(relPre)).map(([id,d])=>[String(id).slice(relPre.length),d]);
     const releases=Object.fromEntries(releaseRows.map(([id,d])=>[id,d]));
     const employees=new Map();
-    for(const e of S.employees.filter(e=>e.active!==false))employees.set(String(e.id),e);
-    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e)employees.set(String(x.e.id),x.e);
-    const rows=[...employees.values()].sort((a,b)=>empName(a).localeCompare(empName(b))||Number(a.id)-Number(b.id)).map(e=>{
+    const nameKey=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+    for(const e of S.employees.filter(e=>e.active!==false))employees.set(nameKey(empName(e)),e);
+
+    // Add employees found in approved historical payroll records.
+    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e)employees.set(nameKey(empName(x.e)),x.e);
+
+    // Add employees found only in previous payroll imports. Match by NAME,
+    // never by the old employee ID. If absent from current records, mark resigned.
+    for(const ym of months){
+      for(const kind of ['monthly','first','second']){
+        const imp=prevByMonth[ym]?.[kind]; if(!imp)continue;
+        for(const row of (imp.rows||[])){
+          const nm=row.employee_name||row.name||''; if(!String(nm).trim())continue;
+          const k=nameKey(nm),cur=employees.get(k);
+          if(cur)continue;
+          employees.set(k,{id:`hist_${k.replace(/[^A-Z0-9]+/g,'_').slice(0,70)}`,first_name:String(nm).trim(),surname:'',department:row.department||'',position:'',employment_status:'Resigned',active:false,_historical:true});
+        }
+      }
+    }
+
+    const findImportedRow=(imp,e)=>{
+      if(!imp)return null;
+      const target=nameKey(empName(e));
+      return (imp.rows||[]).find(x=>nameKey(x.employee_name||x.name||'')===target)||null;
+    };
+    const num=v=>parseMoney(v);
+
+    const rows=[...employees.values()].sort((a,b)=>empName(a).localeCompare(empName(b))||String(a.id).localeCompare(String(b.id))).map(e=>{
       const monthly=months.map(ym=>{
         const f=(byMonth[ym]||{}).first,s=(byMonth[ym]||{}).second;
-        const fi=f?.items?.find(x=>String(x.e?.id)===String(e.id)),si=s?.items?.find(x=>String(x.e?.id)===String(e.id));
-        const first=Number(fi?.k1?.basic)||0,second=Number(si?.k2?.basic)||0;
-        return {ym,first,second,basic:r2(first+second),firstOk:!!f,secondOk:!!s};
+        const fi=f?.items?.find(x=>nameKey(empName(x.e))===nameKey(empName(e)));
+        const si=s?.items?.find(x=>nameKey(empName(x.e))===nameKey(empName(e)));
+        const monthlyImp=prevByMonth[ym]?.monthly;
+        const firstImp=prevByMonth[ym]?.first,secondImp=prevByMonth[ym]?.second;
+        const mi=findImportedRow(monthlyImp,e),fii=findImportedRow(firstImp,e),sii=findImportedRow(secondImp,e);
+
+        // Priority: approved current payroll > imported historical equivalent.
+        // A complete Monthly historical import is used as the whole month's value.
+        let basic=0,first=0,second=0,source='Missing',firstOk=false,secondOk=false,complete=false;
+        if(f && s && (fi||si)){
+          first=num(fi?.k1?.basic);second=num(si?.k2?.basic);basic=r2(first+second);firstOk=true;secondOk=true;complete=true;source='Approved 1st + 2nd';
+        }else if(monthlyImp && mi){
+          basic=r2(num(mi.basic));first=0;second=0;firstOk=true;secondOk=true;complete=true;source='Imported Monthly';
+        }else{
+          if(f && fi){first=num(fi.k1?.basic);firstOk=true}
+          else if(fii){first=num(fii.basic);firstOk=true}
+          if(s && si){second=num(si.k2?.basic);secondOk=true}
+          else if(sii){second=num(sii.basic);secondOk=true}
+          basic=r2(first+second);complete=firstOk&&secondOk;source=complete?'Imported/Approved 1st + 2nd':(firstOk?'1st only':(secondOk?'2nd only':'Missing'));
+        }
+        return {ym,first,second,basic,firstOk,secondOk,complete,source};
       });
       const total=r2(monthly.reduce((a,m)=>a+m.basic,0)),computed=r2(total/12),release=releases[String(e.id)]||{};
       return {e,monthly,total,computed,release};
     });
-    u.thirteenthData={year,months,byMonth,releases,rows};
+    u.thirteenthData={year,months,byMonth,prevByMonth,releases,rows};
   }catch(e){u.thirteenthErr=e.message||String(e)}
   u.thirteenthBusy=false;scheduleRender();
 }
 function pageThirteenth(){
   const u=S.ui,d=u.thirteenthData,year=Number(u.thirteenthYear)||2026;
   if(!d&&!u.thirteenthBusy&&!u.thirteenthErr)loadThirteenth();
-  let html=`<div class="row"><div><h1>13th Month Pay</h1><p class="sub">Company computation period: <b>December ${year-1} – November ${year}</b>. Each month's amount is consolidated from the approved 1st and approved 2nd cut-off payroll records.</p></div><span class="spacer"></span><label class="f" style="min-width:170px">Period<select data-change="thirteenthYear">${[year-1,year,year+1].map(y=>`<option value="${y}" ${y===year?'selected':''}>Dec ${y-1} – Nov ${y}</option>`).join('')}</select></label><button class="btn" data-act="thirteenthRefresh">Refresh</button></div>`;
-  html+=`<div class="banner info"><b>Monthly consolidation:</b> 1st cut-off basic salary + 2nd cut-off basic salary = monthly basic salary used for the 13th-month computation. A month is <b>Incomplete</b> if either approved cut-off is missing. Missing payroll is never assumed as zero.</div>`;
+  let html=`<div class="row"><div><h1>13th Month Pay</h1><p class="sub">Company computation period: <b>December ${year-1} – November ${year}</b>. Each month's amount uses approved payroll records or imported historical payroll. A Monthly import may represent the complete month; otherwise 1st + 2nd cut-offs are consolidated.</p></div><span class="spacer"></span><label class="f" style="min-width:170px">Period<select data-change="thirteenthYear">${[year-1,year,year+1].map(y=>`<option value="${y}" ${y===year?'selected':''}>Dec ${y-1} – Nov ${y}</option>`).join('')}</select></label><button class="btn" data-act="thirteenthRefresh">Refresh</button></div>`;
+  html+=`<div class="banner info"><b>13th-month source:</b> approved payroll is used when available. Historical <b>Monthly</b> imports are also included as the complete month, while imported/approved 1st and 2nd cut-offs are consolidated when a Monthly record is not available. Missing payroll is never assumed as zero.</div>`;
   if(u.thirteenthErr)html+=`<div class="banner bad">Could not load the 13th-month records: ${h(u.thirteenthErr)}</div>`;
   if(u.thirteenthBusy&&!d)return html+'<div class="loading">Loading approved payroll records…</div>';
   if(!d)return html+'<div class="panel empty"><b>No 13th-month data loaded.</b> Press Refresh.</div>';
@@ -1520,8 +1590,8 @@ function pageThirteenth(){
   const total13=r2(d.rows.reduce((a,x)=>a+x.computed,0)),released13=r2(d.rows.filter(x=>x.release.released).reduce((a,x)=>a+x.computed,0));
   html+=`<div class="stats"><div class="stat"><b>${complete}/12</b><span>Complete months</span></div><div class="stat"><b>${d.rows.length}</b><span>Employees in computation</span></div><div class="stat hl"><b class="money">${peso(total13)}</b><span>Total computed 13th month</span></div><div class="stat"><b class="money">${peso(released13)}</b><span>Already released</span></div><div class="stat"><b class="money">${peso(r2(total13-released13))}</b><span>Not yet released</span></div></div>`;
   html+=`<div class="tablewrap" data-noresp><table><thead><tr><th class="stick">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total basic</th><th class="n">13th month</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead><tbody>`;
-  html+=d.rows.map(x=>{const r=x.release||{};return `<tr><td><b>${h(empName(x.e))}</b><div class="muted small">#${h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)}`:'Missing approved cut-off'}">${peso(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td><button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button></td></tr>`}).join('');
-  html+=`</tbody></table></div><p class="muted small" style="margin-top:8px">* The month is incomplete because one or both approved cut-offs are missing. The displayed amount reflects only the approved records found; it is not treated as a complete month.</p>`;
+  html+=d.rows.map(x=>{const r=x.release||{};return `<tr><td><b>${h(empName(x.e))}</b><div class="muted small">#${h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td><button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button></td></tr>`}).join('');
+  html+=`</tbody></table></div><p class="muted small" style="margin-top:8px">* A month is marked incomplete when a complete Monthly import is unavailable and both 1st and 2nd cut-off values are not available. Imported historical payroll values are used as stored and are not recalculated.</p>`;
   html+=`<div class="panel" style="margin-top:14px"><h2>Release status</h2><p class="muted small">For employees whose 13th-month pay was already released, check <b>Released</b>, enter the <b>actual release date</b>, and add a note if needed. This does not change the computed 13th-month amount. Former/resigned employees found in historical approved payroll records remain visible here even if they are no longer in Employee Master.</p></div>`;
   return html;
 }
@@ -1535,13 +1605,55 @@ async function saveThirteenthRelease(form){
   const id=String(form.dataset.id),d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===id);if(!row)return;
   const released=form.querySelector('[name=released]')?.checked||false,date=(form.querySelector('[name=release_date]')?.value||'').trim(),note=(form.querySelector('[name=note]')?.value||'').trim();
   if(released&&!date){toast('Enter the actual release date.',true);return}
-  const path=cp('thirteenth_releases/'+thirteenthKey(d.year))+'/'+id;
+  const path=cp('thirteenth_releases/'+thirteenthKey(d.year)+'__'+id);
   try{await Store.set(path,{employee_id:row.e.id,employee_name:empName(row.e),released,release_date:released?date:'',note,computed_13th:row.computed,updated_by:actor(),updated_at:nowISO()});closeDlg();S.ui.thirteenthData=null;await loadThirteenth();toast(released?'13th-month release recorded.':'13th-month release status cleared.')}catch(e){toast('Could not save release status: '+(e.message||e),true)}
 }
 
 /* ---------------- Payroll records (saved automatically when a cut-off is approved) ---------------- */
 const REC_CHUNK=80;
 function snapItem(x){const e=x.e;return{...x,e:{id:e.id,first_name:e.first_name,surname:e.surname,department:e.department||'',position:e.position||'',employment_status:e.employment_status||'',pay_basis:e.pay_basis||'Monthly',branch:e.branch||''}}}
+/* Monthly = the APPROVED 1st cut-off record + the APPROVED 2nd cut-off record, each exactly as it was approved.
+   Recomputing the month live (or reading the month figure saved with the 2nd-cut-off record) rebuilds the 1st cut-off from today's attendance,
+   which already contains what an Adjustment on the 2nd cut-off pays again — so adjustments were counted twice. */
+async function fetchRecordItems(key){
+  const m=await Store.get(cp('payroll_records/')+key);if(!m)return null;
+  let items=m.items||[];
+  for(let i=1;i<(m.parts||1);i++){const p=await Store.get(cp('payroll_records/')+key+'~'+i);if(!p)return null;items=items.concat(p.items||[])}
+  return {meta:m,items};
+}
+function moFromApproved(a,x){ // a: employee item of the approved 1st-cut-off record, x: same employee in the approved 2nd-cut-off record
+  if(!a||!x||!a.k1||!x.k2)return null;
+  const k1=a.k1,k2=x.k2,sum=f=>r2((Number(k1[f])||0)+(Number(k2[f])||0)),gk=(x.freq||a.freq)==='first'?k1:k2;
+  return {...(x.mo||{}),basic:sum('basic'),lateUt:sum('lateUt'),absence:sum('absence'),netLA:sum('netLA'),allowance:sum('allowance'),hol:sum('hol'),otPay:sum('otPay'),ndPay:sum('ndPay'),gross:sum('gross'),adv:sum('adv'),advA:sum('advA'),coopD:sum('coopD'),adjPlus:sum('adjPlus'),adjMinus:sum('adjMinus'),coop:sum('coop'),sssLoan:sum('sssLoan'),hdmfLoan:sum('hdmfLoan'),
+    sss:Number(gk.sss)||0,phic:Number(gk.phic)||0,hdmf:Number(gk.hdmf)||0,tax:Number(gk.tax)||0,ded:sum('ded'),net:sum('net'),net1:k1.net,net2:k2.net};
+}
+function consolidateMonth(items2,items1){
+  const by=new Map((items1||[]).map(x=>[String(x.e.id),x]));
+  return (items2||[]).map(x=>{const mo=moFromApproved(by.get(String(x.e.id)),x);return mo?{...x,k1:by.get(String(x.e.id)).k1,mo}:x});
+}
+const recMonthItems=rec=>rec.firstItems?consolidateMonth(rec.items,rec.firstItems):rec.items;
+/* Live Payroll → Monthly: once both cut-offs are approved and saved in Payroll records, the month is the sum of those two records. */
+function apprMonthSig(){
+  const P=S.period,a=S.recIdx&&S.recIdx[1],b=S.recIdx&&S.recIdx[2];
+  if(!P||!cutLocked(1)||!cutLocked(2)||!a||!b||a.status!=='APPROVED'||b.status!=='APPROVED')return '';
+  return [curCo().prefix,P.ym,a.saved_at,b.saved_at].join('|');
+}
+async function loadApprovedMonth(){
+  const sig=apprMonthSig(),A=S.apprMonth;
+  if(!sig||(A&&(A.sig===sig||A.busy===sig||A.failed===sig)))return;
+  S.apprMonth={sig:'',busy:sig};
+  let next={sig:'',busy:'',failed:sig};
+  try{
+    const P=S.period,[f1,f2]=await Promise.all([fetchRecordItems(P.cuts[0].key),fetchRecordItems(P.cuts[1].key)]);
+    if(f1&&f2&&f1.meta.status==='APPROVED'&&f2.meta.status==='APPROVED')next={sig,busy:'',a:new Map(f1.items.map(x=>[String(x.e.id),x])),b:new Map(f2.items.map(x=>[String(x.e.id),x]))};
+  }catch(e){}
+  S.apprMonth=next;scheduleRender();
+}
+function applyApprovedMonth(list){
+  const A=S.apprMonth;if(!A||!A.sig||A.sig!==apprMonthSig())return list;
+  for(const x of list){const mo=moFromApproved(A.a.get(String(x.e.id)),A.b.get(String(x.e.id)));if(mo){x.mo={...x.mo,...mo};x.birRow={...x.birRow,gross:mo.gross};x.moApproved=true}}
+  return list;
+}
 async function saveRecord(n,all){
   const P=S.period,c=P.cuts[n-1],k=n===1?'k1':'k2',paid=all.filter(x=>!x[k].off),d=S.payDocs[n]||{};
   const items=JSON.parse(JSON.stringify(all.map(snapItem)));
@@ -1585,13 +1697,49 @@ async function loadRecordList(){
   catch(e){u.recListErr=e.message||String(e)}
   u.recListBusy=false;u.recListLoaded=true;scheduleRender();
 }
+async function reopenPayrollRecord(key){
+  if(role()!=='ADMIN'||S.readOnly||S.viewAs){toast('Only an Admin can reopen an approved payroll record.',true);return}
+  try{
+    const idx=await Store.get(cp('payroll_record_index/')+key);
+    if(!idx)throw new Error('Payroll record not found.');
+    if(idx.status==='REOPENED'){toast('This payroll record is already reopened.');return}
+    const rel=await Store.get(cp('payroll_release/')+key);
+    if(rel){toast('This payroll record was already released. Undo the release first before reopening.',true);return}
+    const jr=journal();
+    const paths=[cp('payroll_record_index/')+key,cp('payroll_records/')+key,cp('payroll/')+key];
+    for(const path of paths){const d=await Store.get(path);if(d)await jr.set(path,{...d,status:'REOPENED',reopened_by:actor(),reopened_at:nowISO()},d)}
+    await logAction('REOPEN','payroll',key,`${idx.n===1?'1st':'2nd'} cut-off ${fmtRange(idx.pay_start,idx.pay_end)} reopened from Payroll records`,jr);
+    S.ui.recListLoaded=false;S.ui.recList=null;S.ui.recData=null;await loadRecord(key);toast('Payroll record reopened. It can now be deleted or approved again.');
+  }catch(e){writeError(e)}
+}
+async function deletePayrollRecord(key){
+  if(role()!=='ADMIN'||S.readOnly||S.viewAs){toast('Only an Admin can delete a payroll record.',true);return}
+  try{
+    const idx=await Store.get(cp('payroll_record_index/')+key);
+    if(!idx)throw new Error('Payroll record not found.');
+    if(idx.status!=='REOPENED'){toast('Reopen the approved payroll record first before deleting it.',true);return}
+    const rel=await Store.get(cp('payroll_release/')+key);
+    if(rel){toast('This payroll record has a release record. Undo the release first before deleting.',true);return}
+    if(!await confirmDlg('Delete this payroll record?',`This will remove the ${idx.n===1?'1st':'2nd'} cut-off payroll record for ${fmtRange(idx.pay_start,idx.pay_end)} from Payroll records. The attendance, DTR and other source data are not deleted. The deletion will be recorded in the Activity log and can be undone by an Admin.`,'Delete',true))return;
+    const jr=journal();
+    const main=await Store.get(cp('payroll_records/')+key);if(main)await jr.del(cp('payroll_records/')+key,main);
+    const parts=Number(main?.parts||idx.parts||1);for(let i=1;i<parts;i++){const path=cp('payroll_records/')+key+'~'+i;const d=await Store.get(path);if(d)await jr.del(path,d)}
+    await jr.del(cp('payroll_record_index/')+key,idx);
+    const pay=await Store.get(cp('payroll/')+key);if(pay)await jr.del(cp('payroll/')+key,pay);
+    await logAction('DELETE_PAYROLL_RECORD','payroll',key,`Deleted reopened payroll record: ${idx.n===1?'1st':'2nd'} cut-off ${fmtRange(idx.pay_start,idx.pay_end)} (${idx.ym})`,jr);
+    S.ui.recKey=null;S.ui.recData=null;S.ui.recListLoaded=false;S.ui.recList=null;location.hash='records';await loadRecordList();toast('Payroll record deleted. You can now import the correct payroll again.');
+  }catch(e){writeError(e)}
+}
+
 async function loadRecord(key){
   const u=S.ui;u.recLoading=key;u.recErr='';
   try{
     const m=await Store.get(cp('payroll_records/')+key);if(!m)throw new Error('This record was not found.');
     let items=m.items||[];
     for(let i=1;i<(m.parts||1);i++){const p=await Store.get(cp('payroll_records/')+key+'~'+i);if(!p)throw new Error('Part of this record is missing.');items=items.concat(p.items||[])}
-    if(u.recKey===key)u.recData={...m,key,items};
+    let firstItems=null;
+    if(m.n===2&&m.period&&m.period.cuts&&m.period.cuts[0]){try{const f=await fetchRecordItems(m.period.cuts[0].key);if(f&&f.meta.status==='APPROVED')firstItems=f.items}catch(e){}}
+    if(u.recKey===key)u.recData={...m,key,items,firstItems};
   }catch(e){if(u.recKey===key)u.recErr=e.message||String(e)}
   u.recLoading=null;scheduleRender();
 }
@@ -1615,7 +1763,7 @@ function dtrDataFor(n,period,items,company){
 function recSecData(rec,s){
   if(s==='dtr')return recDtrData(rec);
   if(s==='cut')return withRec(rec,()=>sectionData(String(rec.n),payItems(rec.items,String(rec.n))));
-  return withRec(rec,()=>sectionData(s,rec.items));
+  return withRec(rec,()=>sectionData(s,s==='M'?recMonthItems(rec):rec.items));
 }
 function secTable(d){
   const cell=(v,i)=>typeof v==='number'&&i>0?((d.count&&!(d.money||[]).includes(i))?String(v):amt(v)):h(v==null?'':v);
@@ -1677,23 +1825,184 @@ async function savePreviousPayroll(form){
   if(!/^\d{4}-\d{2}$/.test(ym)){toast('Choose the payroll month.',true);return}
   if(!file){toast('Choose the payroll file.',true);return}
   try{
-    let rows=[],headers=[];
+    let rows=[],headers=[],sourceSheet='';
     const ext=file.name.toLowerCase().split('.').pop();
+    let wb;
     if(ext==='csv'){
       const txt=await file.text();
-      const wb=XLSX.read(txt,{type:'string'});const ws=wb.Sheets[wb.SheetNames[0]];const aoa=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
-      if(!aoa.length)throw new Error('The file is empty.');headers=(aoa[0]||[]).map((x,i)=>String(x||`Column ${i+1}`));rows=aoa.slice(1).filter(r=>r.some(v=>String(v??'').trim()!==''));
+      wb=XLSX.read(txt,{type:'string'});
     }else{
-      const buf=await file.arrayBuffer();const wb=XLSX.read(buf,{type:'array',cellDates:true});const ws=wb.Sheets[wb.SheetNames[0]];const aoa=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
-      if(!aoa.length)throw new Error('The first sheet is empty.');headers=(aoa[0]||[]).map((x,i)=>String(x||`Column ${i+1}`));rows=aoa.slice(1).filter(r=>r.some(v=>String(v??'').trim()!==''));
+      const buf=await file.arrayBuffer();
+      wb=XLSX.read(buf,{type:'array',cellDates:true});
     }
-    if(!headers.length||!rows.length)throw new Error('No payroll rows were found under the first row of the file.');
+    if(!wb.SheetNames?.length)throw new Error('The file has no worksheets.');
+
+    // Use the payroll sheet that corresponds to the selected import type.
+    // The uploaded Prime Laundry workbook contains a DTR SUMMARY first sheet,
+    // but the actual monthly payroll is on the "Monthly" sheet.
+    const preferred = String(n)==='M' ? ['Monthly','MONTHLY'] :
+                      Number(n)===1 ? ['1ST Cutoff','1st Cutoff','1ST CUTOFF'] :
+                      ['2nd Cutoff','2ND Cutoff','2nd CUTOFF'];
+    sourceSheet = preferred.find(name=>wb.SheetNames.some(s=>String(s).trim().toLowerCase()===name.toLowerCase()))
+      || wb.SheetNames.find(s=>/monthly/i.test(s))
+      || wb.SheetNames[0];
+    const ws=wb.Sheets[sourceSheet];
+    const aoa=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false});
+    if(!aoa.length)throw new Error(`The selected payroll sheet "${sourceSheet}" is empty.`);
+
+    // Find the real payroll header row by looking for Employee Name plus payroll columns.
+    let headerRow=-1;
+    for(let i=0;i<Math.min(aoa.length,80);i++){
+      const hs=(aoa[i]||[]).map(v=>String(v??'').trim().toLowerCase());
+      if(hs.some(v=>v==='employee name') &&
+         hs.some(v=>v==='department') &&
+         hs.some(v=>v.includes('gross'))){
+        headerRow=i;break;
+      }
+    }
+    if(headerRow<0)throw new Error(`Could not find the payroll header row in "${sourceSheet}".`);
+    headers=(aoa[headerRow]||[]).map((x,i)=>String(x||`Column ${i+1}`));
+    // Header canonicalizer must be declared before it is used for row filtering.
+    // (A const declaration is in the temporal dead zone until initialized.)
+    const canonHeader=v=>String(v??'').trim().toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+    rows=aoa.slice(headerRow+1).filter(r=>r.some(v=>String(v??'').trim()!==''));
+    // Exclude worksheet subtotal/total rows. The Monthly sheet has a final
+    // TOTAL row whose Gross/Net values are already the sum of the employees.
+    // Keeping that row would double the imported totals and make it look like
+    // an extra employee. Only rows with an actual Employee Name are imported.
+    const rawEmployeeNameCol=(headers||[]).findIndex(v=>canonHeader(v)==='employee name');
+    if(rawEmployeeNameCol>=0){
+      rows=rows.filter(r=>{
+        const name=String(r[rawEmployeeNameCol]??'').trim();
+        if(!name)return false;
+        const n=name.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+        return !['total','totals','grand total','total payroll','total earnings','total net earnings'].includes(n);
+      });
+    }
+    if(!headers.length||!rows.length)throw new Error(`No payroll employee rows were found in "${sourceSheet}".`);
+
+    // Historical imports are stored as a compact, Firestore-safe snapshot.
+    // Only payroll fields used by the system are retained; raw worksheet rows
+    // (nested arrays) are never written to Firestore.
+    const aliases={
+      employee_id:['employee id','employee no','employee number','ee no','ee number','id','emp id','staff id'],
+      employee_name:['employee name','employee','staff name','name','full name'],
+      position:['position','job title'],
+      department:['department','dept'],
+      employment_status:['employment status','status'],
+      office:['office','branch','location'],
+      basic:['basic','basic salary','basic pay','regular salary','monthly salary','half salary'],
+      late:['lates','late','late deduction'],
+      absence:['absences','absence','absence deduction'],
+      late_absence:['less late undertime absences','late undertime absences','late absence'],
+      net_of_la:['net of l&a','net of lates and absences'],
+      allowance:['allowances','allowance'],
+      taxable_allowance:['taxable allowance','taxable allowances'],
+      nontaxable_allowance:['non taxable allowance','non taxable allowances','nontaxable allowance','non taxable benefits'],
+      holiday:['holiday','holiday pay','holiday rest day pay','holiday rd pay','holidays'],
+      commission:['commission','commissions'],
+      fold_incentive:['fold incentive','fold incentives'],
+      others:['others','other pay','other earnings'],
+      ot:['ot','overtime','overtime pay'],
+      nd:['nd','night differential','night shift differential'],
+      gross:['gross','gross pay','gross earnings','total gross'],
+      advances:['advances','advance'],
+      coop_savings:['coop savings','cooperative savings','coop'],
+      hmo1:['hmo 1','hmo1'],
+      hmo2:['hmo 2','hmo2'],
+      sss_loan:['sss loan'],
+      hdmf_loan:['hdmf loan','pag ibig loan','pag-ibig loan'],
+      sss:['sss','sss ee','sss employee','sss employee share'],
+      philhealth:['philhealth','philhealth ee','philhealth employee','philhealth employee share','phic'],
+      pagibig:['pag ibig','pag-ibig','hdmf','pagibig','pag ibig ee','pagibig ee','hdmf ee'],
+      withholding_tax:['withholding tax','withholding','tax withheld','bir tax','income tax','1601c'],
+      net:['net earnings','net pay','net salary','net'],
+      days_paid:['days paid','paid days','days'],
+      pay_period:['pay period','payroll period','period']
+    };
+    const findCol=names=>{
+      const hs=headers.map(canonHeader);
+      for(const name of names){
+        const a=canonHeader(name);
+        let i=hs.findIndex(h=>h===a);
+        if(i>=0)return i;
+      }
+      for(const name of names){
+        const a=canonHeader(name);
+        if(!a)continue;
+        const i=hs.findIndex(h=>h.includes(a));
+        if(i>=0)return i;
+      }
+      return -1;
+    };
+    const colMap={};Object.entries(aliases).forEach(([k,names])=>{const i=findCol(names);if(i>=0)colMap[k]=i});
+    const scalar=v=>{
+      if(v===null||v===undefined)return '';
+      if(Array.isArray(v))return v.map(scalar).join(' ').trim();
+      if(v instanceof Date)return v.toISOString();
+      if(typeof v==='object')return String(v.value??v.text??'');
+      return v;
+    };
+    const pick=(r,k)=>Object.prototype.hasOwnProperty.call(colMap,k)?scalar(r[colMap[k]]):'';
+    const normEmpName=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+    const currentByName=new Map(S.employees.map(e=>[normEmpName(empName(e)),e]));
+    const filteredRows=rows.map((r,ri)=>{
+      const o={};
+      for(const k of Object.keys(colMap))o[k]=pick(r,k);
+
+      // If the workbook has separate Lates and Absences, preserve them and
+      // also provide the combined deduction used by the application.
+      if(!o.late_absence && (o.late!=='' || o.absence!=='')){
+        const a=Number(o.late)||0,b=Number(o.absence)||0;
+        o.late_absence=a+b;
+      }
+      if(!o.net_of_la && o.basic!==''){
+        const b=Number(o.basic)||0,la=Number(o.late_absence)||0;
+        o.net_of_la=b-la;
+      }
+
+      const importedName=pick(r,'employee_name');
+      const current=currentByName.get(normEmpName(importedName));
+      if(current){
+        o.matched_employee_id=current.id;
+        o.current_employee_status=current.active===false?'Inactive':'Active';
+        o.resigned=false;
+      }else if(importedName){
+        o.matched_employee_id='';
+        o.current_employee_status='Resigned';
+        o.resigned=true;
+        o.resigned_note='Found in previous payroll but not in current Employee Master';
+      }
+      o.source_row=ri+headerRow+2;
+      return o;
+    }).filter(o=>{
+      const name=String(o.employee_name??'').trim();
+      if(!name)return false;
+      const n=name.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+      return !['total','totals','grand total','total payroll','total earnings','total net earnings'].includes(n);
+    });
+
+    const neededHeaders=Object.keys(colMap);
+    if(!neededHeaders.includes('employee_name'))throw new Error(`The "${sourceSheet}" sheet does not contain an Employee Name column.`);
+    if(!neededHeaders.some(k=>['basic','gross','net'].includes(k)))throw new Error(`The "${sourceSheet}" sheet does not contain a supported payroll amount column.`);
     const id='pp_'+ym+'_'+n+'_'+Date.now().toString(36);
-    const data={id,ym,n,file:file.name,at:nowISO(),by:actor(),headers,rows,source:'previous_payroll_import',row_count:rows.length};
+    const data={
+      id,ym,n,file:file.name,at:nowISO(),by:actor(),
+      sheet:sourceSheet,
+      headers:neededHeaders,
+      rows:filteredRows,
+      source:'previous_payroll_import',
+      row_count:filteredRows.length,
+      source_columns:headers.map(scalar),
+      field_map:colMap
+    };
     const jr=journal();
     await jr.set(cp('previous_payroll/'+id),data,null);
-    await logAction('PREVIOUS_PAYROLL_IMPORT','payroll import',id,`Imported previous payroll: ${prevPayKindLabel(n)}, ${rows.length} rows from ${file.name} (${ym})`,jr);
-    closeDlg();S.ui.prevPayList=null;await loadPreviousPayrollList();toast(`Previous payroll imported exactly as provided · ${rows.length} rows`);
+    await logAction('PREVIOUS_PAYROLL_IMPORT','payroll import',id,
+      `Imported previous payroll: ${prevPayKindLabel(n)}, ${filteredRows.length} employees from ${file.name} · sheet "${sourceSheet}" (${ym})`,jr);
+    closeDlg();S.ui.prevPayList=null;S.ui.prevPayOpen=null;S.ui.prevPayData=null;
+    await loadPreviousPayrollList();
+    toast(`Previous payroll imported · ${filteredRows.length} employees · ${sourceSheet} sheet`);
   }catch(e){toast('Could not import previous payroll: '+(e.message||e),true)}
 }
 async function deletePreviousPayroll(id){
@@ -1714,13 +2023,118 @@ async function loadPreviousPayrollList(){
   try{const rows=await Store.getAll(cp('previous_payroll'));u.prevPayList=rows.map(([id,d])=>({...d,id})).sort((a,b)=>String(b.at).localeCompare(String(a.at)))}catch(e){u.prevPayList=[];u.prevPayErr=e.message||String(e)}
   u.prevPayLoading=false;scheduleRender();
 }
-async function previousPayrollView(){
-  const u=S.ui,id=u.prevPayOpen;let d=u.prevPayData&&u.prevPayData.id===id?u.prevPayData:null;
-  if(!d&&!u.prevPayLoading){u.prevPayLoading=true;try{d=await Store.get(cp('previous_payroll/'+id));u.prevPayData=d;u.prevPayLoading=false;scheduleRender()}catch(e){u.prevPayLoading=false;u.prevPayErr=e.message||String(e);scheduleRender()}}
+/* Imported (previous) payroll shown in the same layout as the Monthly tab of Payroll: every column on one table, with totals. Values are the imported ones, never recalculated. */
+function prevPayMonthly(d){
+  const R=d.rows||[];
+  const v=(r,k)=>parseMoney(r[k]);
+  const ab=(r,k)=>Math.abs(parseMoney(r[k]));
+  const has=k=>R.some(r=>v(r,k)!==0);
+  const split=R.some(r=>(r.late!==undefined&&r.late!=='')||(r.absence!==undefined&&r.absence!==''));
+  const explicitNla=(d.headers||[]).some(x=>/net\s*of\s*l/i.test(String(x)));
+  const laOf=r=>split?ab(r,'late')+ab(r,'absence'):ab(r,'late_absence');
+  const cols=[
+    ['basic','Basic salary',r=>v(r,'basic')],
+    ['late',split?'Late / UT':'Late / UT / absences',r=>split?ab(r,'late'):ab(r,'late_absence'),1]
+  ];
+  if(split)cols.push(['absence','Absences',r=>ab(r,'absence'),1]);
+  cols.push(
+    ['nla','Net of L&A',r=>explicitNla&&r.net_of_la!==undefined&&r.net_of_la!==''?v(r,'net_of_la'):r2(v(r,'basic')-laOf(r))],
+    ['allow','Allowance',r=>{const tn=v(r,'taxable_allowance')+v(r,'nontaxable_allowance');return tn!==0?tn:v(r,'allowance')}],
+    ['hol','Holiday / RD',r=>v(r,'holiday')]
+  );
+  [['commission','Commission'],['fold_incentive','Fold incentive'],['others','Other earnings']].forEach(([k,l])=>{if(has(k))cols.push([k,l,r=>v(r,k)])});
+  cols.push(['ot','Overtime',r=>v(r,'ot')],['nd','Night diff',r=>v(r,'nd')],['gross','Gross',r=>v(r,'gross')],
+    ['advances','Company advances',r=>ab(r,'advances'),1],['coop_savings','Coop savings',r=>ab(r,'coop_savings'),1]);
+  [['hmo1','HMO 1'],['hmo2','HMO 2'],['sss_loan','SSS loan'],['hdmf_loan','Pag-IBIG loan']].forEach(([k,l])=>{if(has(k))cols.push([k,l,r=>ab(r,k),1])});
+  cols.push(['sss','SSS',r=>ab(r,'sss'),1],['philhealth','PhilHealth',r=>ab(r,'philhealth'),1],['pagibig','Pag-IBIG',r=>ab(r,'pagibig'),1],['withholding_tax','W/tax',r=>ab(r,'withholding_tax'),1],
+    ['net','Net pay',r=>v(r,'net')]);
+  const tot={};for(const r of R)for(const c of cols)tot[c[0]]=r2((tot[c[0]]||0)+c[2](r));
+  const body=R.map(r=>`<tr><td class="num">${h(r.employee_id||r.matched_employee_id||'')}</td><td class="stick"><b>${h(r.employee_name||'')}</b>${r.resigned?' <span class="chip warn" title="Not in the current Employee Master">Resigned</span>':''}</td><td>${h(r.department||'')}</td>${cols.map(c=>{const x=c[2](r);return `<td class="n">${c[0]==='net'?'<b>'+amt(x)+'</b>':(c[3]?neg(x):amt(x))}</td>`}).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length+3}" class="muted">No employees in this import.</td></tr>`;
+  const core=r2((tot.advances||0)+(tot.coop_savings||0)+(tot.hmo1||0)+(tot.hmo2||0)+(tot.sss_loan||0)+(tot.hdmf_loan||0)+(tot.sss||0)+(tot.philhealth||0)+(tot.pagibig||0));
+  const taxNote=(tot.withholding_tax||0)!==0&&Math.abs(r2((tot.gross||0)-core-(tot.net||0)))<1
+    ?'<p class="muted small" style="margin-top:8px"><b>Note:</b> W/tax is shown as imported. In this file the imported Net pay does not subtract the withholding tax (1601C), so Net pay is kept exactly as imported.</p>':'';
+  const laNote=split?'':'<p class="muted small" style="margin-top:8px">The imported file has one combined column for late, undertime and absences, so it is shown under “Late / UT / absences”.</p>';
+  const html=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Dept</th>${cols.map(c=>`<th class="n">${h(c[1])}</th>`).join('')}</tr></thead><tbody>${body}</tbody><tfoot><tr><td></td><td class="stick">Total</td><td></td>${cols.map(c=>`<td class="n">${amt(tot[c[0]])}</td>`).join('')}</tr></tfoot></table></div>${taxNote}${laNote}<p class="muted small" style="margin-top:8px">Amounts are displayed as imported and are not recalculated by current payroll settings.</p>`;
+  return {html,cols,tot};
+}
+
+function previousPayrollView(){
+  const u=S.ui,id=u.prevPayOpen;
+  let d=u.prevPayData&&u.prevPayData.id===id?u.prevPayData:null;
+  if(!d&&!u.prevPayLoading){
+    u.prevPayLoading=true;
+    u.prevPayErr='';
+    Store.get(cp('previous_payroll/'+id)).then(data=>{
+      u.prevPayData=data;
+      u.prevPayLoading=false;
+      scheduleRender();
+    }).catch(e=>{
+      u.prevPayLoading=false;
+      u.prevPayErr=e.message||String(e);
+      scheduleRender();
+    });
+  }
   if(u.prevPayLoading&&!d)return `<div class="row"><button class="btn sm" data-act="prevPayBack">← Previous payroll imports</button></div><div class="loading">Loading imported payroll…</div>`;
   if(!d)return `<div class="row"><button class="btn sm" data-act="prevPayBack">← Previous payroll imports</button></div><div class="banner bad">${h(u.prevPayErr||'Imported payroll not found.')}</div>`;
-  const H=d.headers||[],R=d.rows||[];
-  return `<div class="row"><button class="btn sm" data-act="prevPayBack">← Previous payroll imports</button><div><h1>${h(fmtMonth(d.ym))} · ${prevPayKindLabel(d.n)}</h1><p class="sub">${h(d.file||'Imported payroll')} · ${R.length} rows · imported ${h(fmtStamp(d.at))} by ${h(personName(d.by))}</p></div><span class="spacer"></span></div><div class="banner info"><b>Historical snapshot — as imported.</b> These values are displayed directly from the uploaded file. The system does not recalculate or overwrite them using current payroll settings.</div><div class="tablewrap" data-noresp><table><thead><tr>${H.map(x=>`<th>${h(x)}</th>`).join('')}</tr></thead><tbody>${R.map(r=>`<tr>${H.map((_,i)=>`<td>${h(r[i]??'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+  const R=d.rows||[], kind=prevPayKindLabel(d.n), resignedCount=R.filter(r=>r.resigned).length;
+  const num=k=>R.reduce((a,r)=>a+parseMoney(r[k]),0);
+  const totalGross=num('gross'), totalNet=num('net'), totalSSS=num('sss'), totalPH=num('philhealth'), totalPI=num('pagibig'), totalTax=num('withholding_tax');
+  const totalAdvances=num('advances'), totalCoop=num('coop_savings'), totalSssLoan=num('sss_loan'), totalHdmfLoan=num('hdmf_loan');
+  const totalHmo1=num('hmo1'), totalHmo2=num('hmo2');
+  // The imported workbook's NET Earnings formula subtracts columns T:AB
+  // (advances through HDMF), but does NOT subtract 1601C/withholding tax in AC.
+  // Keep the historical imported net exactly as issued and make the summary
+  // reconcile to Gross - Net instead of silently treating 1601C as a cash deduction.
+  const totalDed= r2(totalGross-totalNet);
+  const totalCoreDed=r2(totalAdvances+totalCoop+totalHmo1+totalHmo2+totalSssLoan+totalHdmfLoan+totalSSS+totalPH+totalPI);
+  const sec=u.prevPaySec||'monthly';
+  const secs=['monthly','summary','earnings','deductions','employees'];
+  const labels={monthly:'Payroll table',summary:'Payroll summary',earnings:'Earnings',deductions:'Contributions & tax',employees:'Employees'};
+  const tabHtml=`<div class="seg" role="tablist" style="margin-bottom:14px">${secs.map(x=>`<button role="tab" data-act="prevPaySec" data-v="${x}" aria-pressed="${x===sec}">${labels[x]}</button>`).join('')}</div>`;
+
+  const employeeTable=(rows,cols)=>`<div class="tablewrap"><table><thead><tr>${cols.map(c=>`<th${c.n?' class="n"':''}>${h(c.t)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map((v,i)=>`<td${cols[i].n?' class="n"':''}>${h(v??'')}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}" class="muted">No employees in this section.</td></tr>`}</tbody></table></div>`;
+  let body='';
+  if(sec==='monthly'){
+    body=prevPayMonthly(d).html;
+  }else if(sec==='summary'){
+    const rows=R.map(r=>[r.employee_id||r.matched_employee_id||'',r.employee_name||'',r.department||'',amt(r.gross),amt(r.net),r.resigned?'Resigned':'Current']);
+    const totalLoans=r2(totalSssLoan+totalHdmfLoan), totalContrib=r2(totalSSS+totalPH+totalPI);
+    const totalDeductionsFromNet=r2(totalGross-totalNet);
+    const totalMappedNetDeductions=r2(totalAdvances+totalCoop+totalHmo1+totalHmo2+totalSssLoan+totalHdmfLoan+totalSSS+totalPH+totalPI);
+    const deductionRows=[
+      ['Company advances',totalAdvances],
+      ['Coop savings',totalCoop],
+      ['SSS loan',totalSssLoan],
+      ['Pag-IBIG loan',totalHdmfLoan],
+      ['HMO 1',totalHmo1],
+      ['HMO 2',totalHmo2],
+      ['SSS contribution',totalSSS],
+      ['PhilHealth contribution',totalPH],
+      ['Pag-IBIG contribution',totalPI]
+    ];
+    body=`<div class="panel"><div class="rec-sec"><div class="rec-head">${coLogo()}<div><div><b>${h(curCo().name||'Prime Laundry')}</b></div><div class="muted small">Historical payroll summary · ${h(kind)}</div><div class="muted small">${h(fmtMonth(d.ym))} · imported as historical reference</div></div></div>
+      <div class="panel" style="margin:14px 0 16px"><h3 style="margin-top:0">Deduction breakdown</h3><p class="muted small" style="margin-top:0">These amounts are taken from the imported payroll snapshot. The summary does not recalculate the imported payroll.</p>
+        <div class="tablewrap"><table><thead><tr><th>Deduction from Net Earnings</th><th class="n">Amount</th></tr></thead><tbody>${deductionRows.map(([label,value])=>`<tr><td>${h(label)}</td><td class="n">${amt(value)}</td></tr>`).join('')}<tr><th>Total deductions from Net Earnings</th><th class="n">${amt(totalDeductionsFromNet)}</th></tr></tbody></table></div>
+        <div class="panel" style="margin:12px 0 0;background:#fff7e6"><b>Withholding tax (1601C)</b><div class="muted small" style="margin-top:4px">${amt(totalTax)}. This is shown separately because the imported workbook's <b>NET Earnings</b> formula does not subtract the 1601C column. The historical Net Earnings above is therefore preserved exactly as imported.</div></div>
+        <div class="muted small" style="margin-top:8px">Mapped deductions from the imported workbook: ${peso(totalMappedNetDeductions)}. Gross − Net Earnings: ${peso(totalDeductionsFromNet)}. These should reconcile for the imported payroll; any remaining difference indicates an unmapped deduction/adjustment column in the source file.</div>
+      </div>
+      ${employeeTable(rows,[{t:'ID'},{t:'Employee'},{t:'Department'},{t:'Gross',n:true},{t:'Net pay',n:true},{t:'Status'}])}</div>`;
+  }else if(sec==='earnings'){
+    const rows=R.map(r=>[r.employee_name||'',amt(r.basic),amt(r.late_absence),amt(r.holiday),amt(r.ot),amt(r.nd),amt(r.taxable_allowance),amt(r.nontaxable_allowance),amt(r.gross)]);
+    body=`<div class="panel"><div class="rec-sec"><div class="rec-head">${coLogo()}<div><div><b>${h(curCo().name||'Prime Laundry')}</b></div><div class="muted small">Earnings · ${h(kind)} · ${h(fmtMonth(d.ym))}</div><div class="muted small">Values are displayed exactly from the imported payroll snapshot.</div></div></div>${employeeTable(rows,[{t:'Employee'},{t:'Basic salary',n:true},{t:'Late / absence',n:true},{t:'Holiday / RD pay',n:true},{t:'Overtime',n:true},{t:'Night differential',n:true},{t:'Taxable allowance',n:true},{t:'Non-taxable allowance',n:true},{t:'Gross pay',n:true}])}</div>`;
+  }else if(sec==='deductions'){
+    const rows=R.map(r=>[r.employee_name||'',amt(r.sss),amt(r.philhealth),amt(r.pagibig),amt(r.withholding_tax),amt(r.net)]);
+    body=`<div class="panel"><div class="rec-sec"><div class="rec-head">${coLogo()}<div><div><b>${h(curCo().name||'Prime Laundry')}</b></div><div class="muted small">Contributions & tax · ${h(kind)} · ${h(fmtMonth(d.ym))}</div><div class="muted small">Historical deductions and withholding tax are not recalculated.</div></div></div>${employeeTable(rows,[{t:'Employee'},{t:'SSS EE',n:true},{t:'PhilHealth EE',n:true},{t:'Pag-IBIG EE',n:true},{t:'Withholding tax',n:true},{t:'Net pay',n:true}])}</div>`;
+  }else{
+    const rows=R.map(r=>[r.employee_id||'',r.employee_name||'',r.department||'',r.resigned?'Resigned':'Current employee',r.resigned_note||'']);
+    body=`<div class="panel"><div class="rec-sec"><div class="rec-head">${coLogo()}<div><div><b>${h(curCo().name||'Prime Laundry')}</b></div><div class="muted small">Employee list · ${h(kind)} · ${h(fmtMonth(d.ym))}</div><div class="muted small">Employee matching is based on employee name, not imported Employee ID.</div></div></div>${employeeTable(rows,[{t:'Imported ID'},{t:'Employee'},{t:'Department'},{t:'Current status'},{t:'Status note'}])}</div>`;
+  }
+  return `<div class="row"><button class="btn sm" data-act="prevPayBack">← Previous payroll imports</button><div><h1>${h(fmtMonth(d.ym))} · ${kind}</h1><p class="sub">${h(d.file||'Imported payroll')} · ${R.length} employees · imported ${h(fmtStamp(d.at))} by ${h(personName(d.by))}</p></div><span class="spacer"></span><button class="btn" data-act="prevPayPrint">Print</button>${can('editPayroll')&&!S.readOnly?`<button class="btn danger" data-act="prevPayDelete" data-id="${h(d.id)}">Delete import</button>`:''}</div>
+  <div class="banner info"><b>Historical payroll record</b> · This view uses the same record-style layout as Payroll records. Imported amounts remain exactly as imported and are not recalculated by current payroll settings.</div>
+  ${resignedCount?`<div class="banner warn"><b>${resignedCount}</b> employee${resignedCount===1?'':'s'} from this payroll are not in the current Employee Master and are marked <b>Resigned</b>.</div>`:''}
+  <div class="stats"><div class="stat"><b>${R.length}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(totalGross)}</b><span>Gross pay</span></div><div class="stat"><b>${peso(totalDed)}</b><span>Total deductions</span></div><div class="stat hl"><b class="money">${peso(totalNet)}</b><span>Net pay</span></div></div>
+  ${tabHtml}${body}`;
 }
 
 function recordView(){
@@ -1730,11 +2144,11 @@ function recordView(){
   if(u.recErr)return html+`<div class="banner bad">${h(u.recErr)}</div>`;
   if(!rec)return html+'<div class="loading">Loading the record…</div>';
   const c=rec.period.cuts[rec.n-1],secs=recSecList(rec),sec=secs.includes(u.recSec)?u.recSec:'dtr';
-  html+=`<div class="row" style="margin-top:8px"><div><h1>${h(fmtMonth(rec.ym))} · ${rec.n===1?'1st':'2nd'} cut-off</h1><p class="sub">Payroll ${h(fmtRange(c.payStart,c.payEnd))} · attendance ${h(fmtRange(c.start,c.end))} · approved by ${h(personName(rec.approved_by))} on ${h(fmtStamp(rec.approved_at))}</p></div><span class="spacer"></span><button class="btn" data-act="recPrint">Print this section</button><button class="btn" data-act="recExport">Export Excel</button></div>`;
+  html+=`<div class="row" style="margin-top:8px"><div><h1>${h(fmtMonth(rec.ym))} · ${rec.n===1?'1st':'2nd'} cut-off</h1><p class="sub">Payroll ${h(fmtRange(c.payStart,c.payEnd))} · attendance ${h(fmtRange(c.start,c.end))} · approved by ${h(personName(rec.approved_by))} on ${h(fmtStamp(rec.approved_at))}</p></div><span class="spacer"></span><button class="btn" data-act="recPrint">Print this section</button><button class="btn" data-act="recExport">Export Excel</button>${role()==='ADMIN'&&!S.readOnly&&!S.viewAs?(rec.status==='REOPENED'?`<button class="btn danger" data-act="recDelete" data-key="${h(key)}">Delete payroll record</button>`:`<button class="btn" data-act="recReopen" data-key="${h(key)}">Reopen payroll</button>`):''}</div>`;
   if(rec.status!=='REOPENED')html+=releaseBanner((u.recRel||{})[key],key,rec.n,c.payStart,c.payEnd,can('approvePayroll')&&!S.readOnly);
   if(rec.status==='REOPENED')html+=`<div class="banner warn">This cut-off was reopened by ${h(personName(rec.reopened_by))} on ${h(fmtStamp(rec.reopened_at))}. The record below is the payroll as it was approved; it is replaced when the cut-off is approved again.</div>`;
   const t=rec.totals||{};
-  html+=`<div class="stats"><div class="stat"><b>${t.employees||0}</b><span>Employees paid</span></div><div class="stat"><b class="money">${peso(t.gross)}</b><span>Gross pay</span></div><div class="stat hl"><b class="money">${peso(t.net)}</b><span>Net pay</span></div>${rec.month?`<div class="stat"><b class="money">${peso(rec.month.net)}</b><span>Net pay for the month</span></div>`:''}</div>`;
+  html+=`<div class="stats"><div class="stat"><b>${t.employees||0}</b><span>Employees paid</span></div><div class="stat"><b class="money">${peso(t.gross)}</b><span>Gross pay</span></div><div class="stat hl"><b class="money">${peso(t.net)}</b><span>Net pay</span></div>${rec.month?`<div class="stat"><b class="money">${peso(rec.firstItems?r2(recMonthItems(rec).reduce((a,x)=>a+(x.mo.net||0),0)):rec.month.net)}</b><span>Net pay for the month</span></div>`:''}</div>`;
   html+=`<div class="seg" role="tablist" style="margin-bottom:14px">${secs.map(s=>`<button role="tab" data-act="recSec" data-v="${s}" aria-pressed="${s===sec}">${h(recSecLabel(rec,s))}</button>`).join('')}</div>`;
   if(sec==='slips'){
     const L=recSlipItems(rec);
@@ -1742,7 +2156,7 @@ function recordView(){
     <div class="tablewrap"><table><thead><tr><th>ID</th><th>Employee</th><th>Department</th><th class="n">Gross</th><th class="n">Deductions</th><th class="n">Net pay</th></tr></thead><tbody>
     ${L.map(x=>{const r=rec.n===1?x.k1:x.k2;return`<tr class="click" data-act="recSlip" data-id="${x.e.id}"><td class="num">${x.e.id}</td><td><b>${h(empName(x.e))}</b></td><td>${h(x.e.department)}</td><td class="n">${amt(r.gross)}</td><td class="n">${amt(r.ded)}</td><td class="n"><b>${amt(r.net)}</b></td></tr>`}).join('')}
     </tbody></table></div><p class="muted small">Tap an employee to see the payslip.</p></div>`;
-  } else html+=`<div class="panel">${secTable(recSecData(rec,sec))}</div>`;
+  } else html+=`<div class="panel">${sec==='M'?`<p class="muted small" style="margin:0 0 8px">${rec.firstItems?'Monthly is the approved 1st cut-off record plus this approved 2nd cut-off record, each exactly as approved, so adjustments are counted once.':'The approved 1st cut-off record was not found, so these monthly figures are the ones saved with this record.'}</p>`:''}${secTable(recSecData(rec,sec))}</div>`;
   return html;
 }
 
@@ -2211,7 +2625,7 @@ async function clearDeadline(key){
 /* Admin: today's changes */
 function dashToday(){
   const t=todayISO(),ents=S.auditToday.filter(x=>{const d=new Date(x.at);return iso(d.getFullYear(),d.getMonth()+1,d.getDate())===t}).reverse();
-  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY','DELETE_ATTENDANCE']],['Previous payroll imports',['PREVIOUS_PAYROLL_IMPORT','DELETE_PREVIOUS_PAYROLL']],['Undone changes',['UNDO']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','ADVANCES','ADJUSTMENT','RELEASE','UNRELEASE']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
+  const groups=[['Departments',['ADD_DEPARTMENT','REMOVE_DEPARTMENT']],['Attendance imports & entries',['IMPORT','MANUAL_ENTRY','DELETE_ATTENDANCE']],['Previous payroll imports',['PREVIOUS_PAYROLL_IMPORT','DELETE_PREVIOUS_PAYROLL']],['Undone changes',['UNDO']],['Reviews & approvals',['REVIEW','BULK_APPROVE']],['Time corrections',['CORRECT']],['Payroll approvals & advances',['APPROVE','REOPEN','DELETE_PAYROLL_RECORD','ADVANCES','ADJUSTMENT','RELEASE','UNRELEASE']],['Employees & settings',['CREATE','UPDATE']],['Accounts & access',['CREATE_USER','UPDATE_USER','DELETE_USER','RESTORE_USER','CHANGE_EMAIL','CHANGE_PASSWORD']],['Deadlines',['SET_DEADLINE','CLEAR_DEADLINE']],['Sign-ins',['LOGIN','LOGOUT']]];
   const counts=groups.map(([l,a])=>[l,ents.filter(x=>a.includes(x.action)).length]).filter(x=>x[1]);
   const shown=ents.filter(x=>x.action!=='LOGIN'&&x.action!=='LOGOUT').slice(0,8);
   return `<div class="panel"><div class="row"><h2 style="margin:0">Today’s changes</h2><span class="muted small">${h(fmtDY(t))}</span><span class="spacer"></span><a class="btn sm" href="#audit">Open activity log</a></div>
@@ -4042,6 +4456,7 @@ function sectionCols(tab,items){
   return[...base,...gov,['net1','1st cut-off'],['net2','2nd cut-off'],['net','Net pay']];
 }
 function pagePayroll(){
+  loadApprovedMonth();
   const tab=S.ui.payTab||'1', all=computePayroll(), items=payItems(all,tab), P=S.period;
   let html=`<div class="row">${coLogo('lg')}<div><h1>Payroll · ${h(fmtMonth(P.ym))}</h1><p class="sub">Paid every 15th and 30th/31st. Tap an employee for the payslip.</p></div><span class="spacer"></span><button class="btn" data-act="exportXlsx">Export Excel</button><button class="btn" data-act="exportAll" title="One workbook with all four sections">Export all sections</button><button class="btn" data-act="printPayroll" title="Print this section with the company logo">Print payroll</button>${tab!=='BIR'?'<button class="btn" data-act="printAllSlips" title="Every payslip in this tab, one per page">Print all payslips</button>':''}</div>
   <div class="seg" role="tablist" style="margin-bottom:14px">${TABS.map(([k,l])=>`<button role="tab" data-act="payTab" data-v="${k}" aria-pressed="${tab===k}">${l}</button>`).join('')}</div>`;
@@ -4059,7 +4474,7 @@ function pagePayroll(){
     const ri=S.recIdx&&S.recIdx[cutN];
     html+=appr?`<div class="banner ok">Approved by ${h(personName(d.approved_by))} on ${h(fmtStamp(d.approved_at))}. Attendance, adjustments and company advances for this cut-off are locked.<span class="spacer"></span>${ri&&ri.status==='APPROVED'?`<button class="btn sm" data-act="recGo" data-key="${h(c.key)}">View in Payroll records</button>`:(canAp?`<button class="btn sm" data-act="recSave" data-n="${cutN}">Save to Payroll records</button>`:'')}</div>`:'';
     html+=appr?releaseBanner(S.rel[cutN],c.key,c.n,c.payStart,c.payEnd,canAp):'';
-  } else html+=`<div class="banner info">Monthly view: both cut-offs together · payroll ${h(fmtRange(P.cuts[0].payStart,P.cuts[1].payEnd))} · attendance ${h(fmtRange(P.start,P.end))}.</div>`;
+  } else html+=`<div class="banner info">Monthly view: both cut-offs together · payroll ${h(fmtRange(P.cuts[0].payStart,P.cuts[1].payEnd))} · attendance ${h(fmtRange(P.start,P.end))}.${S.apprMonth&&S.apprMonth.sig&&S.apprMonth.sig===apprMonthSig()?' Amounts are the approved 1st cut-off record plus the approved 2nd cut-off record, so adjustments are counted once.':''}</div>`;
   const tk=x=>tab==='1'?x.k1.t:(tab==='2'?x.k2.t:x.t);
   const noRate=items.filter(x=>!x.hasRate).length, pendOt=items.reduce((a,x)=>a+tk(x).pendingOt,0), chk=items.reduce((a,x)=>a+tk(x).chk,0), review=items.reduce((a,x)=>a+tk(x).review,0);
   const missing=items.reduce((a,x)=>a+(tab==='1'?x.k1.missing:tab==='2'?x.k2.missing:x.missing),0), noRec=items.reduce((a,x)=>a+(tk(x).noRec||0),0);
@@ -4363,13 +4778,16 @@ function govBasisPanel(dis){
   const p=pick?pick.birRow.parts:null;
   const row=([k,l,d])=>`<tr><td><b>${h(l)}</b>${d?`<div class="muted small">${h(d)}</div>`:''}</td><td class="n">${p?(k==='less'?neg(-p[k]):amt(p[k])):'—'}</td>
     ${GOV_GROUPS.map(([g])=>`<td style="text-align:center"><input type="checkbox" data-basis="${g}" data-k="${k}" name="b_${g}_${k}" ${govKeys(g).includes(k)?'checked':''} ${dis} aria-label="${h(l)} in ${g} basis"></td>`).join('')}</tr>`;
-  const tot=g=>p?amt(govBasisOf(g,p)):'—';
+  const bx=pick?pick.birRow:null;
+  const lessRow=([l,d,v])=>`<tr><td><b>Less: ${h(l)}</b><div class="muted small">${h(d)} Always deducted for withholding tax.</div></td><td class="n">${bx?neg(v):'—'}</td><td></td><td></td><td></td><td style="text-align:center"><input type="checkbox" checked disabled aria-label="${h(l)} deducted for withholding tax"></td></tr>`;
+  const lessRows=[['SSS','Employee share of SSS (including MPF).',bx?r2(bx.sssEe+bx.mpfEe):0],['PhilHealth','Employee share of PhilHealth.',bx?bx.phicEe:0],['Pag-IBIG','Employee share of Pag-IBIG.',bx?bx.hdmfEe:0]];
+  const tot=g=>p?amt(g==='tax'?Math.max(0,r2(govBasisOf(g,p)-bx.contribEe)):govBasisOf(g,p)):'—';
   return `<h2 style="margin-top:18px">Basis of government contributions</h2>
-  <p class="muted small">Tick which parts of the gross earnings are counted for each contribution. The amounts show one employee’s earnings for ${h(fmtMonth(S.period.ym))}${pick?'':' (no payroll computed yet)'}; the bottom row is the basis that results.</p>
+  <p class="muted small">Tick which parts of the gross earnings are counted for each contribution. The amounts show one employee’s earnings for ${h(fmtMonth(S.period.ym))}${pick?'':' (no payroll computed yet)'}; the bottom row is the basis that results. For withholding tax the employee’s SSS, PhilHealth and Pag-IBIG are deducted first, so its basis is the taxable compensation net of contributions.</p>
   ${withPay.length?`<label class="f" style="max-width:340px">Sample employee<select data-change="basisEmp">${withPay.map(x=>`<option value="${x.e.id}" ${x===pick?'selected':''}>${h(empName(x.e))}</option>`).join('')}</select></label>`:''}
   <div class="tablewrap" data-noresp style="margin-top:10px"><table id="basisTbl"><thead><tr><th>Gross earnings</th><th class="n">Amount</th>${GOV_GROUPS.map(([,l])=>`<th style="text-align:center">${h(l)}</th>`).join('')}</tr></thead>
-  <tbody>${GOV_ITEMS.map(row).join('')}</tbody>
-  <tfoot><tr><td><b>Basis</b></td><td class="n">${p?amt(pick.birRow.gross):'—'} <span class="muted small">gross</span></td>${GOV_GROUPS.map(([g])=>`<td style="text-align:center" data-basis-total="${g}"><b>${tot(g)}</b></td>`).join('')}</tr></tfoot></table></div>
+  <tbody>${GOV_ITEMS.map(row).join('')}${lessRows.map(lessRow).join('')}</tbody>
+  <tfoot><tr><td><b>Basis</b><div class="muted small">Withholding tax column is net of employee contributions${bx&&bx.mwe?' (this employee is a minimum wage earner, so tax-exempt)':''}.</div></td><td class="n">${p?amt(pick.birRow.gross):'—'} <span class="muted small">gross</span></td>${GOV_GROUPS.map(([g])=>`<td style="text-align:center" data-basis-total="${g}"><b>${tot(g)}</b></td>`).join('')}</tr></tfoot></table></div>
   <div class="grid" style="margin-top:10px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
     <label class="f">Pag-IBIG amount<select name="hdmf_mode" ${dis}><option value="fixed" ${S.settings.hdmf_mode!=='percent'?'selected':''}>Fixed amounts (Pag-IBIG employee / employer below)</option><option value="percent" ${S.settings.hdmf_mode==='percent'?'selected':''}>2% of the Pag-IBIG basis (1% employee if ₱1,500 or less)</option></select></label>
     <label class="f">Pag-IBIG maximum fund salary (₱)<input name="hdmf_max_salary" type="number" step="0.01" min="0" value="${h(S.settings.hdmf_max_salary??10000)}" ${dis}></label>
@@ -4380,7 +4798,7 @@ function basisPreview(){
   const tbl=$('#basisTbl');if(!tbl)return;
   const items=computePayroll(),x=items.find(i=>String(i.e.id)===String(S.ui.basisEmp))||items.find(i=>i.birRow&&i.birRow.gross>0);if(!x)return;
   const p=x.birRow.parts;
-  for(const[g]of GOV_GROUPS){const keys=[...tbl.querySelectorAll(`input[data-basis="${g}"]:checked`)].map(i=>i.dataset.k);const v=Math.max(0,r2(keys.reduce((a,k)=>a+(Number(p[k])||0),0)));const c=tbl.querySelector(`[data-basis-total="${g}"]`);if(c)c.innerHTML=`<b>${amt(v)}</b>`}
+  for(const[g]of GOV_GROUPS){const keys=[...tbl.querySelectorAll(`input[data-basis="${g}"]:checked`)].map(i=>i.dataset.k);let v=Math.max(0,r2(keys.reduce((a,k)=>a+(Number(p[k])||0),0)));if(g==='tax')v=Math.max(0,r2(v-(x.birRow.contribEe||0)));const c=tbl.querySelector(`[data-basis-total="${g}"]`);if(c)c.innerHTML=`<b>${amt(v)}</b>`}
 }
 async function saveSettings(form){
   const fd=new FormData(form),next={...S.settings};
@@ -4786,9 +5204,13 @@ const actions={
   thirteenthRefresh(){S.ui.thirteenthData=null;loadThirteenth()},
   thirteenthRelease(el){thirteenthReleaseDialog(el.dataset.id)},
   prevPayImport(){previousPayrollDialog()},
-  prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';render()},
+  prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
+  prevPaySec(el){S.ui.prevPaySec=el.dataset.v||'monthly';scheduleRender()},
+  prevPayPrint(){const d=S.ui.prevPayData;if(!d)return;printHtml(`<div class="rec-sec"><div class="rec-head">${coLogo()}<div><div><b>${h(curCo().name||'Prime Laundry')}</b></div><div class="muted small">Historical payroll · ${h(prevPayKindLabel(d.n))} · ${h(fmtMonth(d.ym))}</div><div class="muted small">Imported as historical reference · not recalculated</div></div></div>${prevPayMonthly(d).html}</div>`,true)},
   prevPayDelete(el){deletePreviousPayroll(el.dataset.id)},
-  prevPayBack(){S.ui.prevPayOpen=null;S.ui.prevPayData=null;S.ui.prevPayErr='';render()},
+  recReopen(el){reopenPayrollRecord(el.dataset.key)},
+  recDelete(el){deletePayrollRecord(el.dataset.key)},
+  prevPayBack(){S.ui.prevPayOpen=null;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
   advTab(el){S.ui.advTab=el.dataset.v;S.ui.advForm=false;S.ui.loanForm=false;S.ui.loanEdit=null;scheduleRender()},
   coopCut(el){S.ui.coopCut=Number(el.dataset.v);scheduleRender()},
   coopDel(el){coopRemove(el.dataset.id)},
@@ -4968,7 +5390,7 @@ let unsubDtr=null,unsubPay=[],unsubAudit=null;
 function onSubErr(e){console.warn('subscription',e);if(errCode(e)==='revoked'){toast('Access to this data was removed.',true)}}
 function watchPeriod(){
   if(unsubDtr)unsubDtr();for(const u of unsubPay)try{u()}catch(e){}unsubPay=[];
-  S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.adj={};S.fold={};S.rel={};S.coop={};S.dsum={};S.edits={};S.recIdx={};
+  S.apprMonth=null;S.ready.dtr=false;S.dtr=[];S.payDocs={};S.adv={};S.adj={};S.fold={};S.rel={};S.coop={};S.dsum={};S.edits={};S.recIdx={};
   unsubDtr=Store.watchCollection(cp('dtr'),[['work_date','>=',S.period.start],['work_date','<=',S.period.end]],rows=>{S.dtr=rows;S.ready.dtr=true;scheduleRender()},onSubErr);
   for(const c of S.period.cuts){
     unsubPay.push(Store.watchDoc(cp('payroll/')+c.key,d=>{S.payDocs[c.n]=d;scheduleRender()},onSubErr));
