@@ -472,7 +472,7 @@ const CAN={
   viewEmployees:['ADMIN','HR','PAYROLL'], editEmployees:['ADMIN','HR'], importDtr:['ADMIN','HR'],
   viewDtr:['ADMIN','HR','PAYROLL','DEPT_HEAD'], editTimes:['ADMIN','HR'], approveDtr:['ADMIN','HR','DEPT_HEAD'],
   viewPayroll:['ADMIN','HR','PAYROLL'], approvePayroll:['ADMIN','PAYROLL'], editAdvances:['ADMIN','HR'], editAdjustments:['ADMIN','HR','PAYROLL'], editFold:['ADMIN','HR','PAYROLL'], editPayroll:['ADMIN','PAYROLL'], setDeadline:['ADMIN'], audit:['ADMIN','HR'],
-  settings:['ADMIN','HR'], access:['ADMIN'], notes:['ADMIN','PAYROLL']
+  settings:['ADMIN','HR'], access:['ADMIN'], reminders:['ADMIN','PAYROLL']
 };
 /* Features the admin can switch on or off per role, or per person. "access" (User accounts) stays Admin-only. */
 const PERMS=[
@@ -481,7 +481,7 @@ const PERMS=[
   ['viewEmployees','View employees and salary rates','Employees'],['editEmployees','Add and edit employees','Employees',['viewEmployees']],
   ['viewPayroll','View payroll and payslips, export to Excel','Payroll'],['approvePayroll','Approve and reopen payroll cut-offs','Payroll',['viewPayroll']],
   ['editAdvances','Set company advances','Payroll',['viewPayroll']],['editAdjustments','Add payroll adjustments','Payroll',['viewPayroll']],['editFold','Enter fold incentives (Laundry and Inhouse)','Payroll',['viewPayroll']],['editPayroll','Edit computed payroll amounts','Payroll',['viewPayroll']],
-  ['notes','Read and write Reminders (notes for Payroll and Admin)','Payroll'],
+  ['reminders','Read and write Reminders (notes for Payroll and Admin)','Payroll'],
   ['audit','View activity log','Admin tools'],['settings','Change payroll settings and holidays','Admin tools'],['setDeadline','Set approval deadlines','Admin tools']
 ];
 const EDIT_ROLES=['HR','PAYROLL','DEPT_HEAD'];
@@ -490,7 +490,7 @@ function withDeps(map){const o={...map};for(const[k,,,deps]of PERMS)if(o[k]&&dep
 function roleAccess(r){const st=(S.roleAccess||{})[r];return st?{...roleDefaults(r),...st}:roleDefaults(r)}
 const NAV=[
   ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],['imports','Import history','importDtr'],
-  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Company advances','viewPayroll'],['notes','Reminders','notes'],['audit','Activity log','audit'],
+  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Company advances','viewPayroll'],['reminders','Reminders','reminders'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
 const ABS_REASONS=[['SL','Sick leave'],['VL','Vacation leave'],['EL','Emergency leave'],['LWOP','Leave without pay'],['AWOL','AWOL / no notice'],['OTHER','Other reason']];
@@ -1623,45 +1623,45 @@ async function saveThirteenthRelease(form){
 }
 
 /* ---------------- Reminders (notes shared by Payroll and Admin) ---------------- */
-async function loadNotes(){
-  const u=S.ui;u.notesBusy=true;u.notesErr='';
-  try{u.notes=(await Store.getAll(cp('payroll_notes'))).map(([id,d])=>({...d,id})).sort((a,b)=>(a.done?1:0)-(b.done?1:0)||String(b.created_at||'').localeCompare(String(a.created_at||'')))}
-  catch(e){u.notesErr=e.message||String(e);u.notes=u.notes||[]}
-  u.notesBusy=false;scheduleRender();
+async function loadReminders(){
+  const u=S.ui;u.remsBusy=true;u.remsErr='';
+  try{u.rems=(await Store.getAll(cp('payroll_notes'))).map(([id,d])=>({...d,id})).sort((a,b)=>(a.done?1:0)-(b.done?1:0)||String(b.created_at||'').localeCompare(String(a.created_at||'')))}
+  catch(e){u.remsErr=e.message||String(e);u.rems=u.rems||[]}
+  u.remsBusy=false;scheduleRender();
 }
-function pageNotes(){
-  const u=S.ui,list=u.notes;
-  if(!list&&!u.notesBusy){u.notesBusy=true;loadNotes()}
-  const canEdit=can('notes')&&!S.readOnly,isAdmin=can('access');
-  let html=`<div class="row"><div><h1>Reminders</h1><p class="sub">Notes for Payroll and Admin only — for example what still needs to be checked before approving, or what to do next cut-off. They do not affect any computation.</p></div><span class="spacer"></span><button class="btn" data-act="notesRefresh">Refresh</button></div>`;
-  if(u.notesErr)html+=`<div class="banner bad">Could not load the reminders: ${h(u.notesErr)}</div>`;
-  if(canEdit)html+=`<div class="panel"><form data-form="note"><div class="grid"><label class="f wide">New reminder<textarea name="text" rows="3" maxlength="1000" required placeholder="e.g. Ask HR for the signed adjustment slip before approving the 2nd cut-off"></textarea></label><label class="f">Related to (optional)<input name="topic" maxlength="60" placeholder="e.g. Sept 2nd cut-off"></label></div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary">Add reminder</button></div></form></div>`;
+function pageReminders(){
+  const u=S.ui,list=u.rems;
+  if(!list&&!u.remsBusy){u.remsBusy=true;loadReminders()}
+  const canEdit=can('reminders')&&!S.readOnly,isAdmin=can('access');
+  let html=`<div class="row"><div><h1>Reminders</h1><p class="sub">Notes for Payroll and Admin only — for example what still needs to be checked before approving, or what to do next cut-off. They do not affect any computation.</p></div><span class="spacer"></span><button class="btn" data-act="remRefresh">Refresh</button></div>`;
+  if(u.remsErr)html+=`<div class="banner bad">Could not load the reminders: ${h(u.remsErr)}</div>`;
+  if(canEdit)html+=`<div class="panel"><form data-form="reminder"><div class="grid"><label class="f wide">New reminder<textarea name="text" rows="3" maxlength="1000" required placeholder="e.g. Ask HR for the signed adjustment slip before approving the 2nd cut-off"></textarea></label><label class="f">Related to (optional)<input name="topic" maxlength="60" placeholder="e.g. Sept 2nd cut-off"></label></div><div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn primary">Add reminder</button></div></form></div>`;
   if(!list)return html+'<div class="loading">Loading reminders…</div>';
   if(!list.length)return html+'<div class="panel empty"><b>No reminders yet.</b>Add one above.</div>';
   const open=list.filter(n=>!n.done).length;
   html+=`<p class="muted small" style="margin:10px 0 6px">${open} open · ${list.length-open} done</p>`;
-  html+=list.map(n=>`<div class="panel" style="margin-bottom:10px;${n.done?'opacity:.65':''}"><div class="row"><div style="flex:1;min-width:0"><div style="white-space:pre-wrap;${n.done?'text-decoration:line-through':''}">${h(n.text)}</div><div class="muted small" style="margin-top:6px">${n.topic?`<span class="chip">${h(n.topic)}</span> `:''}${h(personName(n.created_by))} · ${h(fmtStamp(n.created_at))}${n.done?` · done by ${h(personName(n.done_by))} ${h(fmtStamp(n.done_at))}`:''}</div></div>${canEdit?`<button class="btn sm" data-act="notesDone" data-id="${h(n.id)}">${n.done?'Reopen':'Mark done'}</button>${isAdmin||n.created_by===actor()?`<button class="btn sm danger" data-act="notesDel" data-id="${h(n.id)}">Delete</button>`:''}`:''}</div></div>`).join('');
+  html+=list.map(n=>`<div class="panel" style="margin-bottom:10px;${n.done?'opacity:.65':''}"><div class="row"><div style="flex:1;min-width:0"><div style="white-space:pre-wrap;${n.done?'text-decoration:line-through':''}">${h(n.text)}</div><div class="muted small" style="margin-top:6px">${n.topic?`<span class="chip">${h(n.topic)}</span> `:''}${h(personName(n.created_by))} · ${h(fmtStamp(n.created_at))}${n.done?` · done by ${h(personName(n.done_by))} ${h(fmtStamp(n.done_at))}`:''}</div></div>${canEdit?`<button class="btn sm" data-act="remDone" data-id="${h(n.id)}">${n.done?'Reopen':'Mark done'}</button>${isAdmin||n.created_by===actor()?`<button class="btn sm danger" data-act="remDel" data-id="${h(n.id)}">Delete</button>`:''}`:''}</div></div>`).join('');
   return html;
 }
-async function saveNote(form){
-  if(!can('notes')||S.readOnly){toast('You don’t have access to add reminders.',true);return}
+async function saveReminder(form){
+  if(!can('reminders')||S.readOnly){toast('You don’t have access to add reminders.',true);return}
   const text=(form.querySelector('[name=text]')?.value||'').trim(),topic=(form.querySelector('[name=topic]')?.value||'').trim();
   if(!text){toast('Write the reminder first.',true);return}
   const id='n_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-  try{await Store.set(cp('payroll_notes/')+id,{text,topic,done:false,created_by:actor(),created_at:nowISO()});form.reset();toast('Reminder added');await loadNotes()}
+  try{await Store.set(cp('payroll_notes/')+id,{text,topic,done:false,created_by:actor(),created_at:nowISO()});form.reset();toast('Reminder added');await loadReminders()}
   catch(e){toast('Could not save the reminder: '+(e.message||e),true)}
 }
-async function toggleNote(id){
-  const n=(S.ui.notes||[]).find(x=>x.id===id);if(!n||!can('notes')||S.readOnly)return;
+async function toggleReminder(id){
+  const n=(S.ui.rems||[]).find(x=>x.id===id);if(!n||!can('reminders')||S.readOnly)return;
   const d={...n};delete d.id;
   if(n.done){d.done=false;delete d.done_by;delete d.done_at}else{d.done=true;d.done_by=actor();d.done_at=nowISO()}
-  try{await Store.set(cp('payroll_notes/')+id,d);await loadNotes()}catch(e){toast('Could not update the reminder: '+(e.message||e),true)}
+  try{await Store.set(cp('payroll_notes/')+id,d);await loadReminders()}catch(e){toast('Could not update the reminder: '+(e.message||e),true)}
 }
-async function deleteNote(id){
-  const n=(S.ui.notes||[]).find(x=>x.id===id);if(!n||!can('notes')||S.readOnly)return;
+async function deleteReminder(id){
+  const n=(S.ui.rems||[]).find(x=>x.id===id);if(!n||!can('reminders')||S.readOnly)return;
   if(!(can('access')||n.created_by===actor())){toast('Only the author or an Admin can delete this reminder.',true);return}
   if(!(await confirmDlg('Delete reminder?','This reminder will be removed for everyone.','Delete',true)))return;
-  try{await Store.del(cp('payroll_notes/')+id);toast('Reminder deleted');await loadNotes()}catch(e){toast('Could not delete the reminder: '+(e.message||e),true)}
+  try{await Store.del(cp('payroll_notes/')+id);toast('Reminder deleted');await loadReminders()}catch(e){toast('Could not delete the reminder: '+(e.message||e),true)}
 }
 
 /* ---------------- Payroll records (saved automatically when a cut-off is approved) ---------------- */
@@ -2579,7 +2579,7 @@ function render(){
   if(S.viewAs)html+=`<div class="banner warn">Previewing as ${h(ROLES[S.viewAs.role])}${S.viewAs.dept?' · '+h(S.viewAs.dept):''}. <span class="spacer"></span><button class="btn sm" data-act="stopPreview">Stop preview</button></div>`;
   if(S.readOnly)html+=`<div class="banner bad">Your changes can't be saved because you have view-only access to this page. Ask the owner to share it with you as a Contributor.</div>`;
   if(r==='NONE'){html+=pageNoAccess();$('#view').innerHTML=html;return}
-  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,adjustments:pageAdjustments,fold:pageFold,records:pageRecords,thirteenth:pageThirteenth,advances:pageAdvances,notes:pageNotes,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
+  const page={dashboard:pageDashboard,dtr:pageDtr,import:pageImport,imports:pageImports,employees:pageEmployees,payroll:pagePayroll,adjustments:pageAdjustments,fold:pageFold,records:pageRecords,thirteenth:pageThirteenth,advances:pageAdvances,reminders:pageReminders,audit:pageAudit,settings:pageSettings,users:pageUsers}[S.route]||pageDashboard;
   const navItem=NAV.find(n=>n[0]===S.route);
   if(navItem&&navItem[2]&&!can(navItem[2])){html+=`<div class="empty"><b>This section isn't available for your role.</b>Use the tabs above to continue.</div>`}
   else html+=page();
@@ -5353,9 +5353,9 @@ const actions={
   async recSave(el){const n=Number(el.dataset.n);if(!cutLocked(n)){toast('Approve the cut-off first.',true);return}try{await saveRecord(n,computePayroll());S.ui.recListLoaded=false;S.ui.recList=null;toast('Saved in Payroll records')}catch(e){toast('Could not save the record: '+(e.message||e),true)}},
   recGo(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';location.hash='records'},
   thirteenthRefresh(){S.ui.thirteenthData=null;loadThirteenth()},
-  notesRefresh(){loadNotes()},
-  notesDone(el){toggleNote(el.dataset.id)},
-  notesDel(el){deleteNote(el.dataset.id)},
+  remRefresh(){loadReminders()},
+  remDone(el){toggleReminder(el.dataset.id)},
+  remDel(el){deleteReminder(el.dataset.id)},
   thirteenthRelease(el){thirteenthReleaseDialog(el.dataset.id)},
   prevPayImport(){previousPayrollDialog()},
   prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
@@ -5512,7 +5512,7 @@ document.addEventListener('submit',e=>{
   if(k==='fold'){saveFold(f);return}
   if(k==='release'){saveRelease(f);return}
   if(k==='thirteenthRelease'){saveThirteenthRelease(f);return}
-  if(k==='note'){saveNote(f);return}
+  if(k==='reminder'){saveReminder(f);return}
   if(k==='prevPayroll'){savePreviousPayroll(f);return}
   if(k==='advRec'){saveAdvRec(f);return}
   if(k==='coopAdd'){saveCoop(f);return}
