@@ -825,6 +825,7 @@ function cutCalc(e,rows,cutoff){
   const isMonthly=e.pay_basis!=='Daily';
   const t={late:0,ut:0,absent:0,offset:0,ot:0,nd:0,present:0,payDays:0,pendingOt:0,chk:0,review:0,otPay:0,ndPay:0,hol:0,holDays:0,noRec:0,fromSummary:0};
   const byDate={};
+  const cls={ot:{},nd:{},hol:{},rhUnw:0,holAmt:0,pre:false,post:false},cadd=(o,k,v)=>{if(v)o[k]=(o[k]||0)+v}; // minutes / hours per day type, kept so the Excel export can rebuild the pay with formulas
   /* DTR summary for this cut-off (Import DTR → Summary): the totals replace the daily records of this employee. */
   const sm=dtrSummaryOf(cutoff.n,e.id);
   if(sm){
@@ -832,6 +833,7 @@ function cutCalc(e,rows,cutoff){
     Object.assign(t,{late:Math.max(0,Number(sm.late_min)||0),ut:Math.max(0,Number(sm.ut_min)||0),ot,nd,present:days,payDays:days,fromSummary:1,
       absent:sm.absent!=null&&sm.absent!==''?Math.max(0,Number(sm.absent)||0):summaryAutoAbsent(e,cutoff,days),
       otPay:hourly*(ot/60)*Number(st.ot_reg),ndPay:hourly*(nd/60)*st.nd_pct*Number(st.nd_base_reg),hol:Math.max(0,Number(sm.hol_pay)||0)});
+    cls.ot.REG=ot;cls.nd.REG=nd;cls.holAmt=t.hol;
   }
   for(const r of (sm?[]:rows)){
     byDate[r.work_date]=r;
@@ -841,12 +843,13 @@ function cutCalc(e,rows,cutoff){
     if(c.otPending)t.pendingOt++;if(c.status==='CHK')t.chk++;if(r._auto&&c.status==='A')t.noRec++;if((r.review_status||'FOR REVIEW')!=='APPROVED')t.review++;
     if(r.work_date<doleFrom){ // rules used before the DOLE update (kept so approved cut-offs don't change)
       if(c.status==='P')t.payDays+=1;if(c.status==='HD')t.payDays+=0.5;
+      cadd(cls.ot,c.dayClass,c.otPaid);cadd(cls.nd,c.dayClass,c.nd);if(c.dayClass!=='REG'&&(c.otPaid||c.nd))cls.pre=true;
       t.otPay+=hourly*(c.otPaid/60)*otMult(c.dayClass);
       t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase(c.dayClass);
       if(c.status==='P'){
-        if(c.dayClass==='RH'){t.hol+=daily*st.hol_rh_prem;t.holDays++}
-        else if(c.dayClass==='SNW'){t.hol+=daily*st.hol_snw_prem;t.holDays++}
-        else if(c.dayClass==='RD'){t.hol+=daily*(isMonthly?1+Number(st.rd_prem):Number(st.rd_prem));t.holDays++}
+        if(c.dayClass==='RH'){t.hol+=daily*st.hol_rh_prem;t.holDays++;cadd(cls.hol,'RH',hpd);cls.pre=true}
+        else if(c.dayClass==='SNW'){t.hol+=daily*st.hol_snw_prem;t.holDays++;cadd(cls.hol,'SNW',hpd);cls.pre=true}
+        else if(c.dayClass==='RD'){t.hol+=daily*(isMonthly?1+Number(st.rd_prem):Number(st.rd_prem));t.holDays++;cadd(cls.hol,'RD',hpd);cls.pre=true}
       }
       continue;
     }
@@ -854,24 +857,26 @@ function cutCalc(e,rows,cutoff){
        regular holiday 200%, regular holiday on a rest day 260%. Overtime = hourly rate × day rate × 130% (regular day: × OT regular).
        Night differential = 10% of the hourly rate of that day. Premiums follow the hours actually worked (up to 8). */
     const kind=dayKind(c.dayClass,r.work_date),m=dayMult(kind);
+    cadd(cls.ot,kind,c.otPaid);cadd(cls.nd,kind,c.nd);if(kind!=='REG'&&(c.otPaid||c.nd))cls.post=true;
     t.otPay+=kind==='REG'?hourly*(c.otPaid/60)*Number(st.ot_reg):hourly*(c.otPaid/60)*m*((kind==='RH'||kind==='RHRD')?Number(st.ot_rh):Number(st.ot_snw));
     t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase2(kind);
     if(kind==='REG'||c.status!=='P'){if(c.status==='P')t.payDays+=1;if(c.status==='HD')t.payDays+=0.5;continue}
     const hrs=Math.min(Math.max(0,c.worked),hpd*60)/60, frac=hrs/hpd;
+    cadd(cls.hol,kind,hrs);cls.post=true;
     if(isMonthly){
       // The monthly salary already pays regular holidays and special days (100%), but not rest days.
       t.hol+=hourly*hrs*(m-((kind==='RH'||kind==='SNW')?1:0));
     }else{
       t.payDays+=frac; // the 100% part of the hours worked
       t.hol+=hourly*hrs*(m-1);
-      if(kind==='RH')t.hol+=daily*(1-frac); // regular holiday pay for the hours not worked
+      if(kind==='RH'){t.hol+=daily*(1-frac);cls.rhUnw+=(1-frac)} // regular holiday pay for the hours not worked
     }
     t.holDays++;
   }
   let missing=0;
   if(!sm)for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
     const isRest=isRestDay(e,d);
-    if(!isMonthly&&hol[d]==='RH'&&!isRest){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++}}
+    if(!isMonthly&&hol[d]==='RH'&&!isRest){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++;cls.rhUnw+=1}}
     if(!isRest&&!hol[d]&&!byDate[d])missing++;
   }
   const absentNet=Math.max(0,t.absent-t.offset/(hpd*60));
@@ -886,7 +891,7 @@ function cutCalc(e,rows,cutoff){
   const fold=r2(foldOf(cutoff.n,e.id)); // fold incentive of this cut-off (Laundry / Inhouse Department)
   const gross=netLA+allowance+t.hol+t.otPay+t.ndPay+adjPlus+fold;
   const adv=Number(((S.adv[cutoff.n]||{})[e.id]||{}).amount)||0;
-  return {t,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
+  return {t,cls,missing,absentNet,daily:r2(daily),monthly,basic:r2(basic),lateUt:r2(lateUt),absence:r2(absence),netLA:r2(netLA),allowance:r2(allowance),taxAllow:r2(taxAllow),
     hol:r2(t.hol),otPay:r2(t.otPay),ndPay:r2(t.ndPay),gross:r2(gross),govBasis:r2(netLA+t.hol+taxAllow),adv:r2(adv),adjPlus,adjMinus,fold};
 }
 /* ---------- DTR summary (totals per employee and cut-off instead of daily time records) ----------
@@ -936,7 +941,7 @@ function computePayrollLive(){
   return S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id).map(e=>{
     const rows=byEmp[e.id]||[];
     let [k1,k2]=P.cuts.map(c=>cutCalc(e,rows.filter(r=>r.work_date>=c.start&&r.work_date<=c.end),c));
-    const raw=[k1,k2].map(k=>({t:{...k.t},absentNet:k.absentNet,missing:k.missing})); // attendance of each cut-off as it happened (DTR summary)
+    const raw=[k1,k2].map(k=>({t:{...k.t},absentNet:k.absentNet,missing:k.missing,cls:k.cls})); // attendance of each cut-off as it happened (DTR summary)
     const freq=payFreq(e);
     if(freq==='first'){k1=mergeCuts(k1,k2);k2=zeroCut(k2)}else if(freq==='second'){k2=mergeCuts(k2,k1);k1=zeroCut(k1)}
     k1=applyEdit(e,k1,1);k2=applyEdit(e,k2,2);
@@ -1855,13 +1860,6 @@ function recSlipItems(rec){return payItems(rec.items,String(rec.n))}
 function recPrintHtml(rec,s){
   if(s==='slips')return withRec(rec,()=>slipSheets(recSlipItems(rec),String(rec.n)));
   return secTable(recSecData(rec,s));
-}
-async function exportRecord(rec){
-  const secs=recSecList(rec).filter(s=>s!=='slips').map(s=>recSecData(rec,s));
-  if(typeof XLSX==='undefined'){toast('Excel export isn’t available here. Use Print instead.',true);return}
-  const wb=XLSX.utils.book_new(),ctx=sheetCtx(secs);for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d,ctx),String(d.name).slice(0,31));wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
-  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
-  if(!await saveFile(`${curCo().file}-payroll-record-${rec.isMonth?'month-'+rec.ym:rec.key}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))toast('Could not save the file.',true);
 }
 function pageRecords(){
   const u=S.ui;
@@ -4651,16 +4649,304 @@ function payslipHtml(x,tab){
   
 </div>`;
 }
+/* ================= Excel export with live formulas =================
+   The exported workbook rebuilds the payroll from its own sheets, like the Prime Laundry payroll file:
+   DTR Summary (attendance + rates)  →  1st / 2nd Cut-off  →  Monthly  →  BIR Purposes (SSS, PhilHealth, Pag-IBIG, tax),
+   with the SSS Contribution Table, Withholding Tax Table and a Rates sheet inside the file.
+   Every figure still carries its calculated value, so the file also reads correctly where formulas are not recalculated. */
+const KINDS=['REG','RD','SNW','SNWRD','RH','RHRD'];
+const KIND_LABEL={REG:'regular day',RD:'rest day',SNW:'special day',SNWRD:'special day on rest day',RH:'regular holiday',RHRD:'regular holiday on rest day'};
+const xq=n=>"'"+String(n).replace(/'/g,"''")+"'";
+const rnd6=v=>Math.round((Number(v)||0)*1e6)/1e6;
+const XC=c=>XLSX.utils.encode_col(c);
+/* Day-type multipliers, exactly as cutCalc uses them. pre = attendance before the DOLE date, post = from the DOLE date. */
+function rateTables(st){
+  const g=k=>Number(st[k]),otReg=g('ot_reg'),otSnw=g('ot_snw'),otRh=g('ot_rh'),nR=g('nd_base_reg'),nS=g('nd_base_snw'),nH=g('nd_base_rh'),rd=g('rd_prem'),sn=g('hol_snw_prem'),snrd=g('hol_snw_rd_prem'),rh=g('hol_rh_prem');
+  return{
+    pre:{REG:{ot:otReg,nd:nR,holM:0,holD:0},RD:{ot:otSnw,nd:nS,holM:1+rd,holD:rd},SNW:{ot:otSnw,nd:nS,holM:sn,holD:sn},RH:{ot:otRh,nd:nH,holM:rh,holD:rh}},
+    post:{REG:{ot:otReg,nd:nR,holM:0,holD:0},RD:{ot:(1+rd)*otSnw,nd:nS,holM:1+rd,holD:rd},SNW:{ot:(1+sn)*otSnw,nd:nS,holM:sn,holD:sn},SNWRD:{ot:(1+snrd)*otSnw,nd:1+snrd,holM:1+snrd,holD:snrd},RH:{ot:(1+rh)*otRh,nd:nH,holM:rh,holD:rh},RHRD:{ot:(1+rh)*(1+rd)*otRh,nd:nH*(1+rd),holM:(1+rh)*(1+rd),holD:(1+rh)*(1+rd)-1}}
+  };
+}
+/* "Rates" sheet: every constant the formulas use, with the day-type multiplier tables. Returns the sheet and the addresses of each constant. */
+function ratesSheet(st){
+  const rows=[],fx=[],M={pre:{},post:{}},Lc={pre:{},post:{}};
+  const num=k=>Number(st[k]);
+  const put=(key,label,val,note)=>{rows.push([label,val,note||'']);const r=rows.length;M[key]='Rates!$B$'+r;Lc[key]='$B$'+r;return r};
+  const putF=(key,label,f,val,note)=>{const r=put(key,label,val,note);fx.push([`B${r}`,f,val]);return r};
+  const head=t=>{rows.push([]);rows.push([t])};
+  rows.push([st.company]);rows.push(['RATES AND ASSUMPTIONS USED BY THE FORMULAS']);
+  rows.push(['These values come from Settings. Change one here and every formula in this workbook that uses it recalculates.']);
+  head('GENERAL');
+  put('div','Working days per year (divisor)',num('divisor'),'Daily rate = monthly rate × 12 ÷ this number');
+  put('hpd','Hours per day',num('hours_per_day'),'Hourly rate = daily rate ÷ hours per day');
+  head('PREMIUM RATES');
+  put('otReg','Overtime multiplier – regular day',num('ot_reg'),'Hourly rate × this × OT hours');
+  put('otSnw','Overtime multiplier – special day / rest day',num('ot_snw'),'Applied on top of the day-type multiplier from the DOLE date');
+  put('otRh','Overtime multiplier – regular holiday',num('ot_rh'),'Applied on top of the day-type multiplier from the DOLE date');
+  put('ndPct','Night differential (% of hourly rate)',num('nd_pct'),'Hourly rate × ND hours × this × day-type base');
+  put('ndReg','Night differential base – regular day',num('nd_base_reg'));
+  put('ndSnw','Night differential base – rest day / special day',num('nd_base_snw'));
+  put('ndRh','Night differential base – regular holiday',num('nd_base_rh'));
+  put('rd','Rest day premium',num('rd_prem'),'Rest day pay = 100% + this');
+  put('sn','Special day premium',num('hol_snw_prem'),'Special day pay = 100% + this');
+  put('snrd','Special day on a rest day premium',num('hol_snw_rd_prem'));
+  put('rh','Regular holiday premium',num('hol_rh_prem'),'Regular holiday pay = 100% + this');
+  put('dole','DOLE day-type rules apply to attendance from',String(st.dole_from||'2026-10-11'),'Earlier attendance uses table A, this date onward uses table B');
+  const tb=(title,keyset,tbl,tag,formulas)=>{
+    head(title);
+    rows.push(['Day type','Description','Overtime ×','Night diff base ×','Holiday / rest-day pay × (monthly-paid)','Holiday / rest-day pay × (daily-paid)']);
+    for(const k of keyset){
+      const r=rows.length+1,q=tbl[k],f=formulas[k];
+      rows.push([k,KIND_LABEL[k],q.ot,q.nd,q.holM,q.holD]);
+      ['ot','nd','holM','holD'].forEach((kk,i)=>{fx.push([XC(2+i)+r,f[kk],q[kk]]);Lc[tag][k]=Lc[tag][k]||{};Lc[tag][k][kk]='$'+XC(2+i)+'$'+r;M[tag][k]=M[tag][k]||{};M[tag][k][kk]='Rates!$'+XC(2+i)+'$'+r});
+    }
+  };
+  const T=rateTables(st),B=Lc;
+  const b=k=>B[k];
+  tb('A. DAY-TYPE MULTIPLIERS – attendance BEFORE the DOLE date',['REG','RD','SNW','RH'],T.pre,'pre',{
+    REG:{ot:b('otReg'),nd:b('ndReg'),holM:'0',holD:'0'},
+    RD:{ot:b('otSnw'),nd:b('ndSnw'),holM:`1+${b('rd')}`,holD:b('rd')},
+    SNW:{ot:b('otSnw'),nd:b('ndSnw'),holM:b('sn'),holD:b('sn')},
+    RH:{ot:b('otRh'),nd:b('ndRh'),holM:b('rh'),holD:b('rh')}});
+  tb('B. DAY-TYPE MULTIPLIERS – attendance FROM the DOLE date',KINDS,T.post,'post',{
+    REG:{ot:b('otReg'),nd:b('ndReg'),holM:'0',holD:'0'},
+    RD:{ot:`(1+${b('rd')})*${b('otSnw')}`,nd:b('ndSnw'),holM:`1+${b('rd')}`,holD:b('rd')},
+    SNW:{ot:`(1+${b('sn')})*${b('otSnw')}`,nd:b('ndSnw'),holM:b('sn'),holD:b('sn')},
+    SNWRD:{ot:`(1+${b('snrd')})*${b('otSnw')}`,nd:`1+${b('snrd')}`,holM:`1+${b('snrd')}`,holD:b('snrd')},
+    RH:{ot:`(1+${b('rh')})*${b('otRh')}`,nd:b('ndRh'),holM:b('rh'),holD:b('rh')},
+    RHRD:{ot:`(1+${b('rh')})*(1+${b('rd')})*${b('otRh')}`,nd:`${b('ndRh')}*(1+${b('rd')})`,holM:`(1+${b('rh')})*(1+${b('rd')})`,holD:`(1+${b('rh')})*(1+${b('rd')})-1`}});
+  rows.push(['Holiday / rest-day pay = hourly rate × hours worked (up to the hours per day) × the multiplier in the table. Monthly-paid staff already receive 100% for regular holidays and special days in their salary. Daily-paid staff also receive the day rate for a regular holiday not worked.']);
+  head('SSS');
+  put('sssEr','Employer rate (regular SS)',num('sss_er_rate'),'ER = MSC (up to the cap) × this');
+  put('sssEe','Employee rate (regular SS)',num('sss_ee_rate'));
+  put('sssCap','Regular SS cap on MSC',num('sss_reg_cap'),'MSC above this goes to the Mandatory Provident Fund (MPF), same ER/EE rates');
+  put('sssMin','Minimum MSC',num('sss_min_msc'));
+  put('sssMax','Maximum MSC',num('sss_max_msc'));
+  put('ecThr','EC threshold (MSC below this pays the lower EC)',num('ec_threshold'));
+  put('ecLow','EC – below the threshold (employer only)',num('ec_low'));
+  put('ecHigh','EC – threshold and above (employer only)',num('ec_high'));
+  head('PHILHEALTH');
+  put('phRate','Premium rate',num('phic_rate'),'Premium = basis × rate, basis kept between the floor and the ceiling');
+  put('phShare','Employee share of the premium',num('phic_employee_share'),'Employer pays the rest');
+  put('phFloor','Basis floor',num('phic_floor'));
+  put('phCeil','Basis ceiling',num('phic_ceiling'));
+  head('PAG-IBIG (HDMF)');
+  put('hdEe','Employee contribution (fixed amount)',num('hdmf_ee'),st.hdmf_mode==='percent'?'Not used: this company computes Pag-IBIG as a percent of the basis':'Used: fixed amount per month');
+  put('hdEr','Employer contribution (fixed amount)',num('hdmf_er'));
+  put('hdMax','Maximum basis (percent mode)',Number(st.hdmf_max_salary)||10000,st.hdmf_mode==='percent'?'Used':'Used only when Pag-IBIG is computed as a percent of the basis');
+  put('hdThr','Basis at or below this pays the lower employee rate',1500);
+  put('hdLow','Employee rate – basis at or below the threshold',0.01);
+  put('hdHigh','Employee rate – basis above the threshold',0.02);
+  put('hdErPct','Employer rate (percent mode)',0.02);
+  head('WHICH PAY ITEMS MAKE UP THE BASIS (Settings → Basis of government contributions)');
+  rows.push(['SSS basis',govLabel('sss')]);rows.push(['PhilHealth basis',govLabel('phic')]);rows.push(['Pag-IBIG basis',st.hdmf_mode==='percent'?govLabel('hdmf'):'fixed amount']);rows.push(['Withholding tax basis',govLabel('tax')]);
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  for(const[a,f,v]of fx)ws[a]={t:'n',v:Number(v)||0,f};
+  ws['!cols']=[{wch:52},{wch:30},{wch:16},{wch:18},{wch:24},{wch:24}];
+  return{ws,M};
+}
+/* "SSS Contribution Table" sheet, same layout as the Prime Laundry file (data from row 6, columns A–L). */
+function sssSheet(st,RM){
+  const mn=Number(st.sss_min_msc),mx=Number(st.sss_max_msc),cap=Number(st.sss_reg_cap),er=Number(st.sss_er_rate),ee=Number(st.sss_ee_rate),thr=Number(st.ec_threshold);
+  const clamp=v=>Math.min(mx,Math.max(mn,v)),bands=[];
+  for(let k=0;k*500-250<=mx+500;k++){const m=clamp(k*500),from=k===0?0:k*500-250;if(bands.length&&bands[bands.length-1].msc===m)continue;bands.push({from,msc:m})}
+  const R=RM,aoa=[['SSS CONTRIBUTION TABLE'],
+    ['Generated from Settings. The monthly salary credit (MSC) is the compensation rounded to the nearest 500, between the minimum and maximum MSC. Regular SS is figured on the MSC up to the cap; the excess is the Mandatory Provident Fund (MPF). EC is paid by the employer only. Rates are on the Rates sheet.'],
+    ['RANGE OF COMPENSATION','','MONTHLY SALARY CREDIT','','','AMOUNT OF CONTRIBUTIONS'],
+    ['','','REGULAR SS','MPF','TOTAL','REGULAR SOCIAL SECURITY','','','EC','MANDATORY PROVIDENT FUND'],
+    ['FROM','TO','MSC','MSC','MSC','ER','EE','TOTAL','ER','ER','EE','TOTAL']];
+  const fx=[];
+  bands.forEach((q,i)=>{
+    const r=6+i,to=i===bands.length-1?10000000:r2(bands[i+1].from-0.01),reg=Math.min(q.msc,cap),mpf=Math.max(0,q.msc-cap);
+    const row=[q.from,to,reg,mpf,q.msc,r2(reg*er),r2(reg*ee),0,q.msc<thr?Number(st.ec_low):Number(st.ec_high),r2(mpf*er),r2(mpf*ee),0];
+    row[7]=r2(row[5]+row[6]);row[11]=r2(row[9]+row[10]);aoa.push(row);
+    const rr=(k)=>R[k].replace('Rates!','Rates!');
+    fx.push([`C${r}`,`MIN(E${r},${R.sssCap})`,row[2]],[`D${r}`,`MAX(0,E${r}-${R.sssCap})`,row[3]],
+      [`F${r}`,`ROUND(C${r}*${R.sssEr},2)`,row[5]],[`G${r}`,`ROUND(C${r}*${R.sssEe},2)`,row[6]],[`H${r}`,`F${r}+G${r}`,row[7]],
+      [`I${r}`,`IF(E${r}<${R.ecThr},${R.ecLow},${R.ecHigh})`,row[8]],[`J${r}`,`ROUND(D${r}*${R.sssEr},2)`,row[9]],[`K${r}`,`ROUND(D${r}*${R.sssEe},2)`,row[10]],[`L${r}`,`J${r}+K${r}`,row[11]]);
+  });
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  for(const[a,f,v]of fx)ws[a]={t:'n',v:Number(v)||0,f};
+  ws['!cols']=[{wch:14},{wch:14},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:8},{wch:12},{wch:12},{wch:12}];
+  ws['!merges']=[{s:{r:1,c:0},e:{r:1,c:11}}];
+  for(let r=6;r<6+bands.length;r++)for(let c=0;c<12;c++){const cell=ws[XLSX.utils.encode_cell({r:r-1,c})];if(cell&&cell.t==='n')cell.z='#,##0.00'}
+  return{ws,last:5+bands.length,bands};
+}
+/* "Withholding Tax Table" sheet: the monthly table the payroll uses (TRAIN schedule). Data in A6:C11. */
+const TAX_BRACKETS=[[0,0,0],[20833,0,.15],[33333,1875,.20],[66667,8541.67,.25],[166667,33541.67,.30],[666667,183541.67,.35]];
+function taxSheet(){
+  const txt=['Not over 20,833','Over 20,833 but not over 33,333','Over 33,333 but not over 66,667','Over 66,667 but not over 166,667','Over 166,667 but not over 666,667','Over 666,667'];
+  const aoa=[['WITHHOLDING TAX TABLE – MONTHLY'],['TRAIN law schedule as used by the payroll (tax on monthly taxable compensation).'],
+    ['Tax = prescribed minimum withholding tax + % over CL × (taxable compensation − CL). Taxable compensation = the tax basis less the employee share of SSS, PhilHealth and Pag-IBIG.'],[],
+    ['COMPENSATION LEVEL (CL) – OVER','PRESCRIBED MINIMUM WITHHOLDING TAX','+ % OVER CL','BRACKET'],
+    ...TAX_BRACKETS.map((b,i)=>[b[0],b[1],b[2],txt[i]]),[],
+    ['T1 = minimum wage earner (tax exempt) · T2 = taxable but below the withholding threshold · T3 = tax withheld.']];
+  const ws=XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:34},{wch:36},{wch:14},{wch:40}];
+  for(let r=6;r<=11;r++){for(const c of[0,1]){const x=ws[XLSX.utils.encode_cell({r:r-1,c})];if(x)x.z='#,##0.00'}const p=ws[XLSX.utils.encode_cell({r:r-1,c:2})];if(p)p.z='0%'}
+  return{ws,ref:"'Withholding Tax Table'!$A$6:$C$11"};
+}
+
+/* DTR summary for the Excel export: the attendance figures AND the rates the cut-off formulas read. */
+function dtrFormulaData(n,period,items,company){
+  const c=period.cuts[n-1],st=S.settings,div=Number(st.divisor)||313;
+  const rawOf=x=>(x.raw&&x.raw[n-1])||null,clsOf=x=>{const r=rawOf(x);return r&&r.cls?r.cls:null};
+  const any=(f,k)=>items.some(x=>{const q=clsOf(x);return q&&q[f]&&q[f][k]>0});
+  const otK=KINDS.filter(k=>k==='REG'||any('ot',k)),ndK=KINDS.filter(k=>k==='REG'||any('nd',k)),hK=KINDS.filter(k=>k!=='REG'&&any('hol',k));
+  const head=['EE No','Employee','Department','Pay Basis','Monthly rate','Daily rate','Days present','Days paid (basic)','Absences (days)','Late + undertime (min)','Monthly allowance','Taxable allowance?',
+    ...otK.map(k=>'OT min – '+KIND_LABEL[k]),...ndK.map(k=>'Night diff min – '+KIND_LABEL[k]),...hK.map(k=>'Holiday / RD hours – '+KIND_LABEL[k]),
+    'Unworked reg. holiday (days)','Holiday pay per DTR summary','Missing punches','Not yet approved','Workdays without DTR'];
+  const cols={id:0,basis:3,monthly:4,daily:5,present:6,paid:7,absent:8,late:9,allow:10,taxable:11,ot:{},nd:{},hol:{}};
+  let i=12;otK.forEach(k=>cols.ot[k]=i++);ndK.forEach(k=>cols.nd[k]=i++);hK.forEach(k=>cols.hol[k]=i++);cols.rhUnw=i++;cols.holAmt=i++;cols.chk=i++;cols.review=i++;cols.noRec=i++;
+  const meta=[];
+  const rows=items.map(x=>{
+    const k=n===1?x.k1:x.k2,r=rawOf(x)||{t:k.t,absentNet:k.absentNet,missing:k.missing},t=r.t||{},cl=r.cls||{ot:{REG:t.ot||0},nd:{REG:t.nd||0},hol:{},rhUnw:0,holAmt:Number(k.hol)||0},e=x.e; // records saved before the day-type breakdown: treat as regular-day figures, the formula check below keeps a value when that does not reproduce the amount
+    const basis=e.pay_basis==='Daily'?'Daily':'Monthly';
+    let monthly=r2(Number(x.k1.monthly)||0),daily=r2(Number(x.daily)||0),mF=false,dF=false;
+    if(basis==='Monthly'&&Math.abs(daily-monthly*12/div)<=0.0051){daily=monthly*12/div;dF=true}
+    else if(basis==='Daily'&&Math.abs(monthly-daily*div/12)<=0.0051){monthly=daily*div/12;mF=true}
+    meta.push({mF,dF});
+    const row=new Array(head.length).fill(0);
+    row[0]=e.id;row[1]=empName(e);row[2]=String(e.department||'').trim();row[3]=basis;row[4]=monthly;row[5]=daily;
+    row[6]=rnd6(t.present);row[7]=rnd6(t.payDays);row[8]=rnd6(r.absentNet);row[9]=rnd6((t.late||0)+(t.ut||0));
+    row[10]=e.monthly_allowance!=null&&e.monthly_allowance!==''?(Number(e.monthly_allowance)||0):r2((Number(x.k1.allowance)||Number(x.k2.allowance)||0)*2);
+    row[11]=e.allowance_taxable!==undefined?(e.allowance_taxable?'YES':'NO'):(((Number(x.k1.taxAllow)||0)+(Number(x.k2.taxAllow)||0))>0?'YES':'NO');
+    otK.forEach(q=>row[cols.ot[q]]=rnd6((cl.ot||{})[q]));ndK.forEach(q=>row[cols.nd[q]]=rnd6((cl.nd||{})[q]));hK.forEach(q=>row[cols.hol[q]]=rnd6((cl.hol||{})[q]));
+    row[cols.rhUnw]=rnd6(cl.rhUnw);row[cols.holAmt]=r2(cl.holAmt||0);row[cols.chk]=t.chk||0;row[cols.review]=t.review||0;row[cols.noRec]=r.missing||0;
+    return row;
+  });
+  const tot=head.map((_,j)=>j===1?'TOTAL':(j>=6&&j<=9)||j>=12?rnd6(rows.reduce((a,r)=>a+(Number(r[j])||0),0)):'');
+  const notes=[
+    'The attendance figures (days, minutes, hours) are the inputs taken from the DTR. The cut-off sheets look them up by EE No.',
+    `Daily rate = Monthly rate × 12 ÷ ${div} working days (Rates sheet) for monthly-paid staff. For daily-paid staff the daily rate is the input and Monthly rate = Daily rate × ${div} ÷ 12.`,
+    'Days paid (basic) = days present, plus the regular-day share of the hours worked on rest days and holidays for daily-paid staff.',
+    'Absences (days) are net of overtime offset against absences. Monthly allowance is paid half on each cut-off.',
+    'Overtime, night differential and holiday / rest-day hours are grouped by day type; the Rates sheet holds the multiplier for each day type.',
+    'Holiday pay per DTR summary is an amount entered in the imported DTR summary (staff whose attendance was imported as totals).'];
+  return{name:'DTR Summary '+(n===1?'1st':'2nd')+' Cut-off',kind:'dtrF',n,hdr:[company,`DTR summary · ${cutName(c)} · attendance ${fmtLong(c.start,c.end)}`,`Payroll period: ${fmtLong(c.payStart,c.payEnd)}`],
+    head,rows,tot,extra:[],count:true,money:[4,5,10],cols,meta,otK,ndK,hK,notes};
+}
+/* Mirror of the formulas written to a cut-off sheet row (used to keep a value instead of a formula when they would differ,
+   for example after a manual edit, and for staff paid once a month). */
+function cutMirror(f,tb,dd,hv,basis,n){
+  const st=S.settings,hpd=Number(st.hours_per_day)||8,ndp=Number(st.nd_pct);
+  const sum=(list,kk,pre)=>list.filter(q=>tb[q]).reduce((a,q)=>a+(hv[pre+q]||0)*tb[q][kk],0);
+  const o={};
+  o.basic=basis==='Daily'?r2(hv.daily*hv.paid):(n===1?r2(hv.monthly/2):r2(hv.monthly-r2(hv.monthly/2)));
+  o.lateUt=r2(hv.daily/(hpd*60)*hv.late);
+  o.absence=basis==='Daily'?0:r2(hv.daily*hv.absent);
+  o.allowance=r2(hv.allow/2);
+  o.otPay=r2(hv.daily/hpd/60*sum(dd.otK,'ot','ot_'));
+  o.ndPay=r2(hv.daily/hpd/60*ndp*sum(dd.ndK,'nd','nd_'));
+  o.hol=r2((basis==='Daily'?hv.daily/hpd*sum(dd.hK,'holD','hol_')+hv.daily*hv.rhUnw:hv.daily/hpd*sum(dd.hK,'holM','hol_'))+hv.holAmt);
+  return o;
+}
+/* Helper block (inputs pulled from the DTR Summary) and notes for a cut-off sheet. */
+function cutCalcAug(tab,items,K,head,rows,tot,dd){
+  const n=Number(tab),st=S.settings,T=rateTables(st),dole=String(st.dole_from||'2026-10-11'),cut=S.period.cuts[n-1],cols=dd.cols;
+  const idx=new Map(dd.rows.map((r,i)=>[String(r[0]),i]));
+  const hdef=[['monthly','Monthly rate',cols.monthly],['daily','Daily rate',cols.daily],['paid','Days paid',cols.paid],['absent','Absences (days)',cols.absent],['late','Late + UT (min)',cols.late],['allow','Monthly allowance',cols.allow]];
+  dd.otK.forEach(k=>hdef.push(['ot_'+k,'OT min – '+KIND_LABEL[k],cols.ot[k]]));
+  dd.ndK.forEach(k=>hdef.push(['nd_'+k,'Night diff min – '+KIND_LABEL[k],cols.nd[k]]));
+  dd.hK.forEach(k=>hdef.push(['hol_'+k,'Holiday / RD hours – '+KIND_LABEL[k],cols.hol[k]]));
+  hdef.push(['rhUnw','Unworked reg. holiday (days)',cols.rhUnw],['holAmt','Holiday pay per DTR summary',cols.holAmt]);
+  const base=4+K.length,hmap={},hsrc={};hdef.forEach((h,j)=>{hmap[h[0]]=base+1+j;hsrc[h[0]]=h[2]});
+  head.push('Notes',...hdef.map(h=>h[1]));tot.push('',...hdef.map(()=>''));
+  const LABEL={basic:'Basic',lateUt:'Late',absence:'Absences',allowance:'Allowance',hol:'Holiday / RD',otPay:'Overtime',ndPay:'Night diff'};
+  const meta=items.map((x,i)=>{
+    const k=n===1?x.k1:x.k2,di=idx.get(String(x.e.id)),dr=di!=null?dd.rows[di]:null,raw=x.raw&&x.raw[n-1],m={f:{},gov:{},note:[],regime:null};
+    rows[i].push('',...hdef.map(h=>dr?Number(dr[h[2]])||0:0));
+    const why=!dr?'No DTR summary row':(x.freq!=='both'?'Paid once a month: both cut-offs combined, values only':'');
+    if(why)m.note.push(why);
+    else{
+      const cl=(raw&&raw.cls)||{pre:false,post:false},reg=(cl.pre&&cl.post)?'mixed':(cl.post?'post':(cl.pre?'pre':(cut.start>=dole?'post':'pre')));
+      m.regime=reg;
+      const hv={};hdef.forEach((h,j)=>hv[h[0]]=Number(dr[h[2]])||0);
+      const mir=cutMirror(null,reg==='pre'?T.pre:T.post,dd,hv,rows[i][3],n);
+      const bad=[];
+      for(const f of Object.keys(LABEL)){
+        if(reg==='mixed'&&(f==='otPay'||f==='ndPay'||f==='hol')){bad.push(LABEL[f]+' (attendance spans the DOLE date)');continue}
+        if(Math.abs(mir[f]-(Number(k[f])||0))<=0.011)m.f[f]=true;
+        else bad.push((k.auto&&Math.abs((Number(k.auto[f])||0)-(Number(k[f])||0))>0.005)?LABEL[f]+' edited manually':LABEL[f]+' not rebuilt');
+      }
+      if(bad.length)m.note.push(bad.join('; ')+': value kept');
+    }
+    if(x.birRow&&((x.freq==='first'?1:2)===n)){
+      const b=x.birRow,e2=r2((Number(b.sssEe)||0)+(Number(b.mpfEe)||0));
+      const pairs={sss:e2,phic:Number(b.phicEe)||0,hdmf:Number(b.hdmfEe)||0,tax:Number(b.tax)||0};
+      for(const g of Object.keys(pairs)){if(Math.abs(pairs[g]-(Number(k[g])||0))<=0.011)m.gov[g]=true;else m.note.push(g.toUpperCase()+' edited manually: value kept')}
+    }
+    rows[i][base]=m.note.join(' | ');
+    return m;
+  });
+  const div=Number(st.divisor)||313,hpd=Number(st.hours_per_day)||8;
+  const notes=[
+    `Rates come from the DTR Summary sheet (columns after "Notes") and the Rates sheet. Daily rate = Monthly rate × 12 ÷ ${div}. Hourly rate = Daily rate ÷ ${hpd}.`,
+    n===1?'Basic / half salary: monthly-paid = Monthly rate ÷ 2. Daily-paid = Daily rate × Days paid.':'Basic / half salary: monthly-paid = Monthly rate less the 1st cut-off half (the balance of the month). Daily-paid = Daily rate × Days paid.',
+    `Late / UT = Daily rate ÷ (${hpd} hours × 60) × late + undertime minutes. Absences (monthly-paid) = Daily rate × absent days. Net of L&A = Basic − Late − Absences, not below zero.`,
+    'Allowance = Monthly allowance ÷ 2.',
+    `Overtime = Daily rate ÷ ${hpd} ÷ 60 × OT minutes × the OT multiplier of each day type (Rates sheet).`,
+    `Night diff = Daily rate ÷ ${hpd} ÷ 60 × night-diff minutes × ${Number(st.nd_pct)*100}% × the night-diff base of each day type (Rates sheet).`,
+    `Holiday / RD pay = hourly rate × hours worked × the multiplier of each day type (Rates sheet, monthly-paid or daily-paid column); daily-paid staff also get the day rate for each regular holiday not worked.`,
+    'Gross = Net of L&A + Allowance + Holiday / RD + Overtime + Night diff (+ adjustments and fold incentive). Net pay = Gross − deductions.',
+    n===2?'SSS, PhilHealth, Pag-IBIG and Withholding tax are looked up from the BIR Purposes sheet (monthly figures, deducted on the 2nd cut-off).':'Government contributions and tax are deducted on the 2nd cut-off (see the 2nd Cut-off sheet and BIR Purposes).',
+    'Advances, coop savings, loans, adjustments and fold incentive are entered amounts (from Company advances, Loans, Adjustments and Fold incentive).'];
+  return{calc:true,cutN:n,hmap,hsrc,otK:dd.otK,ndK:dd.ndK,hK:dd.hK,meta,notes,hcount:hdef.length};
+}
+/* BIR Purposes for the Excel export: the columns needed to rebuild SSS, PhilHealth, Pag-IBIG and tax from the two cut-offs. */
+function birCalcData(items,hdr){
+  const L=items.filter(x=>x.bir),st=S.settings;
+  const keys=['basic','lateAbs','netLA','hol','ot','nd','allow','taxAllow','ntAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfBasis','hdmfEr','hdmfEe','taxComp','netContrib','taxable','tax'];
+  const head=['EE No','Employee','Department','Tax Type','Taxable Allowance?','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Overtime','Night Diff','Allowances','Taxable Allowance','Non-taxable Allowance','SSS Basis','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PhilHealth Basis','PHIC ER','PHIC EE','Pag-IBIG Basis','HDMF ER','HDMF EE','Tax Basis','Net of Contributions','Taxable Compensation','Withholding Tax (1601-C)'];
+  const val=(x,f)=>{const b=x.birRow,p=b.parts||{};if(f==='ot')return p.ot||0;if(f==='nd')return p.nd||0;if(f==='allow')return r2((b.taxAllow||0)+(b.ntAllow||0));return b[f]??0};
+  const rows=L.map(x=>[x.e.id,empName(x.e),String(x.e.department||'').trim(),x.birRow.taxType,((x.e.allowance_taxable!==undefined?x.e.allowance_taxable:(x.birRow.taxAllow||0)>0)?'YES':'NO'),...keys.map(f=>val(x,f))]);
+  const sm=f=>r2(L.reduce((a,x)=>a+(Number(val(x,f))||0),0));
+  const tot=['','TOTAL','','','',...keys.map(f=>f==='msc'?'':sm(f))];
+  const meta=L.map(x=>{
+    const b=x.birRow,v={};keys.forEach(f=>v[f]=Number(val(x,f))||0);const f={},ok=(a,c)=>Math.abs(a-c)<=0.011;
+    const parts={basic:v.basic,less:-v.lateAbs,hol:v.hol,ot:v.ot,nd:v.nd,allowTax:v.taxAllow,allowNon:v.ntAllow};
+    const bs=g=>Math.max(0,r2(govKeys(g).reduce((a,kk)=>a+(Number(parts[kk])||0),0)));
+    f.comp=ok(bs('sss'),v.comp);f.phicBasis=ok(bs('phic'),v.phicBasis);f.hdmfBasis=ok(bs('hdmf'),v.hdmfBasis);f.taxComp=ok(bs('tax'),v.taxComp);
+    const sc=sssCalc(v.comp);f.msc=ok(sc.msc,v.msc);f.sssEr=ok(sc.er,v.sssEr);f.sssEe=ok(sc.ee,v.sssEe);f.ec=ok(sc.ec,v.ec);f.mpfEr=ok(sc.mpfEr,v.mpfEr);f.mpfEe=ok(sc.mpfEe,v.mpfEe);
+    const pb=Math.min(Math.max(v.phicBasis,Number(st.phic_floor)),Number(st.phic_ceiling)),pe=r2(pb*Number(st.phic_rate)*Number(st.phic_employee_share));
+    f.phicEe=ok(pe,v.phicEe);f.phicEr=ok(r2(pb*Number(st.phic_rate))-v.phicEe,v.phicEr);
+    let he=Number(st.hdmf_ee),hr=Number(st.hdmf_er);
+    if(st.hdmf_mode==='percent'){const bb=Math.min(v.hdmfBasis,Number(st.hdmf_max_salary)||10000);he=r2(bb*(v.hdmfBasis<=1500?0.01:0.02));hr=r2(bb*0.02)}
+    f.hdmfEe=ok(he,v.hdmfEe);f.hdmfEr=ok(hr,v.hdmfEr);
+    f.netContrib=ok(r2(v.taxComp-(v.sssEe+v.mpfEe+v.phicEe+v.hdmfEe)),v.netContrib);
+    f.taxable=ok(b.taxType==='T1'?0:Math.max(0,v.netContrib),v.taxable);
+    f.tax=ok(monthlyTax(v.taxable),v.tax);
+    return f;
+  });
+  L.forEach((x,i)=>{const r=rows[i],m=meta[i],v={};keys.forEach((f,j)=>v[f]=Number(r[5+j])||0);m.taxAllow=Math.abs((r[4]==='YES'?v.allow:0)-v.taxAllow)<=0.011;m.ntAllow=Math.abs(v.allow-v.taxAllow-v.ntAllow)<=0.011});
+  const sum=f=>sm(f);
+  const extra=[[],['REMITTANCES PAYABLE'],['SSS regular (ER + EE)',r2(sum('sssEr')+sum('sssEe'))],['SSS provident fund / MPF (ER + EE)',r2(sum('mpfEr')+sum('mpfEe'))],['SSS EC (employer)',sum('ec')],['PhilHealth (ER + EE)',r2(sum('phicEr')+sum('phicEe'))],['Pag-IBIG (ER + EE)',r2(sum('hdmfEr')+sum('hdmfEe'))],['Withholding tax (1601-C)',sum('tax')],['Total',r2(sum('sssEr')+sum('sssEe')+sum('mpfEr')+sum('mpfEe')+sum('ec')+sum('phicEr')+sum('phicEe')+sum('hdmfEr')+sum('hdmfEe')+sum('tax'))]];
+  const notes=[
+    'Basic, Late & Absences, Net of L&A, Holiday / RD, Overtime, Night Diff and Allowances are the totals of the 1st and 2nd Cut-off sheets (looked up by EE No).',
+    'Taxable Allowance = Allowances if the employee\'s allowance is taxable (column "Taxable Allowance?"), otherwise 0. Non-taxable Allowance = Allowances − Taxable Allowance.',
+    `SSS Basis = ${govLabel('sss')}. PhilHealth Basis = ${govLabel('phic')}. Pag-IBIG Basis = ${st.hdmf_mode==='percent'?govLabel('hdmf'):'not used (fixed amount)'}. Tax Basis = ${govLabel('tax')}. (Settings → Basis of government contributions.)`,
+    'SSS: the SSS Basis is looked up in the SSS Contribution Table sheet (MSC, ER, EE, EC and the Mandatory Provident Fund ER / EE).',
+    `PhilHealth: premium = basis (kept between ${Number(st.phic_floor)} and ${Number(st.phic_ceiling)}) × ${Number(st.phic_rate)*100}%. EE share = ${Number(st.phic_employee_share)*100}% of it, ER pays the rest.`,
+    st.hdmf_mode==='percent'?'Pag-IBIG: EE = 1% of the basis (2% above 1,500), ER = 2%, basis capped at the maximum on the Rates sheet.':`Pag-IBIG: fixed amount per month (EE ${Number(st.hdmf_ee)}, ER ${Number(st.hdmf_er)}), from the Rates sheet. Employees set to no Pag-IBIG show 0.`,
+    'Net of Contributions = Tax Basis − (SSS EE + MPF EE + PHIC EE + HDMF EE). Taxable Compensation = that amount (not below 0; 0 for minimum wage earners, T1).',
+    'Withholding Tax = prescribed minimum tax + % over CL × (Taxable Compensation − CL), looked up in the Withholding Tax Table sheet.',
+    'The 2nd Cut-off sheet takes SSS, PhilHealth, Pag-IBIG and Withholding tax (EE share) from this sheet.'];
+  return{tab:'BIR',keys,hdr,head,rows,tot,extra,dept:null,calc:true,lead:5,meta,notes,name:SECTION_NAME.BIR};
+}
+
 const SECTION_NAME={'1':'1st Cut-off','2':'2nd Cut-off','M':'Monthly','BIR':'BIR Purposes'};
-/* Table for one payroll section, used for the Excel export (and the CSV fallback). */
-function sectionData(tab,items){
+/* Table for one payroll section, used for the Excel export (and the CSV fallback).
+   opts.calc = also add what the live formulas need (opts.dtr = the DTR summary data of that cut-off). */
+function sectionData(tab,items,opts){
+  const calc=!!(opts&&opts.calc);
   const P=S.period,c=tab==='1'||tab==='2'?P.cuts[Number(tab)-1]:null;
   const hdr=[S.settings.company,`Payroll month: ${fmtLong(P.cuts[0].payStart,P.cuts[1].payEnd)}`];
   if(c)hdr.push(`Payroll period: ${fmtLong(c.payStart,c.payEnd)} (${c.n===1?'1st':'2nd'} cut-off)`);
   hdr.push(`Payroll cut-off: ${c?fmtLong(c.start,c.end):fmtLong(P.start,P.end)}`);
   hdr.push(`${SECTION_NAME[tab]}${c&&c.n===2?' · government contributions and withholding tax deducted':''}${tab==='BIR'?' · employees subject to government deductions':''}`);
-  let head,rows,tot,extra=[],dept=null,keys=null;
+  let head,rows,tot,extra=[],dept=null,keys=null,aug=null;
   if(tab==='BIR'){
+    if(calc)return birCalcData(items,hdr);
     const L=items.filter(x=>x.bir),k=keys=['basic','lateAbs','netLA','hol','taxAllow','comp','msc','sssEr','sssEe','ec','mpfEr','mpfEe','phicBasis','phicEr','phicEe','hdmfEr','hdmfEe','taxComp','netContrib','tax'];
     head=['EE No','Employee','Department','Tax Type','Basic Salary','Late & Absences','Net of L&A','Holiday / RD','Taxable Allowance','SSS Basis','MSC','SSS ER','SSS EE','EC','MPF ER','MPF EE','PhilHealth Basis','PHIC ER','PHIC EE','HDMF ER','HDMF EE','Tax Basis','Net of Contributions','Withholding Tax (1601-C)'];
     rows=L.map(x=>[x.e.id,empName(x.e),x.e.department,x.birRow.taxType,...k.map(f=>x.birRow[f]??(f==='taxComp'?x.birRow.comp:''))]);
@@ -4679,27 +4965,60 @@ function sectionData(tab,items){
     dept={head:['Department','Employees',...cols.map(c=>c[1])],
       rows:names.map(k=>{const o=dm.get(k);return[k,o.n,...o.v.map(r2)]}),
       tot:['TOTAL',items.length,...cols.map((c,i)=>r2(names.reduce((a,k)=>a+dm.get(k).v[i],0)))]};
+    if(calc&&(tab==='1'||tab==='2')&&opts.dtr)aug=cutCalcAug(tab,items,keys,head,rows,tot,opts.dtr);
+    else if(calc&&tab==='M')aug={calc:true,notes:[
+      'Each figure is the sum of the 1st Cut-off and 2nd Cut-off sheets (looked up by EE No).',
+      'Net of L&A = Basic − Late − Absences. Gross = Net of L&A + the other earnings. Net pay = Gross − deductions.',
+      'SSS, PhilHealth, Pag-IBIG and Withholding tax are the monthly amounts deducted on the 2nd cut-off (computed on the BIR Purposes sheet).']};
   }
-  return{name:SECTION_NAME[tab],tab,keys,hdr,head,rows,tot,extra,dept};
+  return{name:SECTION_NAME[tab],tab,keys,hdr,head,rows,tot,extra,dept,...(aug||{})};
 }
 /* Live Excel formulas for a payroll sheet (values stay as the cached result, so the file also re-imports).
-   ctx = {tab:{name,keys,top,n}} of the other payroll sheets in the same workbook (used by Monthly to pull the two cut-offs). */
+   ctx = info of the other sheets of the same workbook (cut-offs, DTR summaries, BIR, rates and tables). */
 function addFormulas(ws,d,ctx){
-  if(d.count&&d.rows.length){ // DTR summary: the figures are inputs, the TOTAL row sums them
+  const col=XC,top=d.hdr.length+1,n=d.rows.length,ra=top+2,rb=top+1+n,totR=top+2+n;
+  const F=(R,C,f)=>{const a=XLSX.utils.encode_cell({r:R-1,c:C}),c=ws[a];if(!c||typeof c.v!=='number')return;ws[a]={t:'n',v:c.v,f}};
+  const RT=ctx&&ctx.rates;
+  if(d.kind==='dtrF'){ // DTR summary: attendance figures are inputs; the rates are formulas of each other; the TOTAL row sums the figures
+    d.rows.forEach((row,i)=>{const R=ra+i,m=d.meta[i];if(RT&&m.dF)F(R,5,`E${R}*12/${RT.div}`);if(RT&&m.mF)F(R,4,`F${R}*${RT.div}/12`)});
+    if(n)d.tot.forEach((v,j)=>{if(typeof v==='number')F(totR,j,`SUM(${col(j)}${ra}:${col(j)}${rb})`)});
+    return;
+  }
+  if(d.count&&d.rows.length){ // plain DTR summary (record view): the figures are inputs, the TOTAL row sums them
     const top0=d.hdr.length+1,ra0=top0+2,rb0=top0+1+d.rows.length,tr=top0+2+d.rows.length;
     for(let C=3;C<d.head.length;C++){const a=XLSX.utils.encode_cell({r:tr-1,c:C}),c=ws[a];if(c&&typeof c.v==='number'){const L=XLSX.utils.encode_col(C);ws[a]={t:'n',v:c.v,f:`SUM(${L}${ra0}:${L}${rb0})`}}}
     return;
   }
   if(!d.keys||!d.tab)return;
-  const col=XLSX.utils.encode_col,K=d.keys,n=d.rows.length,top=d.hdr.length+1,ra=top+2,rb=top+1+n,totR=top+2+n;
-  const F=(R,C,f)=>{const a=XLSX.utils.encode_cell({r:R-1,c:C}),c=ws[a];if(!c||typeof c.v!=='number')return;ws[a]={t:'n',v:c.v,f}};
-  const I=k=>K.indexOf(k),L=k=>col(4+I(k));
+  const K=d.keys,LEAD=d.lead||4;
+  const I=k=>K.indexOf(k),L=k=>col(LEAD+I(k));
+  const pull=(s,k,R)=>{const j=s.keys.indexOf(k);return`IFERROR(VLOOKUP($A${R},${xq(s.name)}!$A$${s.top+2}:$${col(s.lead-1+s.keys.length)}$${s.top+1+s.n},${s.lead+1+j},FALSE),0)`};
   if(d.tab==='BIR'){
-    for(let R=ra;R<=rb;R++){
-      F(R,4+I('netLA'),`ROUND(MAX(0,${L('basic')}${R}-${L('lateAbs')}${R}),2)`);
-      F(R,4+I('netContrib'),`ROUND(${L('taxComp')}${R}-(${L('sssEe')}${R}+${L('mpfEe')}${R}+${L('phicEe')}${R}+${L('hdmfEe')}${R}),2)`);
-    }
-    K.forEach((k,i)=>{if(k!=='msc'&&n)F(totR,4+i,`SUM(${col(4+i)}${ra}:${col(4+i)}${rb})`)});
+    const c1=ctx&&ctx['1'],c2=ctx&&ctx['2'],tb=ctx&&ctx.sssLast?`${xq('SSS Contribution Table')}!$A$6:$L$${ctx.sssLast}`:null,tx=ctx&&ctx.taxRef;
+    d.rows.forEach((row,i)=>{
+      const R=ra+i,m=d.meta?d.meta[i]:null,c=k=>`${L(k)}${R}`;
+      const set=(k,f,on)=>{if(on!==false)F(R,LEAD+I(k),f)};
+      if(c1&&c2){
+        const both=k=>`${pull(c1,k,R)}+${pull(c2,k,R)}`;
+        set('basic',both('basic'));set('lateAbs',`${both('lateUt')}+${both('absence')}`);set('netLA',both('netLA'));set('hol',both('hol'));set('ot',both('otPay'));set('nd',both('ndPay'));set('allow',both('allowance'));
+      }
+      if(!m||!RT)return;
+      set('taxAllow',`IF($E${R}="YES",${c('allow')},0)`,m.taxAllow);
+      set('ntAllow',`${c('allow')}-${c('taxAllow')}`,m.ntAllow);
+      const P={basic:c('basic'),less:'-'+c('lateAbs'),hol:c('hol'),ot:c('ot'),nd:c('nd'),allowTax:c('taxAllow'),allowNon:c('ntAllow')};
+      const basis=g=>{const ks=govKeys(g);return ks.length?`MAX(0,ROUND(${ks.map(q=>P[q]).join('+').replace(/\+-/g,'-')},2))`:'0'};
+      set('comp',basis('sss'),m.comp);set('phicBasis',basis('phic'),m.phicBasis);set('hdmfBasis',basis('hdmf'),m.hdmfBasis);set('taxComp',basis('tax'),m.taxComp);
+      if(tb){const cp=c('comp'),sv=(k,cn)=>set(k,`IF(${cp}<=0,0,VLOOKUP(${cp},${tb},${cn},TRUE))`,m[k]);sv('msc',5);sv('sssEr',6);sv('sssEe',7);sv('ec',9);sv('mpfEr',10);sv('mpfEe',11)}
+      const pb=`MIN(MAX(${c('phicBasis')},${RT.phFloor}),${RT.phCeil})`;
+      set('phicEe',`ROUND(${pb}*${RT.phRate}*${RT.phShare},2)`,m.phicEe);
+      set('phicEr',`ROUND(${pb}*${RT.phRate},2)-${c('phicEe')}`,m.phicEr);
+      if(S.settings.hdmf_mode==='percent'){const hb=`MIN(${c('hdmfBasis')},${RT.hdMax})`;set('hdmfEe',`ROUND(${hb}*IF(${c('hdmfBasis')}<=${RT.hdThr},${RT.hdLow},${RT.hdHigh}),2)`,m.hdmfEe);set('hdmfEr',`ROUND(${hb}*${RT.hdErPct},2)`,m.hdmfEr)}
+      else{set('hdmfEe',RT.hdEe,m.hdmfEe);set('hdmfEr',RT.hdEr,m.hdmfEr)}
+      set('netContrib',`ROUND(${c('taxComp')}-(${c('sssEe')}+${c('mpfEe')}+${c('phicEe')}+${c('hdmfEe')}),2)`,m.netContrib);
+      set('taxable',`IF($D${R}="T1",0,MAX(0,${c('netContrib')}))`,m.taxable);
+      if(tx){const t=c('taxable');set('tax',`ROUND(VLOOKUP(${t},${tx},2,TRUE)+(${t}-VLOOKUP(${t},${tx},1,TRUE))*VLOOKUP(${t},${tx},3,TRUE),2)`,m.tax)}
+    });
+    K.forEach((k,i)=>{if(k!=='msc'&&n)F(totR,LEAD+i,`SUM(${col(LEAD+i)}${ra}:${col(LEAD+i)}${rb})`)});
     const T=k=>`${L(k)}${totR}`,r0=totR+3; // REMITTANCES PAYABLE rows follow the total row (blank, title, then the lines)
     const fx=[`${T('sssEr')}+${T('sssEe')}`,`${T('mpfEr')}+${T('mpfEe')}`,T('ec'),`${T('phicEr')}+${T('phicEe')}`,`${T('hdmfEr')}+${T('hdmfEe')}`,T('tax')];
     fx.forEach((f,i)=>F(r0+i,1,f));
@@ -4710,41 +5029,92 @@ function addFormulas(ws,d,ctx){
   let src=d.tab==='M'?['1','2'].map(t=>ctx&&ctx[t]).filter(Boolean):[];
   if(src.length<2)src=[]; // both cut-off sheets are needed to rebuild the month
   const pulled=new Set(['basic','lateUt','absence','netLA','allowance','hol','otPay','ndPay','adjPlus','fold','advA','coopD','adjMinus','sssLoan','hdmfLoan','sss','phic','hdmf','tax']);
-  const look=(s,k,R)=>{const j=s.keys.indexOf(k);if(j<0)return null;return`IFERROR(VLOOKUP($A${R},'${s.name}'!$A$${s.top+2}:$${col(3+s.keys.length)}$${s.top+1+s.n},${5+j},FALSE),0)`};
+  const look=(s,k,R)=>{const j=s.keys.indexOf(k);if(j<0)return null;return pull(s,k,R)};
+  const dc=d.cutN&&ctx&&ctx.dtr&&ctx.dtr[d.cutN]; // the DTR summary of this cut-off
   for(let R=ra;R<=rb;R++){
+    const i=R-ra,m=d.meta?d.meta[i]:null;
     for(const k of K){
-      if(src.length&&pulled.has(k)){const p=src.map(s=>look(s,k,R)).filter(Boolean);if(p.length)F(R,4+I(k),p.join('+'));continue}
-      if(src.length&&(k==='net1'||k==='net2')){const s=ctx[k==='net1'?'1':'2'];const p=s&&look(s,'net',R);if(p)F(R,4+I(k),p);continue}
+      if(src.length&&pulled.has(k)){const p=src.map(s=>look(s,k,R)).filter(Boolean);if(p.length)F(R,LEAD+I(k),p.join('+'));continue}
+      if(src.length&&(k==='net1'||k==='net2')){const s=ctx[k==='net1'?'1':'2'];const p=s&&look(s,'net',R);if(p)F(R,LEAD+I(k),p);continue}
     }
-    if(!src.length)F(R,4+I('netLA'),`ROUND(MAX(0,${L('basic')}${R}-${L('lateUt')}${R}-${L('absence')}${R}),2)`);
-    F(R,4+I('gross'),`ROUND(SUM(${L('netLA')}${R}:${col(3+I('gross'))}${R}),2)`);
-    if(dedKeys.length)F(R,4+I('net'),`ROUND(${L('gross')}${R}-SUM(${L(dedKeys[0])}${R}:${L(dedKeys[dedKeys.length-1])}${R}),2)`);
+    if(d.cutN&&dc&&RT&&m){ // cut-off sheet: helper block pulls the DTR summary, pay columns are formulas of it
+      const hm=d.hmap,H=(k)=>col(hm[k])+R,D=H('daily'),hp=RT.hpd,rt=m.regime==='pre'?RT.pre:RT.post;
+      for(const key of Object.keys(hm)){
+        const sc=col(d.hsrc[key]);
+        F(R,hm[key],`IFERROR(INDEX(${xq(dc.name)}!$${sc}$${dc.top+2}:$${sc}$${dc.top+1+dc.n},MATCH($A${R},${xq(dc.name)}!$A$${dc.top+2}:$A$${dc.top+1+dc.n},0)),0)`);
+      }
+      const terms=(list,pre,kk)=>list.filter(q=>rt[q]).map(q=>`${H(pre+q)}*${rt[q][kk]}`).join('+')||'0';
+      const put=(k,f)=>{if(m.f[k])F(R,LEAD+I(k),f)};
+      const half=`ROUND(${H('monthly')}/2,2)`;
+      put('basic',`IF($D${R}="Daily",ROUND(${D}*${H('paid')},2),${d.cutN===1?half:`ROUND(${H('monthly')}-${half},2)`})`);
+      put('lateUt',`${D}/(${hp}*60)*${H('late')}`);
+      put('absence',`IF($D${R}="Daily",0,${D}*${H('absent')})`);
+      put('allowance',`${H('allow')}/2`);
+      put('otPay',`${D}/${hp}/60*(${terms(d.otK,'ot_','ot')})`);
+      put('ndPay',`${D}/${hp}/60*${RT.ndPct}*(${terms(d.ndK,'nd_','nd')})`);
+      put('hol',`IF($D${R}="Daily",${D}/${hp}*(${terms(d.hK,'hol_','holD')})+${D}*${H('rhUnw')},${D}/${hp}*(${terms(d.hK,'hol_','holM')}))+${H('holAmt')}`);
+    }
+    if(d.cutN&&m&&ctx&&ctx.BIR){ // SSS, PhilHealth, Pag-IBIG and tax of the payout cut-off come from BIR Purposes
+      const B=ctx.BIR,bk=q=>pull(B,q,R);
+      const gf={sss:`${bk('sssEe')}+${bk('mpfEe')}`,phic:bk('phicEe'),hdmf:bk('hdmfEe'),tax:bk('tax')};
+      for(const g of Object.keys(gf))if(m.gov[g]&&I(g)>=0)F(R,LEAD+I(g),gf[g]);
+    }
+    if(!src.length)F(R,LEAD+I('netLA'),`MAX(0,${L('basic')}${R}-${L('lateUt')}${R}-${L('absence')}${R})`);
+    if(!(d.cutN&&m&&m.note.length&&!Object.keys(m.f).length))F(R,LEAD+I('gross'),`ROUND(SUM(${L('netLA')}${R}:${col(LEAD-1+I('gross'))}${R}),2)`);
+    if(dedKeys.length)F(R,LEAD+I('net'),`ROUND(${L('gross')}${R}-SUM(${L(dedKeys[0])}${R}:${L(dedKeys[dedKeys.length-1])}${R}),2)`);
   }
-  if(n)K.forEach((k,i)=>F(totR,4+i,`SUM(${col(4+i)}${ra}:${col(4+i)}${rb})`));
+  if(n)K.forEach((k,i)=>F(totR,LEAD+i,`SUM(${col(LEAD+i)}${ra}:${col(LEAD+i)}${rb})`));
   if(d.dept&&d.dept.rows.length){
     const m=d.dept.rows.length,r1=totR+4,rEnd=r1+m-1; // blank, title, header, then one row per department
     d.dept.rows.forEach((row,j)=>{
       const R=r1+j,crit=row[0]==='No department'?'""':`$A${R}`;
       F(R,1,`COUNTIF($C$${ra}:$C$${rb},${crit})`);
-      K.forEach((k,i)=>F(R,2+i,`SUMIF($C$${ra}:$C$${rb},${crit},${col(4+i)}$${ra}:${col(4+i)}$${rb})`));
+      K.forEach((k,i)=>F(R,2+i,`SUMIF($C$${ra}:$C$${rb},${crit},${col(LEAD+i)}$${ra}:${col(LEAD+i)}$${rb})`));
     });
     for(let C=1;C<2+K.length;C++)F(rEnd+1,C,`SUM(${col(C)}${r1}:${col(C)}${rEnd})`);
   }
 }
 function sheetFor(d,ctx){
-  const aoa=[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra,...(d.dept&&d.dept.rows.length?[[],['SUMMARY PER DEPARTMENT'],d.dept.head,...d.dept.rows,d.dept.tot]:[])];
+  const aoa=[...d.hdr.map(t=>[t]),[],d.head,...d.rows,d.tot,...d.extra,...(d.dept&&d.dept.rows.length?[[],['SUMMARY PER DEPARTMENT'],d.dept.head,...d.dept.rows,d.dept.tot]:[]),...(d.notes&&d.notes.length?[[],['HOW THIS SHEET IS COMPUTED'],...d.notes.map(t=>[t])]:[])];
   const ws=XLSX.utils.aoa_to_sheet(aoa),ncol=d.head.length,top=d.hdr.length+1;
   ws['!merges']=d.hdr.map((_,i)=>({s:{r:i,c:0},e:{r:i,c:Math.max(0,ncol-1)}}));
-  ws['!cols']=d.head.map((hd,i)=>({wch:i===1?30:(i===0?7:Math.max(12,String(hd).length+2))}));
+  ws['!cols']=d.head.map((hd,i)=>({wch:i===1?30:(i===0?7:(hd==='Notes'?44:Math.max(12,String(hd).length+2)))}));
   addFormulas(ws,d,ctx);
   const rng=XLSX.utils.decode_range(ws['!ref']);
   for(let R=top+1;R<=rng.e.r;R++)for(let C=0;C<=rng.e.c;C++){const cell=ws[XLSX.utils.encode_cell({r:R,c:C})];if(cell&&cell.t==='n'&&!(C===0&&R<=top+d.rows.length))cell.z='#,##0.00'}
   if(d.dept&&d.dept.rows.length){const r0=top+1+d.rows.length+4;for(let j=0;j<=d.dept.rows.length;j++){const cell=ws[XLSX.utils.encode_cell({r:r0+j,c:1})];if(cell&&cell.t==='n')cell.z='0'}} // employee counts
+  const fmtCol=(c,z)=>{for(let R=top+1;R<=top+1+d.rows.length;R++){const x=ws[XLSX.utils.encode_cell({r:R,c})];if(x&&x.t==='n')x.z=z}};
+  if(d.kind==='dtrF'){const cl=d.cols;[cl.present,cl.paid,cl.absent,...Object.values(cl.hol),cl.rhUnw].forEach(c=>fmtCol(c,'0.00'));[cl.late,...Object.values(cl.ot),...Object.values(cl.nd),cl.chk,cl.review,cl.noRec].forEach(c=>fmtCol(c,'General'))}
+  if(d.hmap)for(const k of Object.keys(d.hmap))fmtCol(d.hmap[k],/^(paid|absent|hol_|rhUnw)/.test(k)?'0.00':(/^(late|ot_|nd_)/.test(k)?'General':'#,##0.00'));
   ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:top,c:0},e:{r:top+d.rows.length,c:ncol-1}})};
   return ws;
 }
-/* Where each cut-off sheet sits in the workbook, so the Monthly sheet can look its figures up. */
-function sheetCtx(secs){const c={};for(const d of secs)if(d.tab&&d.keys)c[d.tab]={name:String(d.name).slice(0,31),keys:d.keys,top:d.hdr.length+1,n:d.rows.length};return c}
+/* Where each sheet sits in the workbook, so the other sheets can look its figures up. */
+function sheetCtx(secs,extra){
+  const c={dtr:{}};
+  for(const d of secs){const info={name:String(d.name).slice(0,31),keys:d.keys,top:d.hdr.length+1,n:d.rows.length,lead:d.lead||4};if(d.kind==='dtrF')c.dtr[d.n]=info;else if(d.tab&&d.keys)c[d.tab]=info}
+  return Object.assign(c,extra);
+}
+/* The workbook: DTR summaries, cut-off sheets, Monthly, BIR Purposes, then the SSS table, the withholding tax table and the rates. */
+function payrollWorkbook(parts){
+  const st=S.settings,rates=ratesSheet(st),sss=sssSheet(st,rates.M),tax=taxSheet();
+  const secs=[parts.dtr1,parts.dtr2,parts.s1,parts.s2,parts.M,parts.BIR].filter(Boolean);
+  const ctx=sheetCtx(secs,{rates:rates.M,sssLast:sss.last,taxRef:tax.ref});
+  const wb=XLSX.utils.book_new();
+  for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d,ctx),String(d.name).slice(0,31));
+  if(parts.BIR){XLSX.utils.book_append_sheet(wb,sss.ws,'SSS Contribution Table');XLSX.utils.book_append_sheet(wb,tax.ws,'Withholding Tax Table')}
+  XLSX.utils.book_append_sheet(wb,rates.ws,'Rates');
+  wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
+  return wb;
+}
+/* Which sheets an export needs. The cut-offs, BIR Purposes and the tables depend on each other, so anything beyond the 1st cut-off exports the whole set. */
+function exportParts(tabs){
+  const all=computePayroll(),P=S.period,co=S.settings.company;
+  const needAll=tabs.some(t=>t!=='1')||all.some(x=>x.freq==='first'&&x.bir);
+  const dtr1=dtrFormulaData(1,P,all,co),dtr2=needAll?dtrFormulaData(2,P,all,co):null;
+  return{dtr1,dtr2,s1:sectionData('1',payItems(all,'1'),{calc:true,dtr:dtr1}),s2:needAll?sectionData('2',payItems(all,'2'),{calc:true,dtr:dtr2}):null,
+    M:needAll?sectionData('M',all,{calc:true}):null,BIR:needAll?sectionData('BIR',all,{calc:true}):null};
+}
 async function saveFile(filename,data,mime){
   const blob=new Blob([data],{type:mime});
   if(S.downloads){
@@ -4755,16 +5125,10 @@ async function saveFile(filename,data,mime){
   return false;
 }
 async function exportExcel(tabs){
-  const all=computePayroll(),dtr=tabs.length>1?[1,2].map(n=>({...dtrDataFor(n,S.period,all,S.settings.company),name:(n===1?'1st':'2nd')+' DTR Summary'})):[]; // all sections: DTR summary of both cut-offs first, like in Payroll records
-  // The Monthly sheet is a formula over the two cut-off sheets, so they always travel with it.
-  const eff=['1','2','M','BIR'].filter(t=>tabs.includes(t)||(tabs.includes('M')&&(t==='1'||t==='2')));
-  const secs=[...dtr,...eff.map(t=>sectionData(t,payItems(all,t)))];
+  const parts=exportParts(tabs),secs=[parts.dtr1,parts.dtr2,parts.s1,parts.s2,parts.M,parts.BIR].filter(Boolean);
   const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
   if(typeof XLSX!=='undefined'){
-    const wb=XLSX.utils.book_new();
-    const ctx=sheetCtx(secs);
-    for(const d of secs)XLSX.utils.book_append_sheet(wb,sheetFor(d,ctx),d.name);
-    wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
+    const wb=payrollWorkbook(parts);
     wb.Props={Title:`${S.settings.company} payroll ${fmtMonth(S.period.ym)}`,Company:S.settings.company};
     const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
     if(await saveFile(base+'.xlsx',out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))return;
@@ -4775,6 +5139,22 @@ async function exportExcel(tabs){
   toast('Excel export isn’t available here, so the payroll is offered as CSV.',true);
   offerFile(base+'.csv',csv);
 }
+function recordParts(rec){
+  const co=rec.company||S.settings.company,P=rec.period;
+  if(rec.isMonth){
+    const dtr1=dtrFormulaData(1,P,rec.r1.items,co),dtr2=dtrFormulaData(2,P,rec.r2.items,co);
+    return withRec(rec,()=>({dtr1,dtr2,s1:sectionData('1',payItems(rec.r1.items,'1'),{calc:true,dtr:dtr1}),s2:sectionData('2',payItems(rec.r2.items,'2'),{calc:true,dtr:dtr2}),M:sectionData('M',rec.items,{calc:true}),BIR:sectionData('BIR',rec.items,{calc:true})}));
+  }
+  const n=rec.n,dd=dtrFormulaData(n,P,rec.items,co);
+  return withRec(rec,()=>{const p={[n===1?'dtr1':'dtr2']:dd,[n===1?'s1':'s2']:sectionData(String(n),payItems(rec.items,String(n)),{calc:true,dtr:dd})};if(n===2){p.M=sectionData('M',recMonthItems(rec),{calc:true});p.BIR=sectionData('BIR',rec.items,{calc:true})}return p});
+}
+async function exportRecord(rec){
+  if(typeof XLSX==='undefined'){toast('Excel export isn’t available here. Use Print instead.',true);return}
+  const wb=payrollWorkbook(recordParts(rec));
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+  if(!await saveFile(`${curCo().file}-payroll-record-${rec.isMonth?'month-'+rec.ym:rec.key}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))toast('Could not save the file.',true);
+}
+
 async function setPayrollStatus(n,status){
   const c=S.period.cuts[n-1], k=n===1?'k1':'k2', all=computePayroll(), items=all.filter(x=>!x[k].off);
   const doc=status==='APPROVED'
