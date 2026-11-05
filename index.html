@@ -1613,7 +1613,7 @@ function pageThirteenth(){
   const isRes=x=>x.e.active===false||!!x.e._historical;
   const curRows=d.rows.filter(x=>!isRes(x)),resRows=d.rows.filter(isRes);
   const head13=`<thead><tr><th class="stick" style="min-width:170px">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total net of L&amp;A</th><th class="n">13th month</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead>`;
-  const row13=x=>{const r=x.release||{};return `<tr><td class="stick" style="min-width:170px"><b>${h(empName(x.e))}</b>${isRes(x)?' <span class="chip warn">Resigned</span>':''}<div class="muted small">${x.e._historical?'Not in Employee Master':'#'+h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td><button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button></td></tr>`};
+  const row13=x=>{const r=x.release||{};return `<tr><td class="stick" style="min-width:170px"><b>${h(empName(x.e))}</b>${isRes(x)?' <span class="chip warn">Resigned</span>':''}<div class="muted small">${x.e._historical?'Not in Employee Master':'#'+h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td style="white-space:nowrap"><button class="btn sm" data-act="thirteenthSlip" data-id="${h(x.e.id)}">Payslip</button> <button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button></td></tr>`};
   const monthTot=list=>d.months.map((_,i)=>r2(list.reduce((a,x)=>a+(x.monthly[i]?.basic||0),0)));
   const foot13=(label,list)=>`<tfoot><tr><td class="stick" style="min-width:170px">${h(label)} (${list.length})</td><td></td>${monthTot(list).map(v=>`<td class="n">${peso(v)}</td>`).join('')}<td class="n">${peso(r2(list.reduce((a,x)=>a+x.total,0)))}</td><td class="n">${peso(r2(list.reduce((a,x)=>a+x.computed,0)))}</td><td colspan="4"></td></tr></tfoot>`;
   const sect13=(title,note,list,label)=>`<h2 style="margin:18px 0 4px">${h(title)} <span class="chip">${list.length}</span></h2><p class="muted small" style="margin:0 0 8px">${h(note)}</p>${list.length?`<div class="tablewrap" data-noresp><table>${head13}<tbody>${list.map(row13).join('')}</tbody>${foot13(label,list)}</table></div>`:'<div class="panel empty" style="margin:0"><b>None</b></div>'}`;
@@ -1623,6 +1623,27 @@ function pageThirteenth(){
   html+=`<p class="muted small" style="margin-top:8px">* A month is marked incomplete when a complete Monthly import is unavailable and both 1st and 2nd cut-off values are not available. Imported payroll is read as stored (not recalculated); only its "NET of L&amp;A" is used, or basic less lates and absences when the file has no such column.</p>`;
   html+=`<div class="panel" style="margin-top:14px"><h2>Release status</h2><p class="muted small">For employees whose 13th-month pay was already released, check <b>Released</b>, enter the <b>actual release date</b>, and add a note if needed. This does not change the computed 13th-month amount. Former/resigned employees found in historical approved payroll records remain visible here even if they are no longer in Employee Master.</p></div>`;
   return html;
+}
+function thirteenthSlipHtml(row,d){
+  const st=S.settings,e=row.e,r=row.release||{},line=(l,v,ng)=>`<tr><td>${l}</td><td class="n">${ng&&v?'−':''}${amt(v)}</td></tr>`;
+  const adv=e._historical?[]:(S.ledger||[]).filter(a=>a.for_13th&&a.status!=='closed'&&String(a.employee_id)===String(e.id)&&advBalance(a)>0);
+  const advTot=r2(adv.reduce((t,a)=>t+advBalance(a),0)),net=r2(row.computed-advTot),incomplete=row.monthly.some(m=>!(m.firstOk&&m.secondOk));
+  const cell=(ok,v)=>ok&&v?amt(v):'—';
+  return `<div class="slip"><div class="slip-head">${coLogo()}<div><p><b>${h(st.company)}</b></p><p class="muted small">${h(st.address||'')}</p></div></div>
+  <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h([e._historical?'Not in Employee Master':'#'+e.id,e.active===false||e._historical?'Resigned':e.employment_status,e.position,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">13th Month Pay<br><b>${h(thirteenthPeriod(d.year).label)}</b></div></div>
+  <table><thead><tr><th>Month</th><th>Source</th><th class="n">1st cut-off</th><th class="n">2nd cut-off</th><th class="n">Net of L&amp;A</th></tr></thead><tbody>
+  ${row.monthly.map(m=>{const whole=m.source==='Imported Monthly';return `<tr><td>${h(fmtMonth(m.ym))}</td><td class="small">${h(m.source)}</td><td class="n">${whole?'—':cell(m.firstOk,m.first)}</td><td class="n">${whole?'—':cell(m.secondOk,m.second)}</td><td class="n">${amt(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td></tr>`}).join('')}
+  <tr class="tot"><td colspan="4">Total basic salary net of lates and absences (12 months)</td><td class="n">${amt(row.total)}</td></tr></tbody></table>
+  <table style="margin-top:14px"><tbody>${line('Total net of L&amp;A (12 months)',row.total)}
+  <tr class="tot"><td>13th month pay (${amt(row.total)} ÷ 12)</td><td class="n">${amt(row.computed)}</td></tr>
+  ${adv.map(a=>line('Less: company advance'+(a.note?' ('+h(a.note)+')':''),advBalance(a),1)).join('')}</tbody></table>
+  <div class="net"><span>${advTot?'Net 13th month pay':'13th month pay'}</span><b>${peso(net)}</b></div>
+  ${incomplete?'<p class="banner warn" style="margin-top:12px">* Months marked with an asterisk have missing payroll. They are counted as zero in the total, so the 13th month may be understated until the missing payroll is imported or approved.</p>':''}
+  <p class="muted small" style="margin-top:12px">${r.released?`Released${r.release_date?' on '+h(fmtDY(r.release_date)):''}${r.note?' · '+h(r.note):''}`:'Not yet released'} · Basis: basic salary net of lates and absences only; allowances, holiday pay, overtime and night differential are excluded · generated ${h(fmtStamp(nowISO()))}</p></div>`;
+}
+function thirteenthSlipDialog(id){
+  const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
+  openDlg('13th Month Payslip · '+empName(row.e),thirteenthSlipHtml(row,d),'<button class="btn sm" data-act="printSlip">Print</button>');
 }
 function thirteenthReleaseDialog(id){
   const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
@@ -5747,6 +5768,7 @@ const actions={
   remRefresh(){loadReminders()},
   remDone(el){toggleReminder(el.dataset.id)},
   remDel(el){deleteReminder(el.dataset.id)},
+  thirteenthSlip(el){thirteenthSlipDialog(el.dataset.id)},
   thirteenthRelease(el){thirteenthReleaseDialog(el.dataset.id)},
   prevPayImport(){previousPayrollDialog()},
   prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
