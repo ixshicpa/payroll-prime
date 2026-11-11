@@ -2449,12 +2449,14 @@ async function forgotPw(){
   try{await AUTH.sendPasswordResetEmail(em)}catch(e){}
   S.ui.loginErr='';toast('If this email has a login and receives mail, a reset link was sent. Otherwise ask the administrator for a temporary password.');
 }
-function signOut(reason){
+function signOut(reason,clearCache){
   if(S.account)logAction('LOGOUT','account',S.account.email,reason||'Signed out');
   if(AUTH&&AUTH.currentUser)AUTH.signOut().catch(()=>{});
   clearSession();S.account=null;S.viewAs=null;S.legacy=false;S.mustChange=null;stopData();closeDlg();S.company=null;
   S.route='dashboard';history.replaceState(null,'','#dashboard');
   render();if(reason)toast(reason);
+  // Manual sign-out: also remove the saved copy of the data from this browser (shared computers).
+  if(clearCache&&Store===Remote&&Remote.db&&Remote.db.clearPersistence){const d=Remote.db;auditQueue.then(()=>d.terminate()).then(()=>d.clearPersistence()).catch(()=>{}).finally(()=>location.reload())}
 }
 let lastActive=Date.now();
 ['click','keydown','touchstart'].forEach(ev=>document.addEventListener(ev,()=>{lastActive=Date.now();if(S.account)saveSession(S.account.email)},{passive:true}));
@@ -5828,7 +5830,7 @@ const actions={
   async approvePayroll(el){const n=Number(el.dataset.n),c=S.period.cuts[n-1];if(await confirmDlg(`Approve ${n===1?'1st':'2nd'} cut-off?`,`Payroll ${fmtRange(c.payStart,c.payEnd)}. Attendance ${fmtRange(c.start,c.end)} and its company advances will be locked.`,'Approve'))setPayrollStatus(n,'APPROVED')},
   async reopenPayroll(el){const n=Number(el.dataset.n);if(S.rel[n]){toast('This cut-off was already released. Undo the release record first, then reopen.',true);return}if(await confirmDlg('Reopen this cut-off?','Attendance and company advances become editable again and the approval is cleared.','Reopen',true))setPayrollStatus(n,'DRAFT')},
   delHoliday(el){const d=el.dataset.date;saveHolidays((S.settings.holidays||[]).filter(x=>x.date!==d),'Holiday removed')},
-  signOut(){signOut()},
+  signOut(){signOut(undefined,true)},
   backupNow(el){backupNow(el)},
   localOnly(){localStorage.setItem('pl-local-ok','1');location.reload()},
   copyLink(){navigator.clipboard.writeText(shareLink()).then(()=>toast('Link copied'),()=>toast('Select and copy the link manually.',true))},
@@ -6120,7 +6122,7 @@ async function boot(){
   let db=null;
   takeCfgFromLink();
   const fc=getCfg();
-  if(fc&&window.firebase){try{firebase.initializeApp(fc);try{if(firebase.appCheck&&fc.projectId==='database-55b53')firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider('6LdyWeYtAAAAAAsoZzyTKM_zoKGjrKNBUyjEO2Eg'),true)}catch(e){console.warn('App Check',e)}try{if(firebase.auth){AUTH=firebase.auth();AUTH.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(()=>{})}}catch(e){console.warn('Auth',e);AUTH=null}db=firebase.firestore();Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
+  if(fc&&window.firebase){try{firebase.initializeApp(fc);try{if(firebase.appCheck&&fc.projectId==='database-55b53')firebase.appCheck().activate(new firebase.appCheck.ReCaptchaEnterpriseProvider('6LdyWeYtAAAAAAsoZzyTKM_zoKGjrKNBUyjEO2Eg'),true)}catch(e){console.warn('App Check',e)}try{if(firebase.auth){AUTH=firebase.auth();AUTH.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(()=>{})}}catch(e){console.warn('Auth',e);AUTH=null}db=firebase.firestore();try{db.enablePersistence({synchronizeTabs:true}).catch(e=>console.warn('cache',e&&e.code))}catch(e){} /* keep a copy in this browser: reopening the app reads only what changed (saves the free daily read quota) */Remote.db=db;Store=Remote;S.mode='shared'}catch(e){console.warn(e);db=null}}
   else if(window.claude&&typeof window.claude.use==='function'){try{db=await window.claude.use('db')}catch(e){db=null}}
   if(db){Remote.db=db;Store=Remote;S.mode='shared';if(!fc){try{S.downloads=await window.claude.use('downloads')}catch(e){}}}
   else if(sessionStorage.getItem('pl-local-ok')||localStorage.getItem('pl-local-ok')){Local.load();Store=Local;S.mode='local'}
