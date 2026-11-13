@@ -352,6 +352,10 @@ body.signed-out .top .period,body.signed-out .top .who,body.signed-out nav.tabs{
 .pa-page{break-after:page;page-break-after:always}
 .pa-page:last-child{break-after:auto;page-break-after:auto}
 .slip .cert{font-size:12.5px;margin:10px 0 0;text-align:justify}
+.slip .appr{display:flex;justify-content:space-between;gap:28px;margin-top:26px}
+.slip .appr>div{flex:1;text-align:center}
+.slip .appr .nm{border-bottom:1px solid var(--ink);min-height:20px;padding:0 4px 2px;font-weight:700}
+.slip .appr .cap{font-size:11px;margin-top:2px}
 /* Print all payslips: 2 employees per page, each with a company copy and an employee copy (4 payslips per page) */
 .ps-page{break-after:page;page-break-after:always;display:grid;grid-template-rows:128mm 128mm;gap:3mm;overflow:hidden}
 .ps-page:last-child{break-after:auto;page-break-after:auto}
@@ -360,7 +364,8 @@ body.signed-out .top .period,body.signed-out .top .who,body.signed-out nav.tabs{
 .ps-cell{position:relative;padding:2mm 3mm;overflow:hidden;font-size:9px;line-height:1.3;border-right:1px dashed #888;color:#000}
 .ps-cell:last-child{border-right:0}
 .ps-tag{position:absolute;top:1.5mm;right:3mm;font-size:8px;font-weight:800;letter-spacing:.06em;border:1px solid #000;padding:0 4px;border-radius:3px}
-.ps-sig{margin-top:6px;font-size:8.5px}
+.ps-sig{margin-top:20px;padding-bottom:4px;font-size:9px;line-height:1.6;white-space:nowrap}
+.ps-cell .slip .appr{margin-top:16px}
 .ps-cell .slip-head{padding-right:24mm;margin-bottom:6px}
 .ps-fit{transform-origin:top left}
 .ps-cell .slip p,.ps-cell .slip div,.ps-cell .slip td,.ps-cell .slip th,.ps-cell .slip span{font-size:9px!important}
@@ -425,6 +430,7 @@ const ROLES={ADMIN:'Admin',HR:'HR',PAYROLL:'Payroll',DEPT_HEAD:'Department head'
 const DEFAULTS={
   company:'PRIME LAUNDRY TECHNOLOGY & EQUIPMENT',
   address:'#6 Narciso Street, Brgy. Canumay East, Valenzuela City',
+  slip_checked_by:'', slip_approved_by:'',
   cutoff_day:26, cut1_end:10, divisor:313, hours_per_day:8, break_min:60, grace_min:1, rest_day:0, min_ot:30,
   std_in:'08:00', std_out:'17:00', nd_start:'22:00', nd_end:'06:00',
   ot_reg:1.25, ot_snw:1.30, ot_rh:1.30, nd_pct:0.10, nd_base_reg:1.0, nd_base_snw:1.30, nd_base_rh:2.0,
@@ -1023,6 +1029,11 @@ function fitSlips(a){
       f.style.zoom=String(Math.max(0.55,z));
     }
   });
+  /* Company copy and employee copy of the same row use the SAME zoom (the smaller one), so both are aligned and equal in size */
+  a.querySelectorAll('.ps-row').forEach(row=>{
+    const fs=[...row.querySelectorAll('.ps-fit')],z=Math.min(...fs.map(f=>parseFloat(f.style.zoom)||1));
+    fs.forEach(f=>{f.style.zoom=z<1?String(z):''});
+  });
   a.style.cssText='';
 }
 function printHtml(html,landscape){
@@ -1607,7 +1618,7 @@ function pageThirteenth(){
   if(u.thirteenthErr)html+=`<div class="banner bad">Could not load the 13th-month records: ${h(u.thirteenthErr)}</div>`;
   if(u.thirteenthBusy&&!d)return html+'<div class="loading">Loading approved payroll records…</div>';
   if(!d)return html+'<div class="panel empty"><b>No 13th-month data loaded.</b> Press Refresh.</div>';
-  const complete=d.months.filter(ym=>d.byMonth[ym]?.first&&d.byMonth[ym]?.second).length;
+  const complete=d.months.filter(ym=>{const b=d.byMonth[ym]||{},pv=d.prevByMonth[ym]||{};return !!((b.first&&b.second)||pv.monthly||((b.first||pv.first)&&(b.second||pv.second)))}).length; /* approved 1st+2nd, an imported Monthly, or imported/approved 1st + 2nd */
   const total13=r2(d.rows.reduce((a,x)=>a+x.computed,0)),released13=r2(d.rows.filter(x=>x.release.released).reduce((a,x)=>a+x.computed,0));
   html+=`<div class="stats"><div class="stat"><b>${complete}/12</b><span>Complete months</span></div><div class="stat"><b>${d.rows.length}</b><span>Employees in computation</span></div><div class="stat hl"><b class="money">${peso(total13)}</b><span>Total computed 13th month</span></div><div class="stat"><b class="money">${peso(released13)}</b><span>Already released</span></div><div class="stat"><b class="money">${peso(r2(total13-released13))}</b><span>Not yet released</span></div></div>`;
   const isRes=x=>x.e.active===false||!!x.e._historical;
@@ -4656,6 +4667,11 @@ function pageBir(items){
   </tbody></table></div></div>`;
   return html;
 }
+/* Name(s) of the department head account(s) of the employee's department (same company), shown under "Approved by" on the payslip */
+function deptHeadNames(e){
+  const dep=e&&e.department;if(!dep)return'';
+  return (S.accounts||[]).filter(a=>a.role==='DEPT_HEAD'&&a.active!==false&&acctDepts(a).includes(dep)&&companiesOf(a).includes(S.company)).map(a=>a.full_name||a.email).join(' / ');
+}
 function payslipHtml(x,tab){
   const st=S.settings,e=x.e,P=S.period,line=(l,v,ng)=>`<tr><td>${l}</td><td class="n">${ng&&v?'−':''}${amt(v)}</td></tr>`;
   const r=tab==='1'?x.k1:(tab==='2'?x.k2:x.mo), t=tab==='1'?x.k1.t:(tab==='2'?x.k2.t:x.t);
@@ -4678,9 +4694,7 @@ function payslipHtml(x,tab){
   ${(()=>{const q=advSplit(r);return line('Company advances',q.advA)+(q.coopD?line('Coop savings',q.coopD):'')})()}${(r.adjMinus||0)?line('Adjustment from previous cut-off',r.adjMinus):''}${(r.sssLoan||0)?line('SSS loan',r.sssLoan):''}${(r.hdmfLoan||0)?line('Pag-IBIG loan',r.hdmfLoan):''}${showGov?line('SSS',r.sss)+line('PhilHealth',r.phic)+line('Pag-IBIG (HDMF)',r.hdmf)+line('Withholding tax',r.tax):''}<tr class="tot"><td>Total deductions</td><td class="n">${amt(r.ded)}</td></tr></tbody></table>
   <div class="net"><span>Net pay</span><b>${peso(r.net)}</b></div>
   <p class="cert">I, the undersigned hereby certify to the best of my knowledge and belief that the amounts indicated above are the exact payments of my services rendered for the period covered by this payroll receipt of which I hereby acknowledge.</p>
-  
-  
-  
+  <div class="appr"><div><div class="nm">${h(st.slip_checked_by||'')}</div><div class="cap">( Checked by )</div></div><div><div class="nm">${h(st.slip_approved_by||deptHeadNames(e))}</div><div class="cap">( Approved by )</div></div></div>
 </div>`;
 }
 /* ================= Excel export with live formulas =================
@@ -5322,6 +5336,8 @@ function pageSettings(){
   <form class="panel" data-form="settings"><h2>Company &amp; schedule</h2><div class="grid">
     <label class="f wide">Company name<input name="company" value="${h(st.company)}" ${dis}></label>
     <label class="f wide">Address<input name="address" value="${h(st.address)}" ${dis}></label>
+    <label class="f">Payslip “Checked by” name<input name="slip_checked_by" value="${h(st.slip_checked_by||'')}" placeholder="e.g. Maria Santos" ${dis}></label>
+    <label class="f">Payslip “Approved by” name<input name="slip_approved_by" value="${h(st.slip_approved_by||'')}" placeholder="Blank = department head of the employee" ${dis}></label>
     ${n('cutoff_day','Attendance month starts on day',1)}${n('cut1_end','1st cut-off attendance ends on day',1)}${t('std_in','Standard time in')}${t('std_out','Standard time out')}${n('break_min','Break (minutes)',1)}${n('grace_min','Grace (minutes)',1)}${n('min_ot','Minimum OT (minutes)',1)}
     <label class="f">Rest day<select name="rest_day" ${dis}>${WD.map((w,i)=>`<option value="${i}" ${Number(st.rest_day)===i?'selected':''}>${w}</option>`).join('')}</select></label>
     ${n('divisor','Working-days divisor',1)}${n('hours_per_day','Hours per day',1)}${t('nd_start','Night diff starts')}${t('nd_end','Night diff ends')}
