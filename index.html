@@ -867,7 +867,10 @@ function cutCalc(e,rows,cutoff){
     t.otPay+=kind==='REG'?hourly*(c.otPaid/60)*Number(st.ot_reg):hourly*(c.otPaid/60)*m*((kind==='RH'||kind==='RHRD')?Number(st.ot_rh):Number(st.ot_snw));
     t.ndPay+=hourly*(c.nd/60)*st.nd_pct*ndBase2(kind);
     if(kind==='REG'||c.status!=='P'){if(c.status==='P')t.payDays+=1;if(c.status==='HD')t.payDays+=0.5;continue}
-    const hrs=Math.min(Math.max(0,c.worked),hpd*60)/60, frac=hrs/hpd;
+    const shS=shiftOf(e,r.work_date),sI=toMin(shS.in);let sO=toMin(shS.out);if(sO<=sI)sO+=1440;
+    const schedMin=Math.max(0,sO-sI-Number(st.break_min))||hpd*60; // paid minutes of THIS employee's scheduled shift (not a fixed 8h)
+    const wk=Math.max(0,c.worked);
+    const frac=wk>=schedMin-Number(st.grace_min)?1:wk/schedMin, hrs=frac*hpd; // complete shift = 1 whole day (8 pay-hours)
     cadd(cls.hol,kind,hrs);cls.post=true;
     if(isMonthly){
       // The monthly salary already pays regular holidays and special days (100%), but not rest days.
