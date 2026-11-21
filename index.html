@@ -134,7 +134,8 @@ input,select,textarea{border:1px solid var(--line);background:var(--surface);bor
 textarea{width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
 label.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);font-weight:600}
 label.f > input,label.f > select,label.f > textarea{color:var(--ink);font-weight:400;font-size:15px}
-input.t24{font-variant-numeric:tabular-nums;letter-spacing:.02em}
+input.t24{font-variant-numeric:tabular-nums;letter-spacing:.02em;transition:background-color .3s}
+input.t24.t24-conv{background-color:var(--ok-soft)}
 .mtab td input{width:100%;min-width:84px}.mtab td input[type=date]{min-width:140px}.mtab td{vertical-align:middle}
 .mfill{margin-top:12px}
 table.sch td{padding:4px 8px;vertical-align:middle}table.sch input.t24{width:86px}table.sch tr.unsel{opacity:.55}.mfill summary{cursor:pointer;font-weight:600}
@@ -577,11 +578,15 @@ const daysBetween=(a,b)=>Math.round((new Date(b+'T00:00:00Z')-new Date(a+'T00:00
 function parseTime(v){
   if(v==null||v==='')return null;
   if(typeof v==='number'){const frac=v-Math.floor(v);const mins=Math.round(frac*1440)%1440;return pad(Math.floor(mins/60))+':'+pad(mins%60)}
-  const s=String(v).trim().toUpperCase(); if(!s)return null;
-  let m=s.match(/(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM|A\.M\.|P\.M\.|A|P)?/);
+  const s=String(v).trim().toUpperCase().replace(/\s+/g,' '); if(!s)return null;
+  // 17:30 · 5:30 PM · 5:30PM · 5:30 P.M. · 5:30p · 5.30pm · 5pm · 5 PM · 0530 PM · 1730
+  let m=s.match(/(\d{1,2})\s*:\s*(\d{2})(?::\d{2})?\s*(A\.?\s?M\.?|P\.?\s?M\.?|A|P)?/);
   let hh,mm,ap;
   if(m){hh=+m[1];mm=+m[2];ap=m[3]}
-  else{m=s.match(/^(\d{1,2})(\d{2})\s*(AM|PM)?$/);if(!m)return null;hh=+m[1];mm=+m[2];ap=m[3]}
+  else if((m=s.match(/^(\d{1,2})\.(\d{2})\s*(A\.?\s?M\.?|P\.?\s?M\.?|A|P)?$/))){hh=+m[1];mm=+m[2];ap=m[3]}
+  else if((m=s.match(/^(\d{1,2})\s*(A\.?\s?M\.?|P\.?\s?M\.?|A|P)$/))){hh=+m[1];mm=0;ap=m[2]}
+  else{m=s.match(/^(\d{1,2})(\d{2})\s*(A\.?\s?M\.?|P\.?\s?M\.?|A|P)?$/);if(!m)return null;hh=+m[1];mm=+m[2];ap=m[3]}
+  if(ap&&(hh<1||hh>12))return null;
   if(ap){if(ap[0]==='P'&&hh<12)hh+=12;if(ap[0]==='A'&&hh===12)hh=0}
   if(hh>23||mm>59)return null;
   return pad(hh)+':'+pad(mm);
@@ -2741,7 +2746,7 @@ function dashDeadlines(){
   for(const c of S.period.cuts){
     const d=S.deadlines[c.key],at=d&&d.at?d.at:'',date=at?at.slice(0,10):suggestDeadline(c),time=at?at.slice(11,16):'17:00';
     html+=`<div style="border-top:1px solid var(--line);padding-top:12px;margin-top:12px"><div class="row"><div><b>${cutName(c)}</b> <span class="muted small">payroll ${h(fmtRange(c.payStart,c.payEnd))} · attendance ${h(fmtRange(c.start,c.end))}</span></div><span class="spacer"></span>${at?`<span class="chip ${deadlineMs(c)<Date.now()?'bad':'acc'}">Due ${h(fmtDT(at))} · ${countdownHtml(c)}</span>`:'<span class="chip warn">No deadline set</span>'}</div>
-    ${canSet?`<form class="row" data-form="deadline" data-key="${c.key}" style="margin:10px 0"><label class="f">Date<input type="date" name="date" required value="${h(date)}" min="${h(c.end)}"></label><label class="f">Time (24h)<input type="text" class="t24" inputmode="numeric" maxlength="8" name="time" required value="${h(time)}" placeholder="HH:MM"></label><button class="btn primary" style="align-self:flex-end">${at?'Update deadline':'Set deadline'}</button>${at?`<button type="button" class="btn" style="align-self:flex-end" data-act="clearDeadline" data-key="${c.key}">Remove</button>`:''}</form>`:''}
+    ${canSet?`<form class="row" data-form="deadline" data-key="${c.key}" style="margin:10px 0"><label class="f">Date<input type="date" name="date" required value="${h(date)}" min="${h(c.end)}"></label><label class="f">Time (24h)<input type="text" class="t24" maxlength="10" name="time" required value="${h(time)}" placeholder="HH:MM"></label><button class="btn primary" style="align-self:flex-end">${at?'Update deadline':'Set deadline'}</button>${at?`<button type="button" class="btn" style="align-self:flex-end" data-act="clearDeadline" data-key="${c.key}">Remove</button>`:''}</form>`:''}
     ${!at?`<p class="muted small" style="margin:0 0 6px">Suggested: ${h(fmtDY(suggestDeadline(c)))} 17:00, two days before payday.</p>`:''}
     ${deptStatusList(c)}</div>`;
   }
@@ -3189,15 +3194,15 @@ function openSchedule(eid){
     const ds=dayShift(e,d),lk=lockedDate(d),dis=lk?'disabled':'',wk=weeklyRest(e)!=null&&dow(d)===weeklyRest(e);
     rows+=`<tr data-d="${d}" class="${lk?'unsel':''}"><td><b>${h(fmtD(d))}</b> <span class="muted small">${WD[dow(d)]}</span>${hol[d]?' <span class="chip acc">Holiday</span>':''}${lk?' <span class="chip">Locked</span>':''}</td>
       <td class="muted small">${wk?'Rest day':h(def)}</td>
-      <td><input type="text" class="t24 sch-in" inputmode="numeric" autocomplete="off" maxlength="8" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.in):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
-      <td><input type="text" class="t24 sch-out" inputmode="numeric" autocomplete="off" maxlength="8" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.out):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
+      <td><input type="text" class="t24 sch-in" autocomplete="off" maxlength="10" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.in):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
+      <td><input type="text" class="t24 sch-out" autocomplete="off" maxlength="10" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.out):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
       <td><input type="checkbox" class="sch-off" name="off_${d}" ${ds&&ds.off?'checked':''} ${dis} aria-label="Rest day ${h(fmtD(d))}"></td></tr>`;
   }
   openDlg(`Daily schedule · ${empName(e)}`,`<form data-form="sched" data-id="${e.id}">
     <p class="muted small" style="margin-top:0">${h(fmtRange(start,end))}. Default shift: <b>${h(def)}</b> · weekly rest day: <b>${h(restLabel(e))}</b>. Leave a day blank to use the default. Enter a shift to make it a working day with that shift (even on the usual rest day), or tick <b>Rest day</b> for this employee's rest day that week. A rest day is not counted as absent, and work done on it is paid as rest-day work. Late, undertime, overtime and absences follow the schedule of each day.</p>
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
-      <label class="f" style="max-width:110px">Shift in<input type="text" class="t24" id="schFillIn" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
-      <label class="f" style="max-width:110px">Shift out<input type="text" class="t24" id="schFillOut" inputmode="numeric" maxlength="8" placeholder="HH:MM"></label>
+      <label class="f" style="max-width:110px">Shift in<input type="text" class="t24" id="schFillIn" maxlength="10" placeholder="HH:MM"></label>
+      <label class="f" style="max-width:110px">Shift out<input type="text" class="t24" id="schFillOut" maxlength="10" placeholder="HH:MM"></label>
       <button type="button" class="btn sm" data-act="schFill" data-v="blank">Fill blank working days</button>
       <button type="button" class="btn sm" data-act="schFill" data-v="all">Fill all working days</button>
       <button type="button" class="btn sm" data-act="schFill" data-v="clear">Clear all</button>
@@ -3329,11 +3334,11 @@ function dtrEditor(o,canAppr){
   return `<form class="editor" data-form="dtr" data-id="${h(r._id)}">
     ${r._auto?`<div class="banner warn small" style="margin:0 0 12px"><div>No time in or time out was imported for this working day, so it counts as <b>absent</b>. Approve the absence (and add the leave type in Remarks), or set Review to <b>With issue</b> if the employee worked${can('editTimes')?' — or enter the time in and time out below with a remark':''}.</div></div>`:''}
     <div class="grid">
-      <label class="f">Time in<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_in" value="${h(r.time_in||'')}" ${tdis}></label>
-      <label class="f">Time out<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
+      <label class="f">Time in<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_in" value="${h(r.time_in||'')}" ${tdis}></label>
+      <label class="f">Time out<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
       ${(()=>{const sh=shiftOf(o.e,r.work_date),ds=dayShift(o.e,r.work_date),sdis=(!canSched()||lk)?'disabled':'',def=(o.e&&o.e.shift_in)||S.settings.std_in,defO=(o.e&&o.e.shift_out)||S.settings.std_out;
-        return `<label class="f">Shift in this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_in" placeholder="${h(def)}" value="${ds&&!ds.off?h(ds.in):''}" ${sdis}></label>
-      <label class="f">Shift out this day<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&!ds.off?h(ds.out):''}" ${sdis}></label>
+        return `<label class="f">Shift in this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_in" placeholder="${h(def)}" value="${ds&&!ds.off?h(ds.in):''}" ${sdis}></label>
+      <label class="f">Shift out this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&!ds.off?h(ds.out):''}" ${sdis}></label>
       <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Rest day this date</label>`})()}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
@@ -3445,7 +3450,7 @@ function pageImport(){
     html+=`<div class="banner ${R.failed||R.locked?'warn':'ok'}">Imported ${R.saved} ${R.saved===1?'row':'rows'} into ${h(R.co||curCo().short)}.${R.dup?` ${R.dup} already imported, skipped.`:''}${R.locked?` ${R.locked} skipped because the cut-off is approved and locked.`:''}${R.failed?` ${R.failed} failed to save.`:''}${R.left?` ${R.left} ${R.left===1?'row was':'rows were'} not imported and ${R.left===1?'is':'are'} still listed below.`:''}<span class="spacer"></span><a class="btn sm" href="#dtr">Go to attendance</a><button class="btn sm" data-act="clearImport">${R.left?'Clear list':'Import more'}</button></div>`;
   }
   if(u.importTab==='upload'){
-    html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect time card exports can be uploaded as they are.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
+    html+=`<div class="panel"><h2>Upload Excel or CSV</h2><p class="muted small" style="margin:0 0 8px">Extra title lines and extra columns are ignored. Only the name (with last name if present), date, time in and time out are read, so Hik-Connect <b>Time Card</b> and <b>Mobile Transaction</b> exports can be uploaded as they are. Choose both files together to put their punches together: when the time in is in one file and the time out in the other, the day gets both. A day already imported with only a time in gets its time out from a later file, and the other way around.</p><div class="row"><input type="file" id="fileIn" accept=".xlsx,.xls,.csv,.txt" multiple data-change="fileIn"><span class="spacer"></span><button class="btn sm" data-act="template">Download template</button></div>${typeof XLSX==='undefined'?'<p class="muted small">Excel reading is unavailable right now; CSV files still work.</p>':''}</div>`;
   } else if(u.importTab==='portal'){
     html+=portalPanel();
   } else if(u.importTab==='summary'){
@@ -3459,8 +3464,8 @@ function pageImport(){
     html+=`<form class="panel" data-form="single"><h2>Add or correct one day</h2><div class="grid">
       <label class="f">Employee<select name="employee_id" required><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}">#${e.id} · ${h(empName(e))}</option>`).join('')}</select></label>
       <label class="f">Date<input type="date" name="date" required value="${todayISO()}"></label>
-      <label class="f">Time in<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_in"></label>
-      <label class="f">Time out<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="time_out"></label>
+      <label class="f">Time in<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_in"></label>
+      <label class="f">Time out<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_out"></label>
       <label class="f wide">Remarks<input name="remarks" placeholder="Why this entry is added manually"></label>
     </div><div class="row" style="margin-top:12px"><button class="btn primary">Save entry</button></div></form>`;
   }
@@ -3686,7 +3691,7 @@ async function checkImportRows(){
     const have=new Map(S.dtr.map(r=>[r._id,r])),dates=pk.map(x=>x.date).sort();
     if(dates.length&&(dates[0]<S.period.start||dates[dates.length-1]>S.period.end))for(const r of await readDtrRange(dates[0],dates[dates.length-1]))have.set(r._id,r);
     let same=0;
-    for(const x of pk){const ex=have.get(x.employee_id+'_'+x.date);x.dup=importState(x,ex);if(ex){x.exIn=ex.time_in||null;x.exOut=ex.time_out||null}
+    for(const x of pk){const ex=have.get(x.employee_id+'_'+x.date);matchSavedHalf(x,ex);x.dup=importState(x,ex);if(ex){x.exIn=ex.time_in||null;x.exOut=ex.time_out||null}
       if(x.dup==='same')same++;else if(x.dup==='diff')x.sel=false}
     if(u.importRows!==rows)return;
     const keep=rows.filter(x=>x.dup!=='same');keep._checked=true;keep._dupes=(rows._dupes||0)+same;
@@ -3821,7 +3826,7 @@ function rowsFromObjects(objs){
     }
     let [e,match,note]=coNote?[null,coNote]:findEmployee(cId?o[cId]:null,o[cName]);
     if(e&&role()==='DEPT_HEAD'&&!inMyDept(e)){match=`${NOT_MINE} (${empName(e)}, ${e.department||'no department'})`;e=null}
-    out.push({employee_id:e?e.id:null,name:e?empName(e):src,src,department:e?e.department:'',date,time_in:parseTime(o[cIn]),time_out:parseTime(o[cOut]),match:!date?'Date not readable — use yyyy-mm-dd, e.g. 2026-10-01':match,note:note||''});
+    out.push({employee_id:e?e.id:null,name:e?empName(e):src,src,department:e?e.department:'',date,time_in:parseTime(o[cIn]),time_out:parseTime(o[cOut]),match:!date?'Date not readable — use yyyy-mm-dd, e.g. 2026-10-01':match,note:note||'',pl:o._punches?o._punches.map(t=>({t,f:o._file||''})):null,file:o._file||''});
   }
   if(!out.length)throw new Error('No usable rows found.');
   // Several time-clock punches for the same DTR name and date collapse into one day:
@@ -3831,10 +3836,13 @@ function rowsFromObjects(objs){
   for(const x of out){
     if(!canPick(x)){rest.push(x);continue}
     const k=x.employee_id+'_'+x.date+'_'+normName(x.src),cur=grouped.get(k);
-    if(!cur){grouped.set(k,{...x,punches:1});continue}
+    if(!cur){grouped.set(k,{...x,punches:1,P:rowPunches(x),anyList:!!x.pl});continue}
     const ins=[cur.time_in,x.time_in].filter(Boolean),outs=[cur.time_out,x.time_out].filter(Boolean);
     cur.time_in=ins.length?ins.sort()[0]:null;cur.time_out=outs.length?outs.sort().pop():null;cur.punches++;
+    cur.P.push(...rowPunches(x));if(x.pl)cur.anyList=true;
   }
+  // Rows read as punches (Records / one Time column), or one day spread over several rows: pick the time in and out from all punches.
+  for(const g of grouped.values()){if(g.anyList||g.punches>1)resolvePunches(g);delete g.P;delete g.anyList;delete g.pl}
   // Two different DTR names that landed on the same employee and date: neither is imported.
   const byDay=new Map();for(const g of grouped.values()){const k=g.employee_id+'_'+g.date;(byDay.get(k)||byDay.set(k,[]).get(k)).push(g)}
   for(const list of byDay.values())if(list.length>1){
@@ -3844,6 +3852,42 @@ function rowsFromObjects(objs){
   const res=[...grouped.values(),...rest];
   for(const x of res)x.sel=x.match==='OK';
   return res;
+}
+
+/* ---------- Punches → time in / time out ----------
+   All punches of one employee and day (from one file or several) are sorted. Punches less than an hour apart count as one
+   (double taps). The earliest is the time in and the latest the time out. A day with only one punch is a time in when it is
+   before the middle of the employee's shift that day and a time out after it, unless the file says which one it is. */
+const SAME_PUNCH_MIN=60;
+const rowPunches=x=>x.pl?x.pl.filter(p=>p.t):[x.time_in&&{t:x.time_in,r:'in',f:x.file},x.time_out&&{t:x.time_out,r:'out',f:x.file}].filter(Boolean);
+function punchSide(e,d,t){
+  const sh=shiftOf(e,d);let a=toMin(sh.in),b=toMin(sh.out),m=toMin(t);
+  if(a==null||b==null||m==null)return 'in';
+  if(b<=a){b+=1440;if(m<a-360)m+=1440}
+  return m>=(a+b)/2?'out':'in';
+}
+function resolvePunches(g){
+  const ps=g.P.filter(p=>p.t).sort((a,b)=>toMin(a.t)-toMin(b.t));if(!ps.length)return;
+  const first=ps[0],last=ps[ps.length-1],files=[...new Set(ps.map(p=>p.f).filter(Boolean))];
+  const short=f=>String(f).replace(/\.(csv|xlsx?|txt)$/i,'');
+  if(toMin(last.t)-toMin(first.t)>=SAME_PUNCH_MIN){
+    g.time_in=first.t;g.time_out=last.t;
+    if(files.length>1&&first.f!==last.f)g.note=[g.note,`time in from ${short(first.f)}, time out from ${short(last.f)}`].filter(Boolean).join(' · ');
+  }else{
+    const roles=[...new Set(ps.map(p=>p.r).filter(Boolean))];
+    const side=roles.length===1?roles[0]:punchSide(empById(g.employee_id),g.date,first.t);
+    if(side==='out'){g.time_in=null;g.time_out=last.t}else{g.time_in=first.t;g.time_out=null}
+    g.single=side;
+    g.note=[g.note,`one punch only — read as the time ${side}${roles.length===1?'':' (by the shift)'}`].filter(Boolean).join(' · ');
+  }
+  g.punches=ps.length;
+}
+/* A one-punch day whose saved record already has the other half: a later punch is the time out, an earlier one the time in. */
+function matchSavedHalf(x,ex){
+  if(!x.single||!ex)return;
+  const p=x.time_in||x.time_out;if(!p)return;
+  if(ex.time_in&&!ex.time_out&&toMin(p)-toMin(ex.time_in)>=SAME_PUNCH_MIN){x.time_in=null;x.time_out=p;x.single='out'}
+  else if(ex.time_out&&!ex.time_in&&toMin(ex.time_out)-toMin(p)>=SAME_PUNCH_MIN){x.time_out=null;x.time_in=p;x.single='in'}
 }
 
 /* ---------- Import from the TS Laundry franchise portal (read-only) ----------
@@ -4069,7 +4113,7 @@ function parsePortal(txt){
   try{u.importRows=rowsFromObjects(objs);u.importResult=null;scheduleRender()}catch(e){fail(h(e.message||'Could not read the rows.'))}
 }
 /* ---- Reading any attendance file: find the header row, keep only the columns the app needs ---- */
-let TABLE_NOTE='';
+let TABLE_NOTE='',TABLE_FILE='';
 function splitTable(text){
   const lines=String(text).replace(/\r/g,'').replace(/^﻿/,'').split('\n');
   const sample=lines.filter(l=>l.trim()).slice(0,40);
@@ -4097,22 +4141,28 @@ function tableToObjects(grid){
   const iRec=find('records','record','punch records','punches'),iCo=find('company','company name','employer');
   const iId=find('employee id','ee no','employee no','employee number','emp id','emp no','id');
   const useRec=(iIn<0||iOut<0)&&iRec>=0;
-  if(iFirst<0||iDate<0||(!useRec&&(iIn<0||iOut<0))){
+  // One punch per row (e.g. the Mobile Transaction export: Date and Time columns)
+  const iTime=find('time','punch time','clock time','check time','transaction time','log time','timestamp','time stamp');
+  const useOne=!useRec&&iIn<0&&iOut<0&&iTime>=0;
+  if(iFirst<0||iDate<0||(!useRec&&!useOne&&(iIn<0||iOut<0))){
     const seen=head.filter(x=>String(x).trim()).slice(0,14).join(', ');
     const miss=[iFirst<0&&'First Name',iDate<0&&'Date',(!useRec&&iIn<0)&&'Time In',(!useRec&&iOut<0)&&'Time Out'].filter(Boolean);
     throw new Error('Could not find '+miss.join(', ')+' in this file. Columns seen: '+(seen||'none')+'.');
   }
-  const smart=hi>0||useRec||iIn!==basicIn||iOut!==basicOut;
+  const smart=hi>0||useRec||useOne||iIn!==basicIn||iOut!==basicOut;
   const timesIn=txt=>{const m=String(txt).match(/\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AaPp]\.?[Mm]\.?)?/g)||[];return m.map(parseTime).filter(Boolean)};
   const out=[];let skipped=0;
   for(let r=hi+1;r<rows.length;r++){
     const c=rows[r];if(blank(c))continue;
     const first=String(c[iFirst]??'').trim(),last=iLast>=0?String(c[iLast]??'').trim():'';
     const date=c[iDate];if(String(date).trim()===''&&!first)continue;
-    let tin=iIn>=0?c[iIn]:'',tout=iOut>=0?c[iOut]:'';
-    if(useRec){const ts=timesIn(c[iRec]);if(iIn<0)tin=ts.length?ts[0]:'';if(iOut<0)tout=ts.length>1?ts[ts.length-1]:''}
+    let tin=iIn>=0?c[iIn]:'',tout=iOut>=0?c[iOut]:'',punchList=null;
+    if(useRec){const ts=timesIn(c[iRec]);if(iIn<0)tin=ts.length?ts[0]:'';if(iOut<0)tout=ts.length>1?ts[ts.length-1]:'';punchList=ts}
+    if(useOne){const t=parseTime(c[iTime]);tin=t||'';tout='';punchList=t?[t]:[]}
     if(smart&&!parseTime(tin)&&!parseTime(tout)){skipped++;continue}
     const o={'First Name':last&&first&&iLast>=0&&H[iFirst]!=='name'?`${last}, ${first}`:first,'Date':date,'Time In':tin,'Time Out':tout};
+    if(punchList)o._punches=punchList;
+    o._file=TABLE_FILE;
     if(iCo>=0)o['Company']=c[iCo];
     if(iId>=0)o['Employee ID']=c[iId];
     out.push(o);
@@ -4120,19 +4170,29 @@ function tableToObjects(grid){
   if(skipped)TABLE_NOTE=`${skipped} ${skipped===1?'row':'rows'} with no clock-in or clock-out ${skipped===1?'was':'were'} left out.`;
   return out;
 }
+/* Several files can be chosen together (e.g. the Time Card and the Mobile Transaction exports of the same days):
+   their punches are put together per employee and day before the time in and time out are picked. */
 async function handleFile(input){
-  const f=input.files&&input.files[0];if(!f)return;
-  S.ui.importFile=f.name;
+  const files=[...(input.files||[])];if(!files.length)return;
+  S.ui.importFile=files.map(f=>f.name).join(' + ');
+  const objs=[],notes=[];
+  for(const f of files){
+    try{
+      TABLE_FILE=f.name;
+      if(/\.(xlsx|xls)$/i.test(f.name)){
+        if(typeof XLSX==='undefined')throw new Error('Excel reading is unavailable here. Save the sheet as CSV and upload that instead.');
+        const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];
+        objs.push(...tableToObjects(XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''})));
+      } else objs.push(...tableToObjects(splitTable(await f.text())));
+      if(TABLE_NOTE)notes.push(files.length>1?`${f.name}: ${TABLE_NOTE}`:TABLE_NOTE);
+    }catch(e){toast(`${files.length>1?f.name+': ':''}${e.message||'Could not read that file.'}`,true);TABLE_FILE='';input.value='';return}
+  }
+  TABLE_FILE='';
   try{
-    let objs;
-    if(/\.(xlsx|xls)$/i.test(f.name)){
-      if(typeof XLSX==='undefined')throw new Error('Excel reading is unavailable here. Save the sheet as CSV and upload that instead.');
-      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];
-      objs=tableToObjects(XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''}));
-    } else objs=tableToObjects(splitTable(await f.text()));
     S.ui.importRows=rowsFromObjects(objs);S.ui.importResult=null;S.ui.importNote='';scheduleRender();
-    if(TABLE_NOTE)toast(TABLE_NOTE);
+    if(notes.length)toast(notes.join(' '));
   }catch(e){toast(e.message||'Could not read that file.',true)}
+  input.value='';
 }
 async function doImport(mode){
   const all=S.ui.importRows||[];
@@ -4152,6 +4212,7 @@ async function doImport(mode){
       const id=`${x.employee_id}_${x.date}`;
       const inPeriod=x.date>=S.period.start&&x.date<=S.period.end;
       const existing=(inPeriod&&loaded.get(id))||await Store.get(cp('dtr/')+id); // never overwrite a saved day that isn't on screen
+      matchSavedHalf(x,existing);
       const st=importState(x,existing);
       if(st==='same'){dup++;done.add(x);continue}
       if(st==='diff'&&x.dup!=='diff'){x.dup='diff';x.sel=false;x.exIn=existing.time_in||null;x.exOut=existing.time_out||null;continue} // changed since the preview: leave it for HR to decide
@@ -4363,7 +4424,7 @@ function multiPanel(){
   const have=new Map(S.dtr.map(r=>[String(r.employee_id)+'_'+r.work_date,r]));
   const count=new Map();for(const r of m.rows)if(r.d)count.set(r.d,(count.get(r.d)||0)+1);
   const nDays=m.rows.filter(r=>r.d).length,dis=m.busy?'disabled':'';
-  const t=(k,v,extra)=>`<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" value="${h(v||'')}" ${extra} ${dis}>`;
+  const t=(k,v,extra)=>`<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" value="${h(v||'')}" ${extra} ${dis}>`;
   const status=r=>{
     if(!r.d)return '';
     const bits=[WD[dow(r.d)]];
@@ -4548,8 +4609,8 @@ function empForm(e){
     <label class="f">Monthly rate (₱)<input name="monthly_rate" type="number" step="0.01" min="0" value="${v('monthly_rate')}"></label>
     <label class="f">Daily rate (₱)<input name="daily_rate" type="number" step="0.01" min="0" value="${v('daily_rate')}" placeholder="Auto from monthly"></label>
     <label class="f">Monthly allowance (₱)<input name="monthly_allowance" type="number" step="0.01" min="0" value="${v('monthly_allowance',0)}"></label>
-    <label class="f">Default shift start<input name="shift_in" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_in')}" placeholder="${h(S.settings.std_in)}"></label>
-    <label class="f">Default shift end<input name="shift_out" type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" value="${v('shift_out')}" placeholder="${h(S.settings.std_out)}"></label>
+    <label class="f">Default shift start<input name="shift_in" type="text" class="t24" autocomplete="off" maxlength="10" value="${v('shift_in')}" placeholder="${h(S.settings.std_in)}"></label>
+    <label class="f">Default shift end<input name="shift_out" type="text" class="t24" autocomplete="off" maxlength="10" value="${v('shift_out')}" placeholder="${h(S.settings.std_out)}"></label>
     <p class="wide muted small" style="margin:0">Leave shift blank to use the company schedule (${h(S.settings.std_in)}–${h(S.settings.std_out)}). Night shifts that end the next morning are supported.</p>
     <div class="wide row" style="gap:18px">
       <label class="chk"><input type="checkbox" name="allowance_taxable" ${e&&e.allowance_taxable?'checked':''}> Allowance is taxable</label>
@@ -5324,7 +5385,7 @@ function pageAudit(){
 function pageSettings(){
   const st=S.settings, edit=can('settings')&&!S.readOnly, dis=edit?'':'disabled';
   const n=(k,l,step='any')=>`<label class="f">${l}<input type="number" name="${k}" step="${step}" value="${h(st[k])}" ${dis}></label>`;
-  const t=(k,l)=>`<label class="f">${l}<input type="text" class="t24" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="HH:MM" name="${k}" value="${h(st[k])}" ${dis}></label>`;
+  const t=(k,l)=>`<label class="f">${l}<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="${k}" value="${h(st[k])}" ${dis}></label>`;
   const hol=[...(st.holidays||[])].sort((a,b)=>a.date.localeCompare(b.date));
   return `<h1>Settings</h1><p class="sub">Settings for <b>${h(curCo().name)}</b> only; each company keeps its own. Payroll rules from the payroll file. Changes apply to every unapproved cut-off immediately. Payroll is paid on the 15th (1st cut-off) and 30th/31st (2nd cut-off).</p>
   ${backupPanel()}
@@ -5917,13 +5978,34 @@ document.addEventListener('change',async e=>{
 });
 document.addEventListener('toggle',e=>{const d=e.target;if(d&&d.matches&&d.matches('details.guide')){if(d.open){S.ui.dhGuide=d.dataset.guide;for(const o of document.querySelectorAll('details.guide[open]'))if(o!==d)o.open=false}else if(S.ui.dhGuide===d.dataset.guide)S.ui.dhGuide='none'}},true);
 /* All times use the 24-hour clock (HH:MM). Entries like 7:5, 0755, 1730 or 5:30 PM are converted. */
-document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24')&&i.value.trim()){const t=parseTime(i.value);if(t)i.value=t}});
+/* The "time in" field that goes with a "time out" field, so 5:00 typed as a time out after a 08:00 time in is read as 17:00. */
+function t24Partner(i){
+  const f=i.closest('form,tr,.panel,#multiForm')||document;
+  const n=i.name||'',P={time_out:'time_in',day_shift_out:'day_shift_in',shift_out:'shift_in',std_out:'std_in'};
+  if(P[n])return f.querySelector(`[name="${P[n]}"]`);
+  if(/^so_/.test(n))return f.querySelector(`[name="si_${n.slice(3)}"]`);
+  if(i.dataset.mr==='o'){const tr=i.closest('tr');return tr&&tr.querySelector('[data-mr="i"]')}
+  if(i.dataset.m==='fo')return f.querySelector('[data-m="fi"]');
+  if(i.id==='schFillOut')return document.getElementById('schFillIn');
+  return null;
+}
+function t24Fix(i){
+  const v=i.value.trim();if(!v)return;
+  let t=parseTime(v);if(!t)return;
+  // A time out typed without AM/PM (5:00) that falls before the time in (08:00) is read as PM (17:00).
+  if(!/[AP]/i.test(v)){const p=t24Partner(i),pi=p&&parseTime(p.value);
+    if(pi){const o=toMin(t),a=toMin(pi);if(o<720&&o<a&&o+720>a&&o+720<1440)t=pad(Math.floor((o+720)/60))+':'+pad(o%60)}}
+  if(i.value!==t){i.value=t;i.classList.add('t24-conv');setTimeout(()=>i.classList.remove('t24-conv'),900);i.dispatchEvent(new Event('input',{bubbles:true}))}
+}
+document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24'))t24Fix(i)});
+// As soon as AM or PM is typed, the field shows the 24-hour time (5:00 PM → 17:00).
+document.addEventListener('input',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24')&&/\d\s*[AP]\.?\s?M\.?$/i.test(i.value.trim())){const t=parseTime(i.value);if(t){i.value=t;i.classList.add('t24-conv');setTimeout(()=>i.classList.remove('t24-conv'),900)}}});
 document.addEventListener('submit',e=>{
   const f=e.target.closest('form[data-form]');if(!f)return;e.preventDefault();
   for(const i of f.querySelectorAll('input.t24')){
     const v=i.value.trim();if(!v){i.value='';continue}
-    const t=parseTime(v);
-    if(!t){toast(`“${v}” isn’t a valid time. Use 24-hour HH:MM, e.g. 08:00 or 17:30.`,true);i.focus();return}
+    t24Fix(i);const t=parseTime(i.value);
+    if(!t){toast(`“${v}” isn’t a valid time. Type e.g. 08:00, 17:30, 5:30 PM or 5pm.`,true);i.focus();return}
     i.value=t;
   }
   const k=f.dataset.form;
