@@ -497,7 +497,7 @@ function withDeps(map){const o={...map};for(const[k,,,deps]of PERMS)if(o[k]&&dep
 function roleAccess(r){const st=(S.roleAccess||{})[r];return st?{...roleDefaults(r),...st}:roleDefaults(r)}
 const NAV=[
   ['dashboard','Dashboard',null],['dtr','Attendance','viewDtr'],['import','Import DTR','importDtr'],['imports','Import history','importDtr'],
-  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Company advances','viewPayroll'],['reminders','Reminders','reminders'],['audit','Activity log','audit'],
+  ['employees','Employees','viewEmployees'],['adjustments','Adjustments','viewPayroll'],['fold','Fold incentives','editFold'],['payroll','Payroll','viewPayroll'],['records','Payroll records','viewPayroll'],['thirteenth','13th Month Pay','viewPayroll'],['advances','Deductions','viewPayroll'],['reminders','Reminders','reminders'],['audit','Activity log','audit'],
   ['settings','Settings','settings'],['users','User accounts','access']
 ];
 const ABS_REASONS=[['SL','Sick leave'],['VL','Vacation leave'],['EL','Emergency leave'],['LWOP','Leave without pay'],['AWOL','AWOL / no notice'],['OTHER','Other reason']];
@@ -1179,11 +1179,12 @@ function advDetail(r,edit){
 
 /* ---------------- Coop savings and SSS / Pag-IBIG loans (tabs on the Company advances page) ----------------
    Coop savings: entered per cut-off (who and how much, not fixed). Counted inside "Company advances" on payroll and payslip.
-   Loans: amortization taken on the 1st cut-off payday (15th) for a number of times; staff paid once a month on the 2nd cut-off have it on their payday. */
+   Loans: amortization taken on the 1st cut-off payday (15th) for a number of times. A month's deduction can be moved to the 2nd cut-off (late deduction) from the 1st / 2nd cut-off views; staff paid once a month follow their payday. */
 const coopAmount=(n,id)=>{const it=((S.coop||{})[n]||{})[id];return it?Number(it.amount)||0:0};
 const LOAN_TYPES={SSS:'SSS loan',HDMF:'Pag-IBIG loan'};
 const loanYm=k=>String(k).split('_')[0];
-const loanKeyFor=(e,ym)=>ym+(payFreq(e)==='second'?'_2':'_1');
+const loanCutFor=(l,e,ym)=>{const f=payFreq(e);if(f==='first')return 1;if(f==='second')return 2;const o=l&&l.cutby&&Number(l.cutby[ym]);if(o===1||o===2)return o;return Number(l&&l.cut)===2?2:1}; // which cut-off a loan comes off in that month: staff paid once a month follow their payday; otherwise this month's override, else the loan's usual cut-off (1st unless set)
+const loanKeyFor=(e,ym,l)=>ym+'_'+loanCutFor(l,e,ym);
 const loanPaid=l=>r2(Object.values(l.payments||{}).reduce((t,v)=>t+(Number(v)||0),0));
 const loanCount=l=>Object.values(l.payments||{}).filter(v=>Number(v)>0).length;
 const loanTimes=l=>Math.max(1,Math.round(Number(l.times)||0));
@@ -1192,15 +1193,15 @@ function loanSchedule(l,e,key){
   const times=loanTimes(l),per=r2(Number(l.amount)||0),pays=l.payments||{},startYm=l.start_ym||loanYm(key),keyYm=loanYm(key);
   const live=l.status!=='paused'&&l.status!=='closed';
   let done=0,ym=startYm,guard=0;
-  while(ym<keyYm&&guard++<600){const k=loanKeyFor(e,ym);if(pays[k]!=null){if(Number(pays[k])>0)done++}else if(live&&done<times)done++;ym=shiftMonth(ym,1)}
+  while(ym<keyYm&&guard++<600){const k=loanKeyFor(e,ym,l);if(pays[k]!=null){if(Number(pays[k])>0)done++}else if(live&&done<times)done++;ym=shiftMonth(ym,1)}
   let ded=0;
-  if(key===loanKeyFor(e,keyYm)&&keyYm>=startYm){if(pays[key]!=null)ded=r2(Number(pays[key])||0);else if(live&&done<times)ded=per}
+  if(key===loanKeyFor(e,keyYm,l)&&keyYm>=startYm){if(pays[key]!=null)ded=r2(Number(pays[key])||0);else if(live&&done<times)ded=per}
   return{before:done,ded,no:done+(ded>0?1:0),times};
 }
 function loanStatus(l){if(l.status==='closed')return['Closed',''];if(loanCount(l)>=loanTimes(l))return['Fully paid','ok'];if(l.status==='paused')return['Paused','warn'];return['Active','acc']}
 function pageAdvances(){
   const u=S.ui,tab=u.advTab||'adv',edit=can('editAdvances')&&!S.readOnly;
-  const seg=`<div class="seg" role="group" aria-label="Section" style="margin-bottom:14px">${[['adv','Company advances'],['coop','Coop savings'],['loan','SSS & Pag-IBIG loans']].map(([k,l])=>`<button data-act="advTab" data-v="${k}" aria-pressed="${tab===k}">${l}</button>`).join('')}</div>`;
+  const seg=`<div class="row" style="margin-bottom:6px"><h1 style="margin:0">Deductions</h1></div><div class="seg" role="group" aria-label="Section" style="margin-bottom:14px">${[['adv','Company advances'],['coop','Coop savings'],['loan','SSS & Pag-IBIG loans']].map(([k,l])=>`<button data-act="advTab" data-v="${k}" aria-pressed="${tab===k}">${l}</button>`).join('')}</div>`;
   if(tab==='coop')return seg+pageCoop(edit);
   if(tab==='loan')return seg+pageLoans(edit);
   return seg+pageAdvancesMain();
@@ -1268,12 +1269,13 @@ function loanForm(l){
   const emps=S.employees.filter(e=>e.active!==false||(l&&String(e.id)===String(l.employee_id))).sort((x,y)=>empName(x).localeCompare(empName(y)));
   const paid=l?loanCount(l):0,yms=loanStartYms(l),cur=l?l.start_ym:yms[0];
   return `<form class="panel" data-form="loanRec"><h2 style="margin:0">${l?'Edit loan':'Record an SSS / Pag-IBIG loan'}</h2>
-  <p class="muted small" style="margin:4px 0 0">Enter the actual amortization and how many times it is deducted. It comes off automatically on every 1st cut-off payday (the 15th) until the count is complete. Staff paid once a month on the 2nd cut-off have it deducted on their payday.</p>
+  <p class="muted small" style="margin:4px 0 0">Enter the actual amortization and how many times it is deducted. It comes off automatically on the cut-off you choose (usually the 1st, the 15th) until the count is complete. If a deduction is late, move that month to the 2nd cut-off from the 1st / 2nd cut-off view. Staff paid once a month have it deducted on their payday.</p>
   <div class="grid" style="margin-top:12px">
     <label class="f">Employee<select name="employee_id" required ${paid>0?'disabled':''}><option value="">Choose…</option>${emps.map(e=>`<option value="${e.id}" ${l&&String(l.employee_id)===String(e.id)?'selected':''}>${h(empName(e))} · #${e.id}</option>`).join('')}</select>${paid>0?`<input type="hidden" name="employee_id" value="${h(l.employee_id)}">`:''}</label>
     <label class="f">Loan<select name="type">${Object.entries(LOAN_TYPES).map(([k,v])=>`<option value="${k}" ${l&&l.type===k?'selected':''}>${v}</option>`).join('')}</select></label>
     <label class="f">Amortization per deduction (₱)<input name="amount" type="number" min="0.01" step="0.01" required value="${l?h(l.amount):''}"></label>
     <label class="f">Number of times to deduct<input name="times" type="number" min="1" step="1" required value="${l?h(l.times):''}"></label>
+    <label class="f">Usually deducted on<select name="cut"><option value="1" ${!l||Number(l.cut)!==2?'selected':''}>1st cut-off (15th)</option><option value="2" ${l&&Number(l.cut)===2?'selected':''}>2nd cut-off (end of month)</option></select></label>
     <label class="f">First deduction<select name="start_ym">${yms.map(k=>`<option value="${k}" ${k===cur?'selected':''}>${h(fmtMonth(k))} · 15th</option>`).join('')}</select></label>
     <label class="f wide">Note<input name="note" maxlength="160" value="${l?h(l.note||''):''}" placeholder="e.g. SSS salary loan, loan no."></label>
   </div>
@@ -1283,7 +1285,7 @@ function loanForm(l){
 async function saveLoan(form){
   if(!can('editAdvances')||S.readOnly){toast('Only HR or Admin can record loans.',true);return}
   const fd=new FormData(form),u=S.ui,prev=u.loanEdit?(S.loans||[]).find(a=>advId(a)===u.loanEdit):null;
-  const empId=Number(fd.get('employee_id')),e=empById(empId),type=String(fd.get('type')||''),amount=r2(Number(fd.get('amount'))||0),times=Math.round(Number(fd.get('times'))||0),start=String(fd.get('start_ym')||''),note=String(fd.get('note')||'').trim();
+  const empId=Number(fd.get('employee_id')),e=empById(empId),type=String(fd.get('type')||''),amount=r2(Number(fd.get('amount'))||0),times=Math.round(Number(fd.get('times'))||0),start=String(fd.get('start_ym')||''),note=String(fd.get('note')||'').trim(),cut=Number(fd.get('cut'))===2?2:1;
   if(!e){toast('Choose the employee.',true);return}
   if(!LOAN_TYPES[type]){toast('Choose SSS loan or Pag-IBIG loan.',true);return}
   if(!(amount>0)){toast('Enter the amortization amount.',true);return}
@@ -1292,7 +1294,7 @@ async function saveLoan(form){
   if(prev&&times<loanCount(prev)){toast(`The count can’t be lower than the ${loanCount(prev)} deduction(s) already taken.`,true);return}
   const id=prev?advId(prev):'LN'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   const base=prev?(({_id,...r})=>r)(prev):{status:'active',payments:{},created_by:actor(),created_at:nowISO()};
-  const doc={...base,id,employee_id:empId,type,amount,times,start_ym:start,note,updated_by:actor(),updated_at:nowISO()};
+  const doc={...base,id,employee_id:empId,type,amount,times,start_ym:start,cut,note,updated_by:actor(),updated_at:nowISO()};
   try{
     const jr=journal();
     await jr.set(cp('loan_ledger/')+id,doc,prev?base:null);
@@ -1313,13 +1315,52 @@ async function deleteLoan(id){
   try{const jr=journal();await jr.del(cp('loan_ledger/')+id,before);logAction('DELETE','loan',id,`${empName(e)} · ${LOAN_TYPES[l.type]} removed`,jr);S.ui.loanConfirm=null;toast('Loan removed');scheduleRender()}
   catch(err){writeError(err)}
 }
+const loanViewSel=()=>{const v=S.ui.loanView;if(v===0||v===1||v===2)return v;const ac=activeCut();return inPeriod(ac)?ac.n:1};
+const loanCanMove=(l,e,ym,from,to)=>payFreq(e)==='both'&&!cutLocked(from)&&!cutLocked(to)&&(l.payments||{})[ym+'_'+from]==null;
+function loanCutView(n,edit,all){
+  const P=S.period,c=P.cuts[n-1],ym=P.ym,other=n===1?2:1,locked=cutLocked(n),ord=n===1?'1st':'2nd',oord=other===1?'1st':'2nd';
+  const live=all.filter(x=>x.l.status!=='closed');
+  const rows=live.map(x=>({...x,sc:loanSchedule(x.l,x.e,c.key)})).filter(x=>x.sc.ded>0);
+  const moved=live.filter(x=>x.l.cutby&&Number(x.l.cutby[ym])===other&&payFreq(x.e)==='both'&&loanCutFor(x.l,x.e,ym)===other&&loanSchedule(x.l,x.e,ym+'_'+other).ded>0);
+  const tot=t=>r2(rows.filter(x=>x.l.type===t).reduce((q,x)=>q+x.sc.ded,0));
+  const sss=tot('SSS'),hd=tot('HDMF');
+  let html=`<div class="row" style="margin-bottom:10px"><span class="muted small">${h(fmtMonth(P.ym))} · ${ord} cut-off · payroll ${h(fmtRange(c.payStart,c.payEnd))}</span></div>`;
+  if(locked)html+=`<div class="banner ok">This cut-off is approved and locked. Reopen it in Payroll to change its loan deductions.</div>`;
+  html+=`<div class="stats"><div class="stat"><b>${new Set(rows.map(x=>x.e.id)).size}</b><span>Employees</span></div><div class="stat"><b class="money">${peso(sss)}</b><span>SSS loans</span></div><div class="stat"><b class="money">${peso(hd)}</b><span>Pag-IBIG loans</span></div><div class="stat hl"><b class="money">${peso(r2(sss+hd))}</b><span>Total ${ord} cut-off</span></div></div>`;
+  html+=`<div class="panel"><h2 style="margin:0 0 8px">Loans deducted on the ${ord} cut-off</h2>`;
+  if(!rows.length)html+=`<div class="empty"><b>No SSS or Pag-IBIG loan is deducted on the ${ord} cut-off of ${h(fmtMonth(P.ym))}.</b>${n===2?'Loans moved here as a late deduction will show up in this list.':''}</div>`;
+  else html+=`<div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Department</th><th>Loan</th><th class="n">Amount</th><th class="n">Deduction no.</th><th>Note</th><th></th></tr></thead><tbody>
+  ${rows.map(({l,e,sc})=>{const id=advId(l),late=l.cutby&&Number(l.cutby[ym])===n&&Number(l.cut||1)!==n,can=edit&&loanCanMove(l,e,ym,n,other);
+    return `<tr><td class="num">${h(e.id)}</td><td class="stick"><b>${h(empName(e))}</b></td><td>${h(e.department||'')}</td><td>${h(LOAN_TYPES[l.type]||l.type)}${late?` <span class="chip warn">${n===2?'Late deduction':'Moved'}</span>`:''}</td><td class="n">${amt(sc.ded)}</td><td class="n">${sc.no} of ${sc.times}</td><td class="small">${h(l.note||'')}</td><td style="text-align:right;white-space:nowrap">${can?`<button class="btn sm" data-act="loanMove" data-id="${h(id)}" data-to="${other}">Move to ${oord} cut-off</button>`:(payFreq(e)!=='both'?`<span class="muted small">Paid once a month</span>`:'')}</td></tr>`}).join('')}
+  </tbody><tfoot><tr><td></td><td>Total</td><td></td><td></td><td class="n">${amt(r2(sss+hd))}</td><td></td><td></td><td></td></tr></tfoot></table></div>`;
+  html+=`</div>`;
+  if(moved.length)html+=`<div class="panel"><h2 style="margin:0 0 8px">Moved to the ${oord} cut-off this month</h2><div class="tablewrap" data-noresp><table><thead><tr><th>ID</th><th class="stick">Employee</th><th>Loan</th><th class="n">Amount</th><th></th></tr></thead><tbody>
+  ${moved.map(({l,e})=>{const id=advId(l),sc=loanSchedule(l,e,ym+'_'+other),can=edit&&loanCanMove(l,e,ym,other,n);return `<tr><td class="num">${h(e.id)}</td><td class="stick"><b>${h(empName(e))}</b></td><td>${h(LOAN_TYPES[l.type]||l.type)}</td><td class="n">${amt(sc.ded)}</td><td style="text-align:right">${can?`<button class="btn sm" data-act="loanMove" data-id="${h(id)}" data-to="${n}">Move back to ${ord} cut-off</button>`:''}</td></tr>`}).join('')}
+  </tbody></table></div></div>`;
+  html+=`<p class="muted small">Normally the loan comes off the cut-off set on the loan (usually the 1st). Use “Move to 2nd cut-off” when the deduction is late, for this month only; the next month goes back to the usual cut-off. A cut-off that is already approved cannot be changed.</p>`;
+  return html;
+}
+async function moveLoan(id,to){
+  if(!can('editAdvances')||S.readOnly){toast('Only HR or Admin can change loan deductions.',true);return}
+  const l=(S.loans||[]).find(x=>advId(x)===id);if(!l)return;
+  const e=empById(l.employee_id),ym=S.period.ym,from=to===1?2:1;
+  if(!loanCanMove(l,e,ym,from,to)){toast('That cut-off is already approved, so this deduction can’t be moved.',true);return}
+  const {_id,...before}=l,cutby={...(l.cutby||{})},usual=Number(l.cut)===2?2:1;
+  if(to===usual)delete cutby[ym];else cutby[ym]=to;
+  const doc={...before,cutby,updated_by:actor(),updated_at:nowISO()};
+  try{const jr=journal();await jr.set(cp('loan_ledger/')+id,doc,before);logAction('UPDATE','loan',id,`${empName(e)} · ${LOAN_TYPES[l.type]} · ${fmtMonth(ym)} deduction moved to ${to===1?'1st':'2nd'} cut-off`,jr);toast(`Deduction moved to the ${to===1?'1st':'2nd'} cut-off`);scheduleRender()}
+  catch(err){writeError(err)}
+}
 function pageLoans(edit){
   const u=S.ui,all=(S.loans||[]).map(l=>({l,e:empById(l.employee_id)||{id:l.employee_id,first_name:'#'+l.employee_id,surname:'(not in the employee list)',department:''}})).sort((a,b)=>empName(a.e).localeCompare(empName(b.e))||String(a.l.type).localeCompare(String(b.l.type)));
   const shown=u.loanAll?all:all.filter(x=>loanStatus(x.l)[0]==='Active'||loanStatus(x.l)[0]==='Paused'||advId(x.l)===u.loanEdit);
   const active=all.filter(x=>loanStatus(x.l)[0]==='Active');
   const bal=r2(all.reduce((t,x)=>t+loanLeft(x.l)*(Number(x.l.amount)||0),0)),paid=r2(all.reduce((t,x)=>t+loanPaid(x.l),0));
-  let html=`<div class="row"><div><h1>SSS &amp; Pag-IBIG loans</h1><p class="sub">Record each loan once with its actual amortization and the number of deductions. It is taken every 1st cut-off payday (15th) and shown as its own line on the payslip.</p></div><span class="spacer"></span>${edit&&!u.loanForm?'<button class="btn primary" data-act="loanNew">Record a loan</button>':''}</div>`;
+  let html=`<div class="row"><div><h1>SSS &amp; Pag-IBIG loans</h1><p class="sub">Record each loan once with its actual amortization and the number of deductions. It is usually taken on the 1st cut-off payday (15th). If a deduction comes late, move it to the 2nd cut-off for that month. Each loan is shown as its own line on the payslip.</p></div><span class="spacer"></span>${edit&&!u.loanForm?'<button class="btn primary" data-act="loanNew">Record a loan</button>':''}</div>`;
   if(u.loanForm)html+=loanForm(u.loanEdit?(S.loans||[]).find(a=>advId(a)===u.loanEdit):null);
+  const view=loanViewSel();
+  html+=`<div class="seg" role="group" aria-label="Loan view" style="margin-bottom:12px">${[[1,'1st cut-off'],[2,'2nd cut-off'],[0,'All loans']].map(([k,l])=>`<button data-act="loanView" data-v="${k}" aria-pressed="${view===k}">${l}</button>`).join('')}</div>`;
+  if(view)return html+loanCutView(view,edit,all);
   html+=`<div class="stats"><div class="stat"><b>${active.length}</b><span>Active loans</span></div><div class="stat"><b class="money">${peso(paid)}</b><span>Deducted so far</span></div><div class="stat hl"><b class="money">${peso(bal)}</b><span>Remaining to deduct</span></div></div>
   <div class="panel"><div class="row" style="margin-bottom:8px"><h2 style="margin:0">Loans</h2><span class="spacer"></span><label class="chk small"><input type="checkbox" data-change="loanAll" ${u.loanAll?'checked':''}> Show fully paid / closed</label></div>`;
   if(!shown.length)return html+`<div class="empty"><b>${all.length?'No active loans.':'No loans recorded yet.'}</b>${edit?'Press “Record a loan” to add one.':''}</div></div>`;
@@ -4669,7 +4710,7 @@ function pagePayroll(){
   if(c){
     html+=`<div class="panel" style="padding:12px 16px"><div class="row"><div><b>Payroll ${h(fmtRange(c.payStart,c.payEnd))}</b><div class="muted small">Attendance ${h(fmtRange(c.start,c.end))}${cutN===2?' · government contributions and withholding tax are deducted on this cut-off':''}</div></div><span class="spacer"></span>
       <a class="btn" href="#adjustments" data-act="goAdj" data-n="${cutN}">Adjustments${(S.adj[cutN]||[]).length?` (${(S.adj[cutN]||[]).length})`:''}</a>
-      ${canAdv&&!appr?`<button class="btn" data-act="editAdvances" data-n="${cutN}" title="One-time amounts. Installments are recorded under Company advances.">One-time advances</button>`:''}
+      ${canAdv&&!appr?`<button class="btn" data-act="editAdvances" data-n="${cutN}" title="One-time amounts. Installments are recorded under Deductions › Company advances.">One-time advances</button>`:''}
       ${canAp?(appr?`<button class="btn danger" data-act="reopenPayroll" data-n="${cutN}">Reopen</button>`:`<button class="btn ok" data-act="approvePayroll" data-n="${cutN}">Approve ${cutN===1?'1st':'2nd'} cut-off</button>`):''}</div></div>`;
     const ri=S.recIdx&&S.recIdx[cutN];
     html+=appr?`<div class="banner ok">Approved by ${h(personName(d.approved_by))} on ${h(fmtStamp(d.approved_at))}. Attendance, adjustments and company advances for this cut-off are locked.<span class="spacer"></span>${ri&&ri.status==='APPROVED'?`<button class="btn sm" data-act="recGo" data-key="${h(c.key)}">View in Payroll records</button>`:(canAp?`<button class="btn sm" data-act="recSave" data-n="${cutN}">Save to Payroll records</button>`:'')}</div>`:'';
@@ -5002,7 +5043,7 @@ function cutCalcAug(tab,items,K,head,rows,tot,dd){
     `Holiday / RD pay = hourly rate × hours worked × the multiplier of each day type (Rates sheet, monthly-paid or daily-paid column); daily-paid staff also get the day rate for each regular holiday not worked.`,
     'Gross = Net of L&A + Allowance + Holiday / RD + Overtime + Night diff (+ adjustments and fold incentive). Net pay = Gross − deductions.',
     n===2?'SSS, PhilHealth, Pag-IBIG and Withholding tax are looked up from the BIR Purposes sheet (monthly figures, deducted on the 2nd cut-off).':'Government contributions and tax are deducted on the 2nd cut-off (see the 2nd Cut-off sheet and BIR Purposes).',
-    'Advances, coop savings, loans, adjustments and fold incentive are entered amounts (from Company advances, Loans, Adjustments and Fold incentive).'];
+    'Advances, coop savings, loans, adjustments and fold incentive are entered amounts (from Deductions, Adjustments and Fold incentive).'];
   return{calc:true,cutN:n,hmap,hsrc,otK:dd.otK,ndK:dd.ndK,hK:dd.hK,meta,notes,hcount:hdef.length};
 }
 /* BIR Purposes for the Excel export: the columns needed to rebuild SSS, PhilHealth, Pag-IBIG and tax from the two cut-offs. */
@@ -5280,7 +5321,7 @@ function advancesDialog(n){
   for(const x of computePayroll())inst[x.e.id]=x['k'+n].advLedger||0;
   const emps=S.employees.filter(e=>e.active!==false).sort((a,b)=>a.id-b.id);
   openDlg(`Company advances · ${n===1?'1st':'2nd'} cut-off`,`<form data-form="adv" data-n="${n}">
-    <p class="muted small" style="margin-top:0">Payroll ${h(fmtRange(c.payStart,c.payEnd))}. One-time amounts deducted from this cut-off's net pay (for staff paid once a month, from their one payday). Leave blank for none. Advances paid in installments are recorded under <b>Company advances</b> and are added automatically (shown here for reference).</p>
+    <p class="muted small" style="margin-top:0">Payroll ${h(fmtRange(c.payStart,c.payEnd))}. One-time amounts deducted from this cut-off's net pay (for staff paid once a month, from their one payday). Leave blank for none. Advances paid in installments are recorded under <b>Deductions › Company advances</b> and are added automatically (shown here for reference).</p>
     <div class="tablewrap"><table><thead><tr><th>Employee</th><th class="n">Installment</th><th class="n">One-time amount (₱)</th><th>Note</th></tr></thead><tbody>
     ${emps.map(e=>{const it=items[e.id]||{};return`<tr><td>${h(empName(e))}</td><td class="n muted">${inst[e.id]?amt(inst[e.id]):'—'}</td><td class="n"><input name="a_${e.id}" type="number" min="0" step="0.01" value="${it.amount?h(it.amount):''}" style="width:120px;text-align:right"></td><td><input name="n_${e.id}" value="${h(it.note||'')}" maxlength="120" placeholder="e.g. CA 9/12" style="width:180px"></td></tr>`}).join('')}
     </tbody></table></div><div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary">Save advances</button></div></form>`);
@@ -5867,6 +5908,8 @@ const actions={
   loanNew(){S.ui.loanForm=true;S.ui.loanEdit=null;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
   loanEdit(el){S.ui.loanForm=true;S.ui.loanEdit=el.dataset.id;scheduleRender();window.scrollTo({top:0,behavior:'smooth'})},
   loanCancel(){S.ui.loanForm=false;S.ui.loanEdit=null;scheduleRender()},
+  loanView(el){S.ui.loanView=Number(el.dataset.v);scheduleRender()},
+  loanMove(el){moveLoan(el.dataset.id,Number(el.dataset.to))},
   loanPause(el){const l=(S.loans||[]).find(x=>advId(x)===el.dataset.id);if(l)setLoanStatus(advId(l),l.status==='paused'?'active':'paused',l.status==='paused'?'Resumed':'Paused')},
   loanClose(el){S.ui.loanConfirm=el.dataset.id+':close';scheduleRender()},
   loanDel(el){S.ui.loanConfirm=el.dataset.id+':del';scheduleRender()},
