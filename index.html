@@ -1571,11 +1571,14 @@ async function loadThirteenth(){
     const releaseRows=(await Store.getAll(cp('thirteenth_releases'))).filter(([id])=>String(id).startsWith(relPre)).map(([id,d])=>[String(id).slice(relPre.length),d]);
     const releases=Object.fromEntries(releaseRows.map(([id,d])=>[id,d]));
     const employees=new Map();
-    const nameKey=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+    // The order of the words does not matter ("MALLO, MAXIMO" and "MAXIMO, MALLO" are the same person).
+    const nameKey=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' ');
     for(const e of S.employees.filter(e=>e.active!==false))employees.set(nameKey(empName(e)),e);
 
-    // Add employees found in approved historical payroll records.
-    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e)employees.set(nameKey(empName(x.e)),x.e);
+    // Add employees found in approved historical payroll records. The same employee number, or the same name in
+    // any order, is the same person: the Employee Master entry is kept and nobody is listed twice.
+    const idKey=new Map(S.employees.filter(e=>e.active!==false).map(e=>[String(e.id),nameKey(empName(e))]));
+    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e){const k=idKey.get(String(x.e.id))||nameKey(empName(x.e));if(!employees.has(k))employees.set(k,x.e)}
 
     // Add employees found only in previous payroll imports. Match by NAME,
     // never by the old employee ID. If absent from current records, mark resigned.
@@ -1586,7 +1589,9 @@ async function loadThirteenth(){
           const nm=row.employee_name||row.name||''; if(!String(nm).trim())continue;
           const k=nameKey(nm),cur=employees.get(k);
           if(cur)continue;
-          employees.set(k,{id:`hist_${k.replace(/[^A-Z0-9]+/g,'_').slice(0,70)}`,first_name:String(nm).trim(),surname:'',department:row.department||'',position:'',employment_status:'Resigned',active:false,_historical:true});
+          // the id keeps the word order of the imported name, so release statuses saved earlier still match
+          const idName=String(nm??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+          employees.set(k,{id:`hist_${idName.replace(/[^A-Z0-9]+/g,'_').slice(0,70)}`,first_name:String(nm).trim(),surname:'',department:row.department||'',position:'',employment_status:'Resigned',active:false,_historical:true});
         }
       }
     }
@@ -1612,8 +1617,9 @@ async function loadThirteenth(){
     const rows=[...employees.values()].sort((a,b)=>empName(a).localeCompare(empName(b))||String(a.id).localeCompare(String(b.id))).map(e=>{
       const monthly=months.map(ym=>{
         const f=(byMonth[ym]||{}).first,s=(byMonth[ym]||{}).second;
-        const fi=f?.items?.find(x=>nameKey(empName(x.e))===nameKey(empName(e)));
-        const si=s?.items?.find(x=>nameKey(empName(x.e))===nameKey(empName(e)));
+        const same=x=>String(x.e?.id)===String(e.id)||nameKey(empName(x.e))===nameKey(empName(e));
+        const fi=f?.items?.find(same);
+        const si=s?.items?.find(same);
         const monthlyImp=prevByMonth[ym]?.monthly;
         const firstImp=prevByMonth[ym]?.first,secondImp=prevByMonth[ym]?.second;
         const mi=findImportedRow(monthlyImp,e),fii=findImportedRow(firstImp,e),sii=findImportedRow(secondImp,e);
@@ -2096,7 +2102,7 @@ async function savePreviousPayroll(form){
       return v;
     };
     const pick=(r,k)=>Object.prototype.hasOwnProperty.call(colMap,k)?scalar(r[colMap[k]]):'';
-    const normEmpName=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+    const normEmpName=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' '); // word order does not matter
     const currentByName=new Map(S.employees.map(e=>[normEmpName(empName(e)),e]));
     const filteredRows=rows.map((r,ri)=>{
       const o={};
