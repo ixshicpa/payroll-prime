@@ -1647,7 +1647,7 @@ function pageThirteenth(){
   const u=S.ui,d=u.thirteenthData,year=Number(u.thirteenthYear)||2026;
   if(d&&d.company&&d.company!==S.company){u.thirteenthData=null;}
   if(!u.thirteenthData&&!u.thirteenthBusy&&!u.thirteenthErr)loadThirteenth();
-  let html=`<div class="row"><div><h1>13th Month Pay · ${h(curCo().short)}</h1><p class="sub">Company computation period: <b>December ${year-1} – November ${year}</b>. Each month's amount uses approved payroll records or imported historical payroll. A Monthly import may represent the complete month; otherwise 1st + 2nd cut-offs are consolidated.</p></div><span class="spacer"></span><label class="f" style="min-width:170px">Period<select data-change="thirteenthYear">${[year-1,year,year+1].map(y=>`<option value="${y}" ${y===year?'selected':''}>Dec ${y-1} – Nov ${y}</option>`).join('')}</select></label><button class="btn" data-act="thirteenthRefresh">Refresh</button></div>`;
+  let html=`<div class="row"><div><h1>13th Month Pay · ${h(curCo().short)}</h1><p class="sub">Company computation period: <b>December ${year-1} – November ${year}</b>. Each month's amount uses approved payroll records or imported historical payroll. A Monthly import may represent the complete month; otherwise 1st + 2nd cut-offs are consolidated.</p></div><span class="spacer"></span><label class="f" style="min-width:170px">Period<select data-change="thirteenthYear">${[year-1,year,year+1].map(y=>`<option value="${y}" ${y===year?'selected':''}>Dec ${y-1} – Nov ${y}</option>`).join('')}</select></label><button class="btn" data-act="thirteenthRefresh">Refresh</button><button class="btn" data-act="thirteenthExport" title="Excel file with formulas: total of the 12 months and the 13th month">Export Excel</button></div>`;
   html+=`<div class="banner info"><b>13th-month basis:</b> each month's <b>basic salary net of lates and absences</b> (the "NET of L&amp;A" column), added up over the 12 months and divided by 12. Allowances, holiday, overtime and night differential are not included.</div><div class="banner info"><b>13th-month source:</b> approved payroll is used when available. Historical <b>Monthly</b> imports are also included as the complete month, while imported/approved 1st and 2nd cut-offs are consolidated when a Monthly record is not available. Missing payroll is never assumed as zero.</div>`;
   if(u.thirteenthErr)html+=`<div class="banner bad">Could not load the 13th-month records: ${h(u.thirteenthErr)}</div>`;
   if(u.thirteenthBusy&&!d)return html+'<div class="loading">Loading approved payroll records…</div>';
@@ -5262,6 +5262,37 @@ async function saveFile(filename,data,mime){
   if(!S.downloads){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);return true}
   return false;
 }
+/* 13th Month Pay as an Excel file with live formulas: total = sum of the 12 months, 13th month = total / 12. */
+async function exportThirteenth(){
+  const d=S.ui.thirteenthData;
+  if(!d||!(d.rows||[]).length){toast('There is no 13th-month data to export yet.',true);return}
+  if(typeof XLSX==='undefined'){toast('Excel export isn’t available here.',true);return}
+  const col=XLSX.utils.encode_col,mc=d.months.length,first=3,last=first+mc-1,cTot=last+1,c13=last+2,cInc=c13+1,cSt=c13+2,cDt=c13+3,cNote=c13+4;
+  const hdr=[S.settings.company||curCo().name,`13th Month Pay · December ${d.year-1} – November ${d.year}`,'Basis: basic salary net of lates and absences for each month, added up over the 12 months and divided by 12.'];
+  const head=['EE No','Employee','Department',...d.months.map(ym=>fmtMonth(ym).slice(0,3)+' '+ym.slice(0,4)),'Total net of L&A','13th month (total ÷ 12)','Incomplete months','Status','Release date','Note'];
+  const rows=d.rows.map(x=>{const r=x.release||{};return[String(x.e.id).startsWith('hist_')?'':x.e.id,empName(x.e),x.e.department||'',...x.monthly.map(m=>r2(m.basic)),r2(x.total),r2(x.computed),x.monthly.filter(m=>!(m.firstOk&&m.secondOk)).map(m=>fmtMonth(m.ym).slice(0,3)).join(', '),r.released?'Released':'Not yet released',r.release_date?fmtDY(r.release_date):'',r.note||'']});
+  const sum=i=>r2(rows.reduce((a,r)=>a+(Number(r[i])||0),0)),rel=r2(rows.filter(r=>r[cSt]==='Released').reduce((a,r)=>a+r[c13],0));
+  const tot=['','TOTAL','',...Array.from({length:c13-first+1},(_,k)=>sum(first+k))];
+  const line=(label,v)=>{const a=new Array(c13+1).fill('');a[1]=label;a[c13]=v;return a};
+  const aoa=[...hdr.map(t=>[t]),[],head,...rows,tot,[],line('Already released',rel),line('Not yet released',r2(sum(c13)-rel))];
+  const ws=XLSX.utils.aoa_to_sheet(aoa),top=hdr.length+1,ra=top+2,rb=top+1+rows.length,totR=rb+1;
+  const F=(R,C,f)=>{const a=XLSX.utils.encode_cell({r:R-1,c:C}),c=ws[a];if(!c||typeof c.v!=='number')return;ws[a]={t:'n',v:c.v,f}};
+  for(let R=ra;R<=rb;R++){F(R,cTot,`SUM(${col(first)}${R}:${col(last)}${R})`);F(R,c13,`ROUND(${col(cTot)}${R}/12,2)`)}
+  if(rows.length){
+    for(let C=first;C<=c13;C++)F(totR,C,`SUM(${col(C)}${ra}:${col(C)}${rb})`);
+    const st=`$${col(cSt)}$${ra}:$${col(cSt)}$${rb}`,v=`$${col(c13)}$${ra}:$${col(c13)}$${rb}`;
+    F(totR+2,c13,`SUMIF(${st},"Released",${v})`);F(totR+3,c13,`${col(c13)}${totR}-${col(c13)}${totR+2}`);
+  }
+  const rng=XLSX.utils.decode_range(ws['!ref']);
+  for(let R=top+1;R<=rng.e.r;R++)for(let C=1;C<=rng.e.c;C++){const cell=ws[XLSX.utils.encode_cell({r:R,c:C})];if(cell&&cell.t==='n')cell.z='#,##0.00'}
+  ws['!merges']=hdr.map((_,i)=>({s:{r:i,c:0},e:{r:i,c:cNote}}));
+  ws['!cols']=head.map((_,i)=>({wch:i===0?8:i===1?30:i===2?18:(i>=first&&i<=c13)?13:i===cInc?18:i===cSt?16:i===cDt?13:i===cNote?30:14}));
+  ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:top,c:0},e:{r:top+rows.length,c:cNote}})};
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'13th Month');
+  wb.Props={Title:`${S.settings.company} 13th month ${d.year}`,Company:S.settings.company};wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+  if(!(await saveFile(`${curCo().file}-13th-month-${d.year}.xlsx`,out,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')))toast('Could not save the Excel file.',true);
+}
 async function exportExcel(tabs){
   const parts=exportParts(tabs),secs=[parts.dtr1,parts.dtr2,parts.s1,parts.s2,parts.M,parts.BIR].filter(Boolean);
   const base=`${curCo().file}-payroll-${S.period.ym}-${tabs.length>1?'all-sections':({'1':'1st-cutoff','2':'2nd-cutoff','M':'monthly','BIR':'bir-purposes'}[tabs[0]])}`;
@@ -5873,6 +5904,7 @@ const actions={
   async recSave(el){const n=Number(el.dataset.n);if(!cutLocked(n)){toast('Approve the cut-off first.',true);return}try{await saveRecord(n,computePayroll());S.ui.recListLoaded=false;S.ui.recList=null;toast('Saved in Payroll records')}catch(e){toast('Could not save the record: '+(e.message||e),true)}},
   recGo(el){S.ui.recKey=el.dataset.key;S.ui.recData=null;S.ui.recErr='';S.ui.recSec='dtr';location.hash='records'},
   thirteenthRefresh(){S.ui.thirteenthData=null;loadThirteenth()},
+  thirteenthExport(){exportThirteenth()},
   remRefresh(){loadReminders()},
   remDone(el){toggleReminder(el.dataset.id)},
   remDel(el){deleteReminder(el.dataset.id)},
