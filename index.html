@@ -1568,17 +1568,27 @@ async function loadThirteenth(){
 
     // Flat collection (a Firestore collection path needs an odd number of segments): one document per period + employee.
     const relPre=thirteenthKey(year)+'__';
-    const releaseRows=(await Store.getAll(cp('thirteenth_releases'))).filter(([id])=>String(id).startsWith(relPre)).map(([id,d])=>[String(id).slice(relPre.length),d]);
+    const relAll=await Store.getAll(cp('thirteenth_releases'));
+    const links=(relAll.find(([id])=>id==='_links')||[])[1]||{}; // pairs of names confirmed as the same person / as different people
+    const releaseRows=relAll.filter(([id])=>String(id).startsWith(relPre)).map(([id,d])=>[String(id).slice(relPre.length),d]);
     const releases=Object.fromEntries(releaseRows.map(([id,d])=>[id,d]));
     const employees=new Map();
     // The order of the words does not matter ("MALLO, MAXIMO" and "MAXIMO, MALLO" are the same person).
-    const nameKey=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' ');
-    for(const e of S.employees.filter(e=>e.active!==false))employees.set(nameKey(empName(e)),e);
+    // Hyphens and apostrophes are dropped ("RE-ANN" = "REANN", "O'BRIEN" = "OBRIEN").
+    const nameKey=v=>String(v??'').toUpperCase().replace(/['’\-]/g,'').replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' ');
+    // Names confirmed as the same person ("Same person" on this page) share one row. Pairs are saved as "KEY A|KEY B".
+    const groupOf=new Map();
+    for(const p of (links.same||[])){const [a,b]=String(p).split('|');if(!a||!b)continue;const g=new Set([...(groupOf.get(a)||[a]),...(groupOf.get(b)||[b])]);for(const k of g)groupOf.set(k,g)}
+    const keysOf=k=>groupOf.get(k)||new Set([k]);
+    const masterKeys=new Set(S.employees.filter(e=>e.active!==false).map(e=>nameKey(empName(e))));
+    const canonKey=k=>{const g=keysOf(k);if(g.size===1)return k;for(const x of g)if(masterKeys.has(x))return x;return [...g].sort()[0]};
+    const seenName=new Map(),seen=(k,n)=>{if(n&&!seenName.has(k))seenName.set(k,String(n).trim())};
+    for(const e of S.employees.filter(e=>e.active!==false)){const k=nameKey(empName(e));seen(k,empName(e));const ck=canonKey(k);if(!employees.has(ck))employees.set(ck,e)}
 
     // Add employees found in approved historical payroll records. The same employee number, or the same name in
     // any order, is the same person: the Employee Master entry is kept and nobody is listed twice.
     const idKey=new Map(S.employees.filter(e=>e.active!==false).map(e=>[String(e.id),nameKey(empName(e))]));
-    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e){const k=idKey.get(String(x.e.id))||nameKey(empName(x.e));if(!employees.has(k))employees.set(k,x.e)}
+    for(const ym of months)for(const cut of ['first','second'])for(const x of ((byMonth[ym]||{})[cut]?.items||[]))if(x?.e){const nk=nameKey(empName(x.e));seen(nk,empName(x.e));const k=canonKey(idKey.get(String(x.e.id))||nk);if(!employees.has(k))employees.set(k,x.e)}
 
     // Add employees found only in previous payroll imports. Match by NAME,
     // never by the old employee ID. If absent from current records, mark resigned.
@@ -1587,7 +1597,7 @@ async function loadThirteenth(){
         const imp=prevByMonth[ym]?.[kind]; if(!imp)continue;
         for(const row of (imp.rows||[])){
           const nm=row.employee_name||row.name||''; if(!String(nm).trim())continue;
-          const k=nameKey(nm),cur=employees.get(k);
+          const k0=nameKey(nm);seen(k0,nm);const k=canonKey(k0),cur=employees.get(k);
           if(cur)continue;
           // the id keeps the word order of the imported name, so release statuses saved earlier still match
           const idName=String(nm??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
@@ -1598,14 +1608,16 @@ async function loadThirteenth(){
 
     const findImportedRow=(imp,e)=>{
       if(!imp)return null;
-      const target=nameKey(empName(e));
-      return (imp.rows||[]).find(x=>nameKey(x.employee_name||x.name||'')===target)||null;
+      const target=keysOf(nameKey(empName(e)));
+      const rs=(imp.rows||[]).filter(x=>target.has(nameKey(x.employee_name||x.name||'')));
+      return rs.length>1?{__rows:rs}:(rs[0]||null); // several rows of one confirmed person are added together
     };
     const num=v=>parseMoney(v);
     // 13th-month basis = basic salary NET of lates and absences (never the gross basic).
     const approvedNet=k=>k?(k.netLA!=null&&k.netLA!==''?r2(num(k.netLA)):Math.max(0,r2(num(k.basic)-num(k.lateUt)-num(k.absence)))):0;
     const importedNet=(imp,row)=>{
       if(!row)return 0;
+      if(row.__rows)return r2(row.__rows.reduce((a,x)=>a+importedNet(imp,x),0));
       const hd=imp?.headers||[];
       if(hd.includes('net_of_la')&&row.net_of_la!==''&&row.net_of_la!=null)return Math.max(0,r2(num(row.net_of_la))); // the file's own "NET of L&A" column
       let la=0; // older imports stored a wrong late_absence total for text amounts like "1,234.50", so use the raw Lates / Absences
@@ -1615,11 +1627,14 @@ async function loadThirteenth(){
     };
 
     const rows=[...employees.values()].sort((a,b)=>empName(a).localeCompare(empName(b))||String(a.id).localeCompare(String(b.id))).map(e=>{
+      const ownKey=nameKey(empName(e)),ks=keysOf(ownKey);
       const monthly=months.map(ym=>{
         const f=(byMonth[ym]||{}).first,s=(byMonth[ym]||{}).second;
-        const same=x=>String(x.e?.id)===String(e.id)||nameKey(empName(x.e))===nameKey(empName(e));
-        const fi=f?.items?.find(same);
-        const si=s?.items?.find(same);
+        const same=x=>String(x.e?.id)===String(e.id)||ks.has(nameKey(empName(x.e)));
+        // Several records of one person (names confirmed as the same person) are added together.
+        const sumCut=(side,k)=>{const a=side?.items?.filter(same)||[];return a.length?{[k]:{netLA:r2(a.reduce((t,x)=>t+approvedNet(x[k]),0))}}:undefined};
+        const fi=sumCut(f,'k1');
+        const si=sumCut(s,'k2');
         const monthlyImp=prevByMonth[ym]?.monthly;
         const firstImp=prevByMonth[ym]?.first,secondImp=prevByMonth[ym]?.second;
         const mi=findImportedRow(monthlyImp,e),fii=findImportedRow(firstImp,e),sii=findImportedRow(secondImp,e);
@@ -1642,12 +1657,55 @@ async function loadThirteenth(){
       });
       // Amounts corrected by hand (Edit amounts) are saved with the release record and replace the computed month.
       const release=releases[String(e.id)]||{},ov=release.overrides||{};
-      for(const m of monthly){m.auto=m.basic;if(ov[m.ym]!=null&&ov[m.ym]!==''){m.basic=r2(Number(ov[m.ym])||0);m.edited=true;m.firstOk=true;m.secondOk=true;m.complete=true;m.source='Edited manually'}}
+      for(const m of monthly){m.auto=m.basic;m.origSource=m.source;if(ov[m.ym]!=null&&ov[m.ym]!==''){m.basic=r2(Number(ov[m.ym])||0);m.edited=true;m.firstOk=true;m.secondOk=true;m.complete=true;m.source='Edited manually'}}
       const total=r2(monthly.reduce((a,m)=>a+m.basic,0)),computed=r2(total/12);
-      return {e,monthly,total,computed,release};
+      // Leave credits are added by hand (Edit): paid together with the 13th month, not divided by 12.
+      // Leave credits = daily rate × days (the rate is saved with the employee's 13th-month record).
+      const leaveDays=Number(release.leave_days)||0,leaveRate=Number(release.leave_rate)||0;
+      const leave=leaveDays&&leaveRate?r2(leaveDays*leaveRate):r2(Number(release.leave_amount)||0);
+      const also=[...ks].filter(k=>k!==ownKey).map(k=>seenName.get(k)||k);
+      return {e,monthly,total,computed,release,leave,leaveDays,leaveRate,payout:r2(computed+leave),also,ownKey,groupKeys:[...ks]};
+    });
+
+    // Names that are almost the same: ask the user whether they are one person.
+    const lev=(a,b)=>{const m=a.length,n=b.length;if(!m)return n;let p=Array.from({length:n+1},(_,i)=>i);for(let i=1;i<=m;i++){const c=[i];for(let j=1;j<=n;j++)c[j]=Math.min(p[j]+1,c[j-1]+1,p[j-1]+(a[i-1]===b[j-1]?0:1));p=c}return p[n]};
+    const similarNames=(ka,kb)=>{
+      const A=ka.split(' '),B=kb.split(' ');
+      if(ka.replace(/ /g,'').split('').sort().join('')===kb.replace(/ /g,'').split('').sort().join(''))return true; // same letters, only the spacing differs (e.g. "DE LA CRUZ" / "DELACRUZ")
+      const [sm,lg]=A.length<=B.length?[A,B]:[B,A];
+      if(sm.length>=2&&lg.length-sm.length<=2&&sm.every(t=>lg.includes(t)))return true; // an extra middle name or initial
+      if(A.length===B.length&&A.length>=2){ // one word spelled a little differently
+        const ua=A.filter(t=>!B.includes(t)),ub=B.filter(t=>!A.includes(t));
+        if(ua.length===1&&ub.length===1){const x=ua[0],y=ub[0],mx=Math.max(x.length,y.length);
+          if(lev(x,y)<=(mx>=6?2:1))return true;
+          if(Math.min(x.length,y.length)>=3&&(x.startsWith(y)||y.startsWith(x)))return true}
+      }
+      return false;
+    };
+    const decided=new Set([...(links.different||[]),...(links.same||[])].map(String));
+    const ents=[...employees.entries()],suggestions=[];
+    for(let i=0;i<ents.length;i++)for(let j=i+1;j<ents.length;j++){
+      const [ka,ea]=ents[i],[kb,eb]=ents[j];
+      if(decided.has([ka,kb].sort().join('|')))continue;
+      if(similarNames(ka,kb))suggestions.push({a:ka,b:kb,ea,eb});
+    }
+
+    // Check against the payroll the figures come from: for each month, the total counted here must equal the
+    // approved (or imported) payroll total. A difference usually means an employee is missing or counted twice.
+    const sumItems=(side,k)=>r2((side?.items||[]).reduce((a,x)=>a+approvedNet(x[k]),0));
+    const sumImp=imp=>imp?r2((imp.rows||[]).reduce((a,r)=>a+importedNet(imp,r),0)):0;
+    const recon=months.map(ym=>{
+      const b=byMonth[ym]||{},pv=prevByMonth[ym]||{};
+      let src=null;
+      if(b.first&&b.second)src=r2(sumItems(b.first,'k1')+sumItems(b.second,'k2'));
+      else if(pv.monthly)src=sumImp(pv.monthly);
+      else if(b.first||b.second||pv.first||pv.second)src=r2((b.first?sumItems(b.first,'k1'):sumImp(pv.first))+(b.second?sumItems(b.second,'k2'):sumImp(pv.second)));
+      if(src==null)return {ym,src:null};
+      const counted=r2(rows.reduce((a,x)=>{const m=x.monthly.find(z=>z.ym===ym);return a+(m?m.auto:0)},0));
+      return {ym,src,counted,diff:r2(counted-src)};
     });
     if(S.company!==coAtStart)return; // company was switched while loading: drop these results
-    u.thirteenthData={year,months,byMonth,prevByMonth,releases,rows,company:coAtStart};
+    u.thirteenthData={year,months,byMonth,prevByMonth,releases,rows,links,suggestions,recon,company:coAtStart};
   }catch(e){if(S.company===coAtStart)u.thirteenthErr=e.message||String(e)}
   if(S.company!==coAtStart){loadThirteenth();return}
   u.thirteenthBusy=false;scheduleRender();
@@ -1663,41 +1721,58 @@ function pageThirteenth(){
   if(!d)return html+'<div class="panel empty"><b>No 13th-month data loaded.</b> Press Refresh.</div>';
   const complete=d.months.filter(ym=>{const b=d.byMonth[ym]||{},pv=d.prevByMonth[ym]||{};return !!((b.first&&b.second)||pv.monthly||((b.first||pv.first)&&(b.second||pv.second)))}).length; /* approved 1st+2nd, an imported Monthly, or imported/approved 1st + 2nd */
   const total13=r2(d.rows.reduce((a,x)=>a+x.computed,0)),released13=r2(d.rows.filter(x=>x.release.released).reduce((a,x)=>a+x.computed,0));
+  const rc=(d.recon||[]).filter(r=>r.src!=null),badRc=rc.filter(r=>Math.abs(r.diff)>0.05);
+  if(rc.length)html+=badRc.length
+    ?`<div class="banner warn" style="align-items:flex-start"><div><b>Check the computation:</b> these months do not match the payroll they come from. This usually means a name spelled differently, so an employee is missing or counted twice here.<ul style="margin:6px 0 0 18px">${badRc.map(r=>`<li>${h(fmtMonth(r.ym))}: payroll total ${peso(r.src)} · counted here ${peso(r.counted)} (difference ${peso(r.diff)})</li>`).join('')}</ul></div></div>`
+    :`<div class="banner ok"><b>Computation check passed:</b> for all ${rc.length} months with payroll, the amounts counted here equal the approved or imported payroll totals.</div>`;
+  if(can('editPayroll')&&!S.readOnly&&(d.suggestions||[]).length)html+=`<div class="panel" style="padding:12px 16px"><b>Possible same person</b><p class="muted small" style="margin:4px 0 8px">These names are almost the same. Confirm if they are one person so their months are combined, or say they are different people.</p>${d.suggestions.map((s,i)=>`<div class="row" style="padding:8px 0;border-top:1px solid var(--line)"><div style="flex:1;min-width:240px"><b>${h(empName(s.ea))}</b> <span class="muted small">${s.ea._historical?'from imported payroll':'#'+h(s.ea.id)}${s.ea.department?' · '+h(s.ea.department):''}</span><br><b>${h(empName(s.eb))}</b> <span class="muted small">${s.eb._historical?'from imported payroll':'#'+h(s.eb.id)}${s.eb.department?' · '+h(s.eb.department):''}</span></div><button class="btn sm primary" data-act="thirteenthLink" data-i="${i}" data-k="same">Same person</button><button class="btn sm" data-act="thirteenthLink" data-i="${i}" data-k="different">Different people</button></div>`).join('')}</div>`;
   html+=`<div class="stats"><div class="stat"><b>${complete}/12</b><span>Complete months</span></div><div class="stat"><b>${d.rows.length}</b><span>Employees in computation</span></div><div class="stat hl"><b class="money">${peso(total13)}</b><span>Total computed 13th month</span></div><div class="stat"><b class="money">${peso(released13)}</b><span>Already released</span></div><div class="stat"><b class="money">${peso(r2(total13-released13))}</b><span>Not yet released</span></div></div>`;
   const isRes=x=>x.e.active===false||!!x.e._historical;
   const curRows=d.rows.filter(x=>!isRes(x)),resRows=d.rows.filter(isRes);
-  const head13=`<thead><tr><th class="stick" style="min-width:170px">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total net of L&amp;A</th><th class="n">13th month</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead>`;
-  const row13=x=>{const r=x.release||{};return `<tr><td class="stick" style="min-width:170px"><b>${h(empName(x.e))}</b>${isRes(x)?' <span class="chip warn">Resigned</span>':''}<div class="muted small">${x.e._historical?'Not in Employee Master':'#'+h(x.e.id)}</div></td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.edited?`Edited manually: ${peso(m.basic)} (computed ${peso(m.auto)})`:m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.edited?' ✎':(m.firstOk&&m.secondOk?'':' *')}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td style="white-space:nowrap"><button class="btn sm" data-act="thirteenthSlip" data-id="${h(x.e.id)}">Payslip</button> <button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button>${can('editPayroll')&&!S.readOnly?` <button class="btn sm" data-act="thirteenthEdit" data-id="${h(x.e.id)}">Edit amounts</button>`:''}</td></tr>`};
+  const head13=`<thead><tr><th class="stick" style="min-width:170px">Employee</th><th>Department</th>${d.months.map(ym=>`<th class="n">${h(fmtMonth(ym).slice(0,3))}<br><span class="muted small">${ym.slice(0,4)}</span></th>`).join('')}<th class="n">Total net of L&amp;A</th><th class="n">13th month</th><th class="n">Leave credits</th><th class="n">Total payout</th><th>Status</th><th>Release date</th><th>Note</th><th></th></tr></thead>`;
+  const row13=x=>{const r=x.release||{};return `<tr><td class="stick" style="min-width:170px"><b>${h(empName(x.e))}</b>${isRes(x)?' <span class="chip warn">Resigned</span>':''}<div class="muted small">${x.e._historical?'Not in Employee Master':'#'+h(x.e.id)}</div>${(x.also||[]).length?`<div class="muted small">Also listed as: ${h(x.also.join(' · '))}${can('editPayroll')&&!S.readOnly?` <button class="btn sm" data-act="thirteenthUnlink" data-id="${h(x.e.id)}">Separate</button>`:''}</div>`:''}</td><td>${h(x.e.department||'')}</td>${x.monthly.map(m=>`<td class="n" title="${m.edited?`Edited manually: ${peso(m.basic)} (computed ${peso(m.auto)})`:m.source==='Imported Monthly'?`Imported Monthly: ${peso(m.basic)}`:m.firstOk&&m.secondOk?`1st ${peso(m.first)} + 2nd ${peso(m.second)} (${m.source})`:`${m.source}`}">${peso(m.basic)}${m.edited?' ✎':(m.firstOk&&m.secondOk?'':' *')}</td>`).join('')}<td class="n"><b>${peso(x.total)}</b></td><td class="n"><b>${peso(x.computed)}</b></td><td class="n"${x.leave?` title="${h((x.leaveDays&&x.leaveRate?x.leaveDays+' day'+(x.leaveDays===1?'':'s')+' × '+amt(x.leaveRate):'')+(r.leave_note?' · '+r.leave_note:''))}"`:''}>${x.leave?peso(x.leave):'—'}</td><td class="n"><b>${peso(x.payout)}</b></td><td>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</td><td class="small">${r.release_date?h(fmtDY(r.release_date)):'—'}</td><td class="small">${h(r.note||'—')}</td><td style="white-space:nowrap"><button class="btn sm" data-act="thirteenthSlip" data-id="${h(x.e.id)}">Payslip</button> <button class="btn sm" data-act="thirteenthRelease" data-id="${h(x.e.id)}">${r.released?'Edit release':'Set release'}</button>${can('editPayroll')&&!S.readOnly?` <button class="btn sm" data-act="thirteenthEdit" data-id="${h(x.e.id)}">Edit amounts</button>`:''}</td></tr>`};
   const monthTot=list=>d.months.map((_,i)=>r2(list.reduce((a,x)=>a+(x.monthly[i]?.basic||0),0)));
-  const foot13=(label,list)=>`<tfoot><tr><td class="stick" style="min-width:170px">${h(label)} (${list.length})</td><td></td>${monthTot(list).map(v=>`<td class="n">${peso(v)}</td>`).join('')}<td class="n">${peso(r2(list.reduce((a,x)=>a+x.total,0)))}</td><td class="n">${peso(r2(list.reduce((a,x)=>a+x.computed,0)))}</td><td colspan="4"></td></tr></tfoot>`;
+  const foot13=(label,list)=>`<tfoot><tr><td class="stick" style="min-width:170px">${h(label)} (${list.length})</td><td></td>${monthTot(list).map(v=>`<td class="n">${peso(v)}</td>`).join('')}<td class="n">${peso(r2(list.reduce((a,x)=>a+x.total,0)))}</td><td class="n">${peso(r2(list.reduce((a,x)=>a+x.computed,0)))}</td><td class="n">${peso(r2(list.reduce((a,x)=>a+x.leave,0)))}</td><td class="n">${peso(r2(list.reduce((a,x)=>a+x.payout,0)))}</td><td colspan="4"></td></tr></tfoot>`;
   const sect13=(title,note,list,label)=>`<h2 style="margin:18px 0 4px">${h(title)} <span class="chip">${list.length}</span></h2><p class="muted small" style="margin:0 0 8px">${h(note)}</p>${list.length?`<div class="tablewrap" data-noresp><table>${head13}<tbody>${list.map(row13).join('')}</tbody>${foot13(label,list)}</table></div>`:'<div class="panel empty" style="margin:0"><b>None</b></div>'}`;
   html+=sect13('Current employees','Active employees in the Employee Master.',curRows,'Total current');
   html+=sect13('Resigned employees','Inactive employees, and former employees found only in historical payroll.',resRows,'Total resigned');
-  html+=`<div class="panel" style="margin-top:14px;padding:12px 16px"><div class="row"><b>Grand total (current + resigned)</b><span class="spacer"></span><span class="muted small">${d.rows.length} employees</span><span>Total net of L&amp;A <b class="money">${peso(r2(d.rows.reduce((a,x)=>a+x.total,0)))}</b></span><span>13th month <b class="money">${peso(total13)}</b></span></div></div>`;
+  html+=`<div class="panel" style="margin-top:14px;padding:12px 16px"><div class="row"><b>Grand total (current + resigned)</b><span class="spacer"></span><span class="muted small">${d.rows.length} employees</span><span>Total net of L&amp;A <b class="money">${peso(r2(d.rows.reduce((a,x)=>a+x.total,0)))}</b></span><span>13th month <b class="money">${peso(total13)}</b></span><span>Leave credits <b class="money">${peso(r2(d.rows.reduce((a,x)=>a+x.leave,0)))}</b></span><span>Total payout <b class="money">${peso(r2(d.rows.reduce((a,x)=>a+x.payout,0)))}</b></span></div></div>`;
   html+=`<p class="muted small" style="margin-top:8px">* A month is marked incomplete when a complete Monthly import is unavailable and both 1st and 2nd cut-off values are not available. Imported payroll is read as stored (not recalculated); only its "NET of L&amp;A" is used, or basic less lates and absences when the file has no such column.</p>`;
   html+=`<div class="panel" style="margin-top:14px"><h2>Release status</h2><p class="muted small">For employees whose 13th-month pay was already released, check <b>Released</b>, enter the <b>actual release date</b>, and add a note if needed. This does not change the computed 13th-month amount. Former/resigned employees found in historical approved payroll records remain visible here even if they are no longer in Employee Master.</p></div>`;
   return html;
 }
-function thirteenthSlipHtml(row,d){
+function thirteenthSlipHtml(row,d,forPrint){ // forPrint: no "missing payroll" asterisks or warning on the paper copies
   const st=S.settings,e=row.e,r=row.release||{},line=(l,v,ng)=>`<tr><td>${l}</td><td class="n">${ng&&v?'−':''}${amt(v)}</td></tr>`;
   const adv=e._historical?[]:(S.ledger||[]).filter(a=>a.for_13th&&a.status!=='closed'&&String(a.employee_id)===String(e.id)&&advBalance(a)>0);
-  const advTot=r2(adv.reduce((t,a)=>t+advBalance(a),0)),net=r2(row.computed-advTot),incomplete=row.monthly.some(m=>!(m.firstOk&&m.secondOk));
+  const advTot=r2(adv.reduce((t,a)=>t+advBalance(a),0)),net=r2(row.computed+row.leave-advTot),incomplete=row.monthly.some(m=>!(m.firstOk&&m.secondOk));
   const cell=(ok,v)=>ok&&v?amt(v):'—';
   return `<div class="slip"><div class="slip-head">${coLogo()}<div><p><b>${h(st.company)}</b></p><p class="muted small">${h(st.address||'')}</p></div></div>
   <div class="row" style="justify-content:space-between;margin-bottom:12px"><div><b style="font-size:17px">${h(empName(e))}</b><div class="muted small">${h([e._historical?'Not in Employee Master':'#'+e.id,e.active===false||e._historical?'Resigned':e.employment_status,e.position,e.department].filter(Boolean).join(' · '))}</div></div><div class="small" style="text-align:right">13th Month Pay<br><b>${h(thirteenthPeriod(d.year).label)}</b></div></div>
-  <table><thead><tr><th>Month</th><th>Source</th><th class="n">1st cut-off</th><th class="n">2nd cut-off</th><th class="n">Net of L&amp;A</th></tr></thead><tbody>
-  ${row.monthly.map(m=>{const whole=m.source==='Imported Monthly';return `<tr><td>${h(fmtMonth(m.ym))}</td><td class="small">${h(m.source)}</td><td class="n">${whole?'—':cell(m.firstOk,m.first)}</td><td class="n">${whole?'—':cell(m.secondOk,m.second)}</td><td class="n">${amt(m.basic)}${m.firstOk&&m.secondOk?'':' *'}</td></tr>`}).join('')}
-  <tr class="tot"><td colspan="4">Total basic salary net of lates and absences (12 months)</td><td class="n">${amt(row.total)}</td></tr></tbody></table>
+  <table><thead><tr><th>Month</th><th class="n">Net of L&amp;A</th><th>Month</th><th class="n">Net of L&amp;A</th></tr></thead><tbody>
+  ${[0,1,2,3,4,5].map(i=>{const c=m=>m?`<td>${h(fmtMonth(m.ym))}</td><td class="n">${amt(m.basic)}${forPrint||m.firstOk&&m.secondOk?'':' *'}</td>`:'<td></td><td></td>';return `<tr>${c(row.monthly[i])}${c(row.monthly[i+6])}</tr>`}).join('')}
+  <tr class="tot"><td colspan="3">Total basic salary net of lates and absences (12 months)</td><td class="n">${amt(row.total)}</td></tr></tbody></table>
   <table style="margin-top:14px"><tbody>${line('Total net of L&amp;A (12 months)',row.total)}
   <tr class="tot"><td>13th month pay (${amt(row.total)} ÷ 12)</td><td class="n">${amt(row.computed)}</td></tr>
+  ${row.leave?line('Add: leave credits'+(row.leaveDays&&row.leaveRate?` (${row.leaveDays} day${row.leaveDays===1?'':'s'} × ${amt(row.leaveRate)})`:'')+(r.leave_note?' · '+h(r.leave_note):''),row.leave):''}
   ${adv.map(a=>line('Less: company advance'+(a.note?' ('+h(a.note)+')':''),advBalance(a),1)).join('')}</tbody></table>
-  <div class="net"><span>${advTot?'Net 13th month pay':'13th month pay'}</span><b>${peso(net)}</b></div>
-  ${incomplete?'<p class="banner warn" style="margin-top:12px">* Months marked with an asterisk have missing payroll. They are counted as zero in the total, so the 13th month may be understated until the missing payroll is imported or approved.</p>':''}
-  <p class="muted small" style="margin-top:12px">${r.released?`Released${r.release_date?' on '+h(fmtDY(r.release_date)):''}${r.note?' · '+h(r.note):''}`:'Not yet released'} · Basis: basic salary net of lates and absences only; allowances, holiday pay, overtime and night differential are excluded · generated ${h(fmtStamp(nowISO()))}</p></div>`;
+  <div class="net"><span>${row.leave?'Total payout':(advTot?'Net 13th month pay':'13th month pay')}</span><b>${peso(net)}</b></div>
+  ${incomplete&&!forPrint?'<p class="banner warn" style="margin-top:12px">* Months marked with an asterisk have missing payroll. They are counted as zero in the total, so the 13th month may be understated until the missing payroll is imported or approved.</p>':''}
+  <p class="cert">I hereby acknowledge receipt of the amount of “PHP ${amt(net)}” representing the full and complete payment of my 13th Month Pay for the calendar year <b>${h(d.year)}</b>, computed in accordance with Presidential Decree No. 851. I confirm that the computation shown above is true and correct, and I have no further claims against the company regarding this benefit.</p>
+  <div class="appr" style="margin-top:22px"><div style="max-width:70%"><div class="nm">${h(empName(e))}</div><div class="cap"><b>Employee’s Signature over Printed Name</b></div></div></div>
+  <p class="small" style="margin:12px 0 0">Date Received: ____________________</p>
+  ${forPrint?'':`<p class="muted small" style="margin-top:12px">${r.released?`Released${r.release_date?' on '+h(fmtDY(r.release_date)):''}${r.note?' · '+h(r.note):''}`:'Not yet released'} · Basis: basic salary net of lates and absences only; allowances, holiday pay, overtime and night differential are excluded · generated ${h(fmtStamp(nowISO()))}</p>`}</div>`;
 }
 function thirteenthSlipDialog(id){
   const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
-  openDlg('13th Month Payslip · '+empName(row.e),thirteenthSlipHtml(row,d),'<button class="btn sm" data-act="printSlip">Print</button>');
+  openDlg('13th Month Payslip · '+empName(row.e),thirteenthSlipHtml(row,d),`<button class="btn sm" data-act="thirteenthPrint" data-id="${h(id)}" title="Company copy and employee copy">Print</button>`);
+}
+/* Print: a company copy and an employee copy side by side, 2 employees per page (same layout as the regular payslips). */
+function thirteenthSheets(rows,d){
+  let out='';
+  for(let i=0;i<rows.length;i+=2){
+    out+=`<div class="ps-page">${rows.slice(i,i+2).map(row=>{const sl=thirteenthSlipHtml(row,d,true);return `<div class="ps-row"><div class="ps-cell"><div class="ps-tag">COMPANY COPY</div><div class="ps-fit">${sl}</div></div><div class="ps-cell"><div class="ps-tag">EMPLOYEE COPY</div><div class="ps-fit">${sl}</div></div></div>`}).join('')}</div>`;
+  }
+  return out;
 }
 function thirteenthReleaseDialog(id){
   const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
@@ -1705,37 +1780,80 @@ function thirteenthReleaseDialog(id){
   openDlg('13th Month Release · '+empName(row.e),`<form data-form="thirteenthRelease" data-id="${h(id)}"><div class="panel" style="margin:0 0 12px"><div class="row"><div><b>${h(empName(row.e))}</b><div class="muted small">Computed 13th month: ${peso(row.computed)}</div></div><span class="spacer"></span>${r.released?'<span class="chip ok">Released</span>':'<span class="chip warn">Not yet released</span>'}</div></div><div class="grid"><label class="chk wide"><input type="checkbox" name="released" ${r.released?'checked':''}> Released / already paid</label><label class="f">Actual release date<input type="date" name="release_date" value="${h(r.release_date||'')}" ${r.released?'':'disabled'}></label><label class="f wide">Note<textarea name="note" rows="3" maxlength="300" placeholder="e.g. Released upon resignation / final pay">${h(r.note||'')}</textarea></label></div><div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save release status</button></div></form>`);
   const box=document.querySelector('#dlgBody input[name="released"]'),date=document.querySelector('#dlgBody input[name="release_date"]');if(box&&date)box.addEventListener('change',()=>{date.disabled=!box.checked;if(!box.checked)date.value=''});
 }
-/* Edit the monthly amounts used for one employee's 13th month. Blank = the computed amount. A reason is required. */
+/* Edit one employee's 13th month: the amount of each month, and manually added leave credits.
+   Leave credits = daily rate × days. They are paid together with the 13th month (not divided by 12) and show on the payslip. */
+const empDailyRate=e=>{if(!e||e._historical)return 0;const dr=numOrNull(e.daily_rate),mr=numOrNull(e.monthly_rate);return r2(dr!=null?dr:(mr!=null?mr*12/(Number(S.settings.divisor)||313):0))};
 function thirteenthEditDialog(id){
   const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
   if(!can('editPayroll')||S.readOnly){toast('You can’t edit these amounts.',true);return}
-  const r=row.release||{};
-  openDlg('Edit 13th month amounts · '+empName(row.e),`<form data-form="thirteenthEdit" data-id="${h(id)}"><p class="muted small" style="margin-top:0">Net of late and absences for each month. Leave a box empty to use the computed amount. The 13th month is the total of the 12 months ÷ 12.</p>
-    <div class="tablewrap" data-noresp><table><thead><tr><th>Month</th><th class="n">Computed</th><th class="n">Use this amount (₱)</th></tr></thead><tbody>${row.monthly.map(m=>`<tr><td>${h(fmtMonth(m.ym))}</td><td class="n">${peso(m.auto)}${m.firstOk&&m.secondOk||m.edited?'':' *'}</td><td class="n"><input name="m_${h(m.ym)}" inputmode="decimal" style="width:130px;text-align:right" value="${m.edited?h(String(m.basic)):''}" placeholder="${h(amt(m.auto))}"></td></tr>`).join('')}</tbody></table></div>
-    <label class="f" style="margin-top:12px">Reason for the change (required)<textarea name="note" rows="2" maxlength="300" placeholder="e.g. Correct late deduction, per HR memo">${h(r.override_note||'')}</textarea></label>
-    <div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save amounts</button></div></form>`);
+  const r=row.release||{},eRate=empDailyRate(row.e),rate=r.leave_rate?Number(r.leave_rate):eRate,div=Number(S.settings.divisor)||313;
+  const rateNote=eRate?`Daily rate from the Employee Master: <b>${peso(eRate)}</b>${numOrNull(row.e.daily_rate)!=null?'':` (monthly rate × 12 ÷ ${div})`}. You can change it for this employee.`:'No rate found for this employee: enter the daily rate.';
+  openDlg('Edit 13th month · '+empName(row.e),`<form data-form="thirteenthEdit" data-id="${h(id)}"><p class="muted small" style="margin-top:0">Net of late and absences for each month. Leave a box empty to use the computed amount. The 13th month is the total of the 12 months ÷ 12.</p>
+    <div class="tablewrap" data-noresp><table><thead><tr><th>Month</th><th>Source</th><th class="n">Computed</th><th class="n">Use this amount (₱)</th></tr></thead><tbody>${row.monthly.map(m=>{const src=m.origSource||m.source,det=src==='Imported Monthly'||!(m.first||m.second)?'':` <span class="muted">· 1st ${amt(m.first)} + 2nd ${amt(m.second)}</span>`;return `<tr><td>${h(fmtMonth(m.ym))}</td><td class="small">${h(src)}${det}</td><td class="n">${peso(m.auto)}${m.firstOk&&m.secondOk||m.edited?'':' *'}</td><td class="n"><input name="m_${h(m.ym)}" inputmode="decimal" style="width:130px;text-align:right" value="${m.edited?h(String(m.basic)):''}" placeholder="${h(amt(m.auto))}"></td></tr>`}).join('')}</tbody></table></div>
+    <label class="f" style="margin-top:12px">Reason for changing a month (required when you change one)<textarea name="note" rows="2" maxlength="300" placeholder="e.g. Correct late deduction, per HR memo">${h(r.override_note||'')}</textarea></label>
+    <h3 style="margin:16px 0 4px">Leave credits</h3><p class="muted small" style="margin:0 0 8px"><b>Leave credits = daily rate × days.</b> ${rateNote} The amount is added to this employee's payout and shown on the 13th-month payslip. Leave the days empty if none.</p>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))"><label class="f">Days<input name="leave_days" inputmode="decimal" value="${r.leave_days?h(String(r.leave_days)):''}"></label><label class="f">Daily rate (₱)<input name="leave_rate" inputmode="decimal" value="${rate?h(String(rate)):''}"></label><div class="f"><span>Leave credits (rate × days)</span><b class="money" id="leaveCalc">${peso(0)}</b></div><label class="f wide">Note (optional)<input name="leave_note" maxlength="120" value="${h(r.leave_note||'')}" placeholder="e.g. Unused vacation leave"></label></div>
+    <div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save</button></div></form>`);
+  const di=document.querySelector('#dlgBody input[name="leave_days"]'),ri=document.querySelector('#dlgBody input[name="leave_rate"]'),out=document.querySelector('#dlgBody #leaveCalc');
+  const upd=()=>{const dv=Number(String(di.value).replace(/,/g,''))||0;out.textContent=peso(r2(dv*parseMoney(ri.value)))};
+  if(di&&ri&&out){di.addEventListener('input',upd);ri.addEventListener('input',upd);upd()}
 }
 async function saveThirteenthEdit(form){
   const id=String(form.dataset.id),d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===id);if(!row)return;
   if(!can('editPayroll')||S.readOnly){toast('You can’t edit these amounts.',true);return}
-  const fd=new FormData(form),ov={},changes=[];
+  const fd=new FormData(form),ov={},changes=[],money=/^[\s₱]*\d[\d,]*(\.\d+)?\s*$/;
   for(const m of row.monthly){
     const raw=String(fd.get('m_'+m.ym)??'').trim();if(raw==='')continue;
-    if(!/^[\s₱]*\d[\d,]*(\.\d+)?\s*$/.test(raw)){toast(`${fmtMonth(m.ym)}: enter a valid amount.`,true);return}
+    if(!money.test(raw)){toast(`${fmtMonth(m.ym)}: enter a valid amount.`,true);return}
     const v=r2(parseMoney(raw));
     if(v!==r2(m.auto)){ov[m.ym]=v;changes.push(`${fmtMonth(m.ym)} ${amt(m.auto)} → ${amt(v)}`)}
   }
   const note=String(fd.get('note')||'').trim();
   if(Object.keys(ov).length&&!note){toast('Write the reason for the change.',true);return}
+  const draw=String(fd.get('leave_days')||'').trim(),rraw=String(fd.get('leave_rate')||'').trim();
+  if(draw!==''&&!/^\d+(\.\d+)?$/.test(draw)){toast('Leave credits: enter the days as a number.',true);return}
+  if(rraw!==''&&!money.test(rraw)){toast('Leave credits: enter a valid daily rate.',true);return}
+  const days=draw===''?0:Number(draw),rateIn=rraw===''?0:r2(parseMoney(rraw));
+  if(days>0&&!(rateIn>0)){toast('Leave credits: enter the daily rate.',true);return}
+  const leaveDays=days>0?days:0,leaveRate=days>0?rateIn:0,leaveAmt=days>0?r2(days*rateIn):0,leaveNote=String(fd.get('leave_note')||'').trim();
   const prev=row.release||{},path=cp('thirteenth_releases/'+thirteenthKey(d.year)+'__'+id);
-  if(!Object.keys(ov).length&&!(prev.overrides&&Object.keys(prev.overrides).length)){closeDlg();toast('No changes.');return}
-  const doc={...prev,employee_id:row.e.id,employee_name:empName(row.e),released:!!prev.released,release_date:prev.release_date||'',note:prev.note||'',overrides:ov,override_note:Object.keys(ov).length?note:'',overrides_by:actor(),overrides_at:nowISO(),updated_by:actor(),updated_at:nowISO()};
+  const leaveChanged=leaveAmt!==r2(Number(prev.leave_amount)||0)||leaveDays!==(Number(prev.leave_days)||0)||leaveRate!==r2(Number(prev.leave_rate)||0)||leaveNote!==String(prev.leave_note||'');
+  if(leaveChanged)changes.push(leaveDays?`Leave credits ${leaveDays} day${leaveDays===1?'':'s'} × ${amt(leaveRate)} = ${amt(leaveAmt)}${leaveNote?' · '+leaveNote:''}`:'Leave credits removed');
+  if(!Object.keys(ov).length&&!(prev.overrides&&Object.keys(prev.overrides).length)&&!leaveChanged){closeDlg();toast('No changes.');return}
+  const doc={...prev,employee_id:row.e.id,employee_name:empName(row.e),released:!!prev.released,release_date:prev.release_date||'',note:prev.note||'',overrides:ov,override_note:Object.keys(ov).length?note:'',leave_days:leaveDays,leave_rate:leaveRate,leave_amount:leaveAmt,leave_note:leaveNote,overrides_by:actor(),overrides_at:nowISO(),updated_by:actor(),updated_at:nowISO()};
   try{
     const jr=journal();
     await jr.set(path,doc,Object.keys(prev).length?prev:null);
-    logAction('13TH_MONTH_EDIT','13th month',id,`${empName(row.e)} · ${d.year}: ${changes.length?changes.join('; ')+' · '+note:'edited amounts cleared'}`,jr);
-    closeDlg();S.ui.thirteenthData=null;await loadThirteenth();toast('13th month amounts saved.');
-  }catch(e){toast('Could not save the amounts: '+(e.message||e),true)}
+    logAction('13TH_MONTH_EDIT','13th month',id,`${empName(row.e)} · ${d.year}: ${changes.length?changes.join('; ')+(Object.keys(ov).length?' · '+note:''):'edited amounts cleared'}`,jr);
+    closeDlg();S.ui.thirteenthData=null;await loadThirteenth();toast('13th month saved.');
+  }catch(e){toast('Could not save: '+(e.message||e),true)}
+}
+/* Two names that are almost the same: the person confirms they are one person (months are combined) or different people. */
+async function saveThirteenthLink(i,kind){
+  const d=S.ui.thirteenthData,s=d?.suggestions?.[i];if(!s)return;
+  if(!can('editPayroll')||S.readOnly){toast('You can’t change this.',true);return}
+  const prev=d.links||{},pair=[s.a,s.b].sort().join('|');
+  const doc={same:[...(prev.same||[])],different:[...(prev.different||[])],updated_by:actor(),updated_at:nowISO()};
+  doc[kind].push(pair);
+  try{
+    const jr=journal();
+    await jr.set(cp('thirteenth_releases/_links'),doc,Object.keys(prev).length?prev:null);
+    logAction('13TH_MONTH_LINK','13th month',null,`${kind==='same'?'Confirmed as one person':'Confirmed as different people'}: ${empName(s.ea)} / ${empName(s.eb)}`,jr);
+    S.ui.thirteenthData=null;await loadThirteenth();toast(kind==='same'?'Combined as one person.':'Noted as different people.');
+  }catch(e){toast('Could not save: '+(e.message||e),true)}
+}
+async function unlinkThirteenth(id){
+  const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(id));if(!row)return;
+  if(!can('editPayroll')||S.readOnly){toast('You can’t change this.',true);return}
+  if(!(await confirmDlg('Separate these names?','They will be listed as different people again.','Separate')))return;
+  const prev=d.links||{},grp=new Set(row.groupKeys||[]);
+  const doc={same:(prev.same||[]).filter(p=>{const [a,b]=String(p).split('|');return !(grp.has(a)&&grp.has(b))}),different:[...(prev.different||[]),...[...grp].filter(k=>k!==row.ownKey).map(k=>[row.ownKey,k].sort().join('|'))],updated_by:actor(),updated_at:nowISO()};
+  try{
+    const jr=journal();
+    await jr.set(cp('thirteenth_releases/_links'),doc,Object.keys(prev).length?prev:null);
+    logAction('13TH_MONTH_LINK','13th month',id,`Separated: ${empName(row.e)}${row.also&&row.also.length?' / '+row.also.join(' / '):''}`,jr);
+    S.ui.thirteenthData=null;await loadThirteenth();toast('Names separated.');
+  }catch(e){toast('Could not save: '+(e.message||e),true)}
 }
 async function saveThirteenthRelease(form){
   const id=String(form.dataset.id),d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===id);if(!row)return;
@@ -2137,7 +2255,7 @@ async function savePreviousPayroll(form){
       return v;
     };
     const pick=(r,k)=>Object.prototype.hasOwnProperty.call(colMap,k)?scalar(r[colMap[k]]):'';
-    const normEmpName=v=>String(v??'').toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' '); // word order does not matter
+    const normEmpName=v=>String(v??'').toUpperCase().replace(/['’\-]/g,'').replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).sort().join(' '); // word order does not matter
     const currentByName=new Map(S.employees.map(e=>[normEmpName(empName(e)),e]));
     const filteredRows=rows.map((r,ri)=>{
       const o={};
@@ -5308,26 +5426,26 @@ async function exportThirteenth(){
   const d=S.ui.thirteenthData;
   if(!d||!(d.rows||[]).length){toast('There is no 13th-month data to export yet.',true);return}
   if(typeof XLSX==='undefined'){toast('Excel export isn’t available here.',true);return}
-  const col=XLSX.utils.encode_col,mc=d.months.length,first=3,last=first+mc-1,cTot=last+1,c13=last+2,cInc=c13+1,cSt=c13+2,cDt=c13+3,cNote=c13+4;
+  const col=XLSX.utils.encode_col,mc=d.months.length,first=3,last=first+mc-1,cTot=last+1,c13=last+2,cDays=c13+1,cRate=c13+2,cLeave=c13+3,cPay=c13+4,cInc=c13+5,cSt=c13+6,cDt=c13+7,cNote=c13+8;
   const hdr=[S.settings.company||curCo().name,`13th Month Pay · December ${d.year-1} – November ${d.year}`,'Basis: basic salary net of lates and absences for each month, added up over the 12 months and divided by 12.'];
-  const head=['EE No','Employee','Department',...d.months.map(ym=>fmtMonth(ym).slice(0,3)+' '+ym.slice(0,4)),'Total net of L&A','13th month (total ÷ 12)','Incomplete months','Status','Release date','Note'];
-  const rows=d.rows.map(x=>{const r=x.release||{};return[String(x.e.id).startsWith('hist_')?'':x.e.id,empName(x.e),x.e.department||'',...x.monthly.map(m=>r2(m.basic)),r2(x.total),r2(x.computed),x.monthly.filter(m=>!(m.firstOk&&m.secondOk)).map(m=>fmtMonth(m.ym).slice(0,3)).join(', '),r.released?'Released':'Not yet released',r.release_date?fmtDY(r.release_date):'',[r.note,x.monthly.some(m=>m.edited)?`Edited: ${x.monthly.filter(m=>m.edited).map(m=>fmtMonth(m.ym).slice(0,3)).join(', ')}${r.override_note?' – '+r.override_note:''}`:''].filter(Boolean).join(' | ')]});
+  const head=['EE No','Employee','Department',...d.months.map(ym=>fmtMonth(ym).slice(0,3)+' '+ym.slice(0,4)),'Total net of L&A','13th month (total ÷ 12)','Leave days','Daily rate','Leave credits (days × rate)','Total payout','Incomplete months','Status','Release date','Note'];
+  const rows=d.rows.map(x=>{const r=x.release||{};return[String(x.e.id).startsWith('hist_')?'':x.e.id,empName(x.e),x.e.department||'',...x.monthly.map(m=>r2(m.basic)),r2(x.total),r2(x.computed),x.leaveDays||0,x.leaveRate||0,x.leave,x.payout,x.monthly.filter(m=>!(m.firstOk&&m.secondOk)).map(m=>fmtMonth(m.ym).slice(0,3)).join(', '),r.released?'Released':'Not yet released',r.release_date?fmtDY(r.release_date):'',[r.note,x.leave&&r.leave_note?`Leave credits: ${r.leave_note}`:'',x.monthly.some(m=>m.edited)?`Edited: ${x.monthly.filter(m=>m.edited).map(m=>fmtMonth(m.ym).slice(0,3)).join(', ')}${r.override_note?' – '+r.override_note:''}`:''].filter(Boolean).join(' | ')]});
   const sum=i=>r2(rows.reduce((a,r)=>a+(Number(r[i])||0),0)),rel=r2(rows.filter(r=>r[cSt]==='Released').reduce((a,r)=>a+r[c13],0));
-  const tot=['','TOTAL','',...Array.from({length:c13-first+1},(_,k)=>sum(first+k))];
+  const tot=['','TOTAL','',...Array.from({length:cPay-first+1},(_,k)=>first+k===cRate?'':sum(first+k))];
   const line=(label,v)=>{const a=new Array(c13+1).fill('');a[1]=label;a[c13]=v;return a};
   const aoa=[...hdr.map(t=>[t]),[],head,...rows,tot,[],line('Already released',rel),line('Not yet released',r2(sum(c13)-rel))];
   const ws=XLSX.utils.aoa_to_sheet(aoa),top=hdr.length+1,ra=top+2,rb=top+1+rows.length,totR=rb+1;
   const F=(R,C,f)=>{const a=XLSX.utils.encode_cell({r:R-1,c:C}),c=ws[a];if(!c||typeof c.v!=='number')return;ws[a]={t:'n',v:c.v,f}};
-  for(let R=ra;R<=rb;R++){F(R,cTot,`SUM(${col(first)}${R}:${col(last)}${R})`);F(R,c13,`ROUND(${col(cTot)}${R}/12,2)`)}
+  for(let R=ra;R<=rb;R++){F(R,cTot,`SUM(${col(first)}${R}:${col(last)}${R})`);F(R,c13,`ROUND(${col(cTot)}${R}/12,2)`);if(rows[R-ra][cDays]>0&&rows[R-ra][cRate]>0)F(R,cLeave,`ROUND(${col(cDays)}${R}*${col(cRate)}${R},2)`);F(R,cPay,`${col(c13)}${R}+${col(cLeave)}${R}`)}
   if(rows.length){
-    for(let C=first;C<=c13;C++)F(totR,C,`SUM(${col(C)}${ra}:${col(C)}${rb})`);
+    for(let C=first;C<=cPay;C++)if(C!==cRate)F(totR,C,`SUM(${col(C)}${ra}:${col(C)}${rb})`);
     const st=`$${col(cSt)}$${ra}:$${col(cSt)}$${rb}`,v=`$${col(c13)}$${ra}:$${col(c13)}$${rb}`;
     F(totR+2,c13,`SUMIF(${st},"Released",${v})`);F(totR+3,c13,`${col(c13)}${totR}-${col(c13)}${totR+2}`);
   }
   const rng=XLSX.utils.decode_range(ws['!ref']);
   for(let R=top+1;R<=rng.e.r;R++)for(let C=1;C<=rng.e.c;C++){const cell=ws[XLSX.utils.encode_cell({r:R,c:C})];if(cell&&cell.t==='n')cell.z='#,##0.00'}
   ws['!merges']=hdr.map((_,i)=>({s:{r:i,c:0},e:{r:i,c:cNote}}));
-  ws['!cols']=head.map((_,i)=>({wch:i===0?8:i===1?30:i===2?18:(i>=first&&i<=c13)?13:i===cInc?18:i===cSt?16:i===cDt?13:i===cNote?30:14}));
+  ws['!cols']=head.map((_,i)=>({wch:i===0?8:i===1?30:i===2?18:(i>=first&&i<=cPay)?13:i===cInc?18:i===cSt?16:i===cDt?13:i===cNote?30:14}));
   ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:top,c:0},e:{r:top+rows.length,c:cNote}})};
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'13th Month');
   wb.Props={Title:`${S.settings.company} 13th month ${d.year}`,Company:S.settings.company};wb.Workbook={CalcPr:{fullCalcOnLoad:true}};
@@ -5952,6 +6070,9 @@ const actions={
   thirteenthSlip(el){thirteenthSlipDialog(el.dataset.id)},
   thirteenthRelease(el){thirteenthReleaseDialog(el.dataset.id)},
   thirteenthEdit(el){thirteenthEditDialog(el.dataset.id)},
+  thirteenthPrint(el){const d=S.ui.thirteenthData,row=d?.rows?.find(x=>String(x.e.id)===String(el.dataset.id));if(!row)return;printHtml(thirteenthSheets([row],d))},
+  thirteenthLink(el){saveThirteenthLink(Number(el.dataset.i),el.dataset.k)},
+  thirteenthUnlink(el){unlinkThirteenth(el.dataset.id)},
   prevPayImport(){previousPayrollDialog()},
   prevPayOpen(el){S.ui.prevPayOpen=el.dataset.id;S.ui.prevPayData=null;S.ui.prevPayErr='';S.ui.prevPaySec='monthly';render()},
   prevPaySec(el){S.ui.prevPaySec=el.dataset.v||'monthly';scheduleRender()},
