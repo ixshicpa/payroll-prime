@@ -710,7 +710,8 @@ function can(k){
   return !!roleAccess(r)[k];
 }
 const empById=id=>S.employees.find(e=>String(e.id)===String(id));
-const holidayMap=()=>{const m={};for(const x of (S.settings.holidays||[]))m[x.date]=x.type;return m};
+/* Holidays by date. With an employee, the holidays that employee is not qualified for (holiday.exempt = list of employee ids) are left out. */
+const holidayMap=emp=>{const m={};for(const x of (S.settings.holidays||[])){if(emp&&Array.isArray(x.exempt)&&x.exempt.some(i=>String(i)===String(emp.id)))continue;m[x.date]=x.type}return m};
 const cutLocked=n=>{const d=S.payDocs[n];return !!(d&&d.status==='APPROVED')};
 const lockedDate=d=>{if(!S.period||d<S.period.start||d>S.period.end)return false;const c=S.period.cuts.find(c=>d>=c.start&&d<=c.end);return c?cutLocked(c.n):false};
 const anyLocked=()=>cutLocked(1)||cutLocked(2);
@@ -776,7 +777,7 @@ const restLabel=emp=>{const w=weeklyRest(emp);return w==null?'none (set per day)
 function isRestDay(emp,d){const s=dayShift(emp,d);if(s)return !!s.off;const w=weeklyRest(emp);return w!=null&&dow(d)===w}
 function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&s.in)return{in:s.in,out:s.out,own:true};return{in:(emp&&emp.shift_in)||S.settings.std_in,out:(emp&&emp.shift_out)||S.settings.std_out,own:false}}
 function calcEntry(r,emp){
-  const st=S.settings, hol=holidayMap();
+  const st=S.settings, hol=holidayMap(emp);
   let dayClass=isRestDay(emp,r.work_date)?'RD':'REG';
   if(hol[r.work_date]&&!r.hol_exempt)dayClass=hol[r.work_date]; // hol_exempt: this employee is not qualified for the holiday, the day is paid as an ordinary day (or rest day)
   const ti=toMin(r.time_in); let to=toMin(r.time_out);
@@ -789,7 +790,7 @@ function calcEntry(r,emp){
   let late=0,ut=0,worked=0,otActual=0,nd=0;
   if(status==='P'&&tiA!=null&&to!=null){
     const ti2=tiA;
-    worked=Math.max(0,Math.round(to-ti2)-Number(st.break_min));
+    worked=Math.max(0,Math.round(to-Math.max(ti2,sIn))-Number(st.break_min)); // every day: hours count from the start of the shift, never from an early time-in
     if(dayClass==='REG'){
       late=Math.max(0,Math.round(ti2-sIn)-Number(st.grace_min));
       ut=Math.max(0,Math.round(sOut-to));
@@ -825,7 +826,7 @@ function monthlyTax(t){
 }
 /* One cut-off for one employee. */
 function cutCalc(e,rows,cutoff){
-  const st=S.settings,hol=holidayMap(),today=todayISO(),hpd=Number(st.hours_per_day);
+  const st=S.settings,hol=holidayMap(e),holAll=holidayMap(),today=todayISO(),hpd=Number(st.hours_per_day);
   const otMult=c=>c==='REG'?st.ot_reg:(c==='RH'?st.ot_rh:st.ot_snw);
   const ndBase=c=>c==='REG'?st.nd_base_reg:(c==='RH'?st.nd_base_rh:st.nd_base_snw);
   const doleFrom=String(st.dole_from||'2026-10-11');
@@ -892,7 +893,7 @@ function cutCalc(e,rows,cutoff){
   if(!sm)for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
     const isRest=isRestDay(e,d);
     if(!isMonthly&&hol[d]==='RH'&&!isRest&&!(byDate[d]&&byDate[d].hol_exempt)){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++;cls.rhUnw+=1}}
-    if(!isRest&&!hol[d]&&!byDate[d])missing++;
+    if(!isRest&&!holAll[d]&&!byDate[d])missing++;
   }
   const absentNet=Math.max(0,t.absent-t.offset/(hpd*60));
   const half=r2(monthly/2), basic=isMonthly?(cutoff.n===1?half:r2(monthly-half)):daily*t.payDays;
@@ -3526,7 +3527,7 @@ function dtrEditor(o,canAppr){
         return `<label class="f">Shift in this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_in" placeholder="${h(def)}" value="${ds&&ds.in?h(ds.in):''}" ${sdis}></label>
       <label class="f">Shift out this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&ds.out?h(ds.out):''}" ${sdis}></label>
       <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Rest day this date</label>`})()}
-      ${holidayMap()[r.work_date]?`<label class="chk small" style="align-self:end;min-height:40px" title="Tick if this employee does not get holiday pay for this date. The day is then paid as an ordinary day (or rest day)."><input type="checkbox" name="hol_exempt" ${r.hol_exempt?'checked':''} ${tdis}> Hindi qualified sa holiday</label>`:''}
+      ${holidayMap()[r.work_date]?`<label class="chk small" style="align-self:end;min-height:40px" title="Tick if this employee does not get holiday pay for this date. The day is then paid as an ordinary day (or rest day)."><input type="checkbox" name="hol_exempt" ${r.hol_exempt?'checked':''} ${tdis}> Not qualified for this holiday</label>`:''}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
       <label class="f">OT hours to approve <span class="muted small">(blank = all ${fmtHM(c.otActual)})</span><input type="text" name="ot_hours" inputmode="decimal" autocomplete="off" maxlength="6" placeholder="${fmtHM(c.otActual)}" value="${otCapMin(r)!=null?fmtHM(otCapMin(r)):''}" ${dis||(c.otActual<S.settings.min_ot?'disabled':'')} title="Hours of overtime to pay, e.g. 1, 1.5 or 1:30. Leave blank to pay all of the computed overtime."></label>
@@ -5614,8 +5615,8 @@ function pageSettings(){
   </tbody></table></div>
   ${edit?`<form class="row" data-form="dept" style="margin-top:12px"><input name="name" required maxlength="60" placeholder="New department name, e.g. Logistics" aria-label="New department name" style="flex:1;min-width:220px"><button class="btn primary">Add department</button></form>`:''}</div>
   <div class="panel"><h2>Holidays</h2><p class="muted small">Regular holidays use the RH rates; special non-working days use the SNW rates. Holidays aren't counted as absences.</p>
-  ${hol.length?`<ul class="attn">${hol.map(x=>`<li><b class="num">${h(fmtDY(x.date))}</b><span>${h(x.name||'')}</span><span class="chip acc">${x.type==='RH'?'Regular holiday':'Special non-working'}</span><span class="spacer"></span>${edit?`<button class="btn sm danger" data-act="delHoliday" data-date="${h(x.date)}">Remove</button>`:''}</li>`).join('')}</ul>`:'<p class="muted">No holidays added yet.</p>'}
-  ${edit?`<form class="row" data-form="holiday" style="margin-top:12px"><input type="date" name="date" required aria-label="Date"><input name="name" placeholder="Name, e.g. All Saints' Day" aria-label="Holiday name"><select name="type" aria-label="Type"><option value="RH">Regular holiday</option><option value="SNW">Special non-working</option></select><button class="btn primary">Add holiday</button></form>`:''}</div>
+  ${hol.length?`<ul class="attn">${hol.map(x=>`<li><b class="num">${h(fmtDY(x.date))}</b><span>${h(x.name||'')}</span><span class="chip acc">${x.type==='RH'?'Regular holiday':'Special non-working'}</span>${x.exempt&&x.exempt.length?`<span class="chip warn" title="Not qualified for this holiday">${x.exempt.length} not qualified</span>`:'<span class="chip">All employees</span>'}<span class="spacer"></span>${edit?`<button class="btn sm" data-act="holEmps" data-date="${h(x.date)}">Employees</button> <button class="btn sm danger" data-act="delHoliday" data-date="${h(x.date)}">Remove</button>`:''}</li>`).join('')}</ul>`:'<p class="muted">No holidays added yet.</p>'}
+  ${edit?`<form data-form="holiday" style="margin-top:12px"><div class="row"><input type="date" name="date" required aria-label="Date"><input name="name" placeholder="Name, e.g. All Saints' Day" aria-label="Holiday name"><select name="type" aria-label="Type"><option value="RH">Regular holiday</option><option value="SNW">Special non-working</option></select><button class="btn primary">Add holiday</button></div>${holEmpPicker([])}</form>`:''}</div>
   <form class="panel" data-form="settings"><h2>Company &amp; schedule</h2><div class="grid">
     <label class="f wide">Company name<input name="company" value="${h(st.company)}" ${dis}></label>
     <label class="f wide">Address<input name="address" value="${h(st.address)}" ${dis}></label>
@@ -5692,6 +5693,22 @@ async function removeDepartment(name){
   if(DEPARTMENTS.length<=1){toast('Keep at least one department.',true);return}
   if(!(await confirmDlg('Remove this department?',`${name} will no longer be offered for employees or department heads. Past records keep their department name.`,'Remove',true)))return;
   await saveDepartments(DEPARTMENTS.filter(d=>d!==name),'REMOVE_DEPARTMENT',`Department removed: ${name}`);
+}
+/* Who a holiday applies to: tick = qualified (default, everyone); unticked employees are stored in holiday.exempt. */
+function holEmpPicker(ex){
+  const set=new Set((ex||[]).map(String)),emps=S.employees.filter(e=>e.active!==false).sort((a,b)=>String(a.department||'').localeCompare(String(b.department||''))||empName(a).localeCompare(empName(b)));
+  return `<details class="mfill" style="margin-top:10px" ${set.size?'open':''}><summary>Applies to: all employees — untick those who are not qualified for this holiday</summary>
+    <div class="row" style="gap:8px;margin:8px 0"><button type="button" class="btn sm" data-act="holPick" data-v="all">Select all</button><button type="button" class="btn sm" data-act="holPick" data-v="none">Unselect all</button></div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr));max-height:260px;overflow:auto">${emps.map(e=>`<label class="chk small"><input type="checkbox" name="emp" value="${h(e.id)}" ${set.has(String(e.id))?'':'checked'}> ${h(empName(e))} <span class="muted">${h(e.department||'')}</span></label>`).join('')}</div></details><input type="hidden" name="emp_present" value="1">`;
+}
+function holExemptFrom(f){
+  if(!f.querySelector('[name=emp_present]'))return [];
+  const out=[];for(const c of f.querySelectorAll('input[name=emp]'))if(!c.checked)out.push(Number.isFinite(Number(c.value))?Number(c.value):c.value);
+  return out;
+}
+function holidayEmpsDialog(date){
+  const x=(S.settings.holidays||[]).find(y=>y.date===date);if(!x)return;
+  openDlg(`${fmtDY(x.date)} · ${x.name||'Holiday'} — who it applies to`,`<form data-form="holidayEmps" data-date="${h(x.date)}"><p class="muted small" style="margin-top:0">${x.type==='RH'?'Regular holiday':'Special non-working'}. Ticked employees get the holiday rates. Unticked employees are not qualified: if they work that day it is paid as an ordinary day (or rest day), and they are not given holiday pay.</p>${holEmpPicker(x.exempt).replace('<details class="mfill" style="margin-top:10px" ','<details class="mfill" open style="margin-top:10px" ')}<div class="row" style="margin-top:14px"><span class="spacer"></span><button type="button" class="btn" data-act="closeDlg">Cancel</button><button class="btn primary">Save</button></div></form>`);
 }
 async function saveHolidays(list,msg){
   const save={};for(const k of Object.keys(DEFAULTS))save[k]=S.settings[k];save.holidays=list;
@@ -6134,6 +6151,8 @@ const actions={
   async resetAccess(){if(await confirmDlg('Reset access to defaults?','HR, Payroll and Department heads go back to the standard access. People with Custom access keep their own settings.','Reset',true))saveRoleAccess(null,true)},
   async approvePayroll(el){const n=Number(el.dataset.n),c=S.period.cuts[n-1];if(await confirmDlg(`Approve ${n===1?'1st':'2nd'} cut-off?`,`Payroll ${fmtRange(c.payStart,c.payEnd)}. Attendance ${fmtRange(c.start,c.end)} and its company advances will be locked.`,'Approve'))setPayrollStatus(n,'APPROVED')},
   async reopenPayroll(el){const n=Number(el.dataset.n);if(S.rel[n]){toast('This cut-off was already released. Undo the release record first, then reopen.',true);return}if(await confirmDlg('Reopen this cut-off?','Attendance and company advances become editable again and the approval is cleared.','Reopen',true))setPayrollStatus(n,'DRAFT')},
+  holPick(el){const f=el.closest('form');if(f)f.querySelectorAll('input[name=emp]').forEach(c=>c.checked=el.dataset.v==='all')},
+  holEmps(el){holidayEmpsDialog(el.dataset.date)},
   delHoliday(el){const d=el.dataset.date;saveHolidays((S.settings.holidays||[]).filter(x=>x.date!==d),'Holiday removed')},
   signOut(){signOut(undefined,true)},
   backupNow(el){backupNow(el)},
@@ -6268,7 +6287,8 @@ document.addEventListener('submit',e=>{
   if(k==='mustpw'){saveMustPw(f);return}
   if(!S.account)return;
   if(k==='dtr')saveDtr(f);else if(k==='emp')saveEmp(f);else if(k==='single')saveSingle(f);else if(k==='settings')saveSettings(f);
-  else if(k==='holiday'){const fd=new FormData(f),date=fd.get('date');if(!date)return;const list=(S.settings.holidays||[]).filter(x=>x.date!==date).concat({date,type:fd.get('type'),name:String(fd.get('name')||'').trim()});saveHolidays(list,'Holiday added')}
+  else if(k==='holiday'){const fd=new FormData(f),date=fd.get('date');if(!date)return;const ex=holExemptFrom(f);const hd={date,type:fd.get('type'),name:String(fd.get('name')||'').trim()};if(ex.length)hd.exempt=ex;const list=(S.settings.holidays||[]).filter(x=>x.date!==date).concat(hd);saveHolidays(list,ex.length?`Holiday added · ${ex.length} not qualified`:'Holiday added')}
+  else if(k==='holidayEmps'){const date=f.dataset.date,ex=holExemptFrom(f);const list=(S.settings.holidays||[]).map(x=>{if(x.date!==date)return x;const y={...x};if(ex.length)y.exempt=ex;else delete y.exempt;return y});closeDlg();saveHolidays(list,ex.length?`Holiday ${date}: ${ex.length} employee${ex.length===1?'':'s'} not qualified`:`Holiday ${date}: applies to all employees`)}
 });
 $('#dlg').addEventListener('close',()=>{S.ui.payslip=null});
 function setPayMonth(ym){if(!/^\d{4}-\d{2}$/.test(ym))return;closeMonthPicker();if(ym===S.period.ym)return;S.period=monthPeriods(ym);S.ui.openRow=null;watchPeriod();render()}
