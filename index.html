@@ -4668,7 +4668,7 @@ document.addEventListener('input',e=>{if(mSync(e.target))mSaveBtn()});
 document.addEventListener('change',e=>{if(mSync(e.target)){mSaveBtn();if(e.target.dataset.m==='eid')render();else if(e.target.dataset.mr==='d')scheduleRender()}});
 document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24'))setTimeout(()=>mSync(i),0)});
 document.addEventListener('change',e=>{const c=e.target;if(c&&c.classList&&c.classList.contains('sch-off')){const tr=c.closest('tr');for(const i of tr.querySelectorAll('.sch-in,.sch-out')){i.disabled=c.checked;if(c.checked)i.value=''}}
-  else if(c&&c.name==='day_off'){const f=c.closest('form');for(const n of['day_shift_in','day_shift_out']){const i=f.querySelector(`[name=${n}]`);if(i){i.disabled=c.checked;if(c.checked)i.value=''}}}});
+  /* day_off (editor): the shift boxes stay editable, a rest day can be worked on its own shift */});
 function mAdd(){
   const m=multiState();mSyncAll();
   const last=[...m.rows].reverse().find(r=>r.d);
