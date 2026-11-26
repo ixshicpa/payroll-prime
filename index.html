@@ -766,6 +766,7 @@ function parseOtHours(v){
 function dayShift(emp,d){
   const v=emp&&emp.day_shifts&&emp.day_shifts[d];if(!v)return null;
   if(v==='OFF')return{off:true};
+  const o=String(v).match(/^OFF@(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);if(o)return{off:true,in:o[1],out:o[2]}; // rest day worked on its own shift
   const m=String(v).match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);return m?{in:m[1],out:m[2]}:null;
 }
 /* Weekly rest day: the employee's own (employee.rest_day 0–6), 'none' when it changes every week (set per day in the
@@ -773,7 +774,7 @@ function dayShift(emp,d){
 function weeklyRest(emp){const v=emp&&emp.rest_day;if(v==='none')return null;if(v!==undefined&&v!==null&&v!==''&&!isNaN(Number(v)))return Number(v);return Number(S.settings.rest_day)}
 const restLabel=emp=>{const w=weeklyRest(emp);return w==null?'none (set per day)':WD[w]};
 function isRestDay(emp,d){const s=dayShift(emp,d);if(s)return !!s.off;const w=weeklyRest(emp);return w!=null&&dow(d)===w}
-function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&!s.off)return{in:s.in,out:s.out,own:true};return{in:(emp&&emp.shift_in)||S.settings.std_in,out:(emp&&emp.shift_out)||S.settings.std_out,own:false}}
+function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&s.in)return{in:s.in,out:s.out,own:true};return{in:(emp&&emp.shift_in)||S.settings.std_in,out:(emp&&emp.shift_out)||S.settings.std_out,own:false}}
 function calcEntry(r,emp){
   const st=S.settings, hol=holidayMap();
   let dayClass=isRestDay(emp,r.work_date)?'RD':'REG';
@@ -3292,7 +3293,7 @@ function dtrChips(o){
   const sCls={P:'ok',A:'bad',CHK:'bad',RD:'',HOL:'acc',HD:'warn'}[c.status]||'';
   ch.push(`<span class="chip ${sCls}">${STATUS_LABEL[c.status]||c.status}</span>`);
   if(o.r._auto)ch.push(`<span class="chip bad" title="No time in or time out was imported for this working day">No record</span>`);
-  {const ds=dayShift(o.e,o.r.work_date);if(ds)ch.push(ds.off?'<span class="chip acc" title="Rest day set for this date">Rest day (set)</span>':`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`)}
+  {const ds=dayShift(o.e,o.r.work_date);if(ds)ch.push(ds.off?`<span class="chip acc" title="Rest day set for this date">Rest day (set)</span>${ds.in?`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`:''}`:`<span class="chip acc" title="Shift set for this day">Shift ${h(ds.in)}–${h(ds.out)}</span>`)}
   if(c.dayClass!=='REG'&&c.status!=='RD'&&c.status!=='HOL')ch.push(`<span class="chip acc">${{RD:'Rest day',RH:'Regular holiday',SNW:'Special holiday'}[c.dayClass]}</span>`);
   if(o.r.absent_reason&&(c.status==='A'||c.status==='HD'))ch.push(`<span class="chip ${o.r.absent_reason==='AWOL'?'bad':'acc'}">${h(absLabel(o.r.absent_reason))}</span>`);
   if(c.late)ch.push(`<span class="chip warn">Late ${fmtMin(c.late)}</span>`);
@@ -3522,8 +3523,8 @@ function dtrEditor(o,canAppr){
       <label class="f">Time in<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_in" value="${h(r.time_in||'')}" ${tdis}></label>
       <label class="f">Time out<input type="text" class="t24" autocomplete="off" maxlength="10" placeholder="HH:MM" name="time_out" value="${h(r.time_out||'')}" ${tdis}></label>
       ${(()=>{const sh=shiftOf(o.e,r.work_date),ds=dayShift(o.e,r.work_date),sdis=(!canSched()||lk)?'disabled':'',def=(o.e&&o.e.shift_in)||S.settings.std_in,defO=(o.e&&o.e.shift_out)||S.settings.std_out;
-        return `<label class="f">Shift in this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_in" placeholder="${h(def)}" value="${ds&&!ds.off?h(ds.in):''}" ${sdis}></label>
-      <label class="f">Shift out this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&!ds.off?h(ds.out):''}" ${sdis}></label>
+        return `<label class="f">Shift in this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_in" placeholder="${h(def)}" value="${ds&&ds.in?h(ds.in):''}" ${sdis}></label>
+      <label class="f">Shift out this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&ds.out?h(ds.out):''}" ${sdis}></label>
       <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Rest day this date</label>`})()}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
@@ -3550,8 +3551,8 @@ async function saveDtr(form){
   let newShift; // undefined = unchanged
   if(form.querySelector('[name=day_off]:not(:disabled)')){
     const f0=new FormData(form),si=f0.get('day_shift_in')||'',so=f0.get('day_shift_out')||'',off=f0.get('day_off')==='on';
-    if(!off&&(!!si!==!!so)){toast('Enter both the shift in and shift out for this day, or leave both blank for the default shift.',true);return}
-    const v=off?'OFF':(si&&so?`${si}-${so}`:null),cur=(e&&e.day_shifts&&e.day_shifts[r.work_date])||null;
+    if(!!si!==!!so){toast('Enter both the shift in and shift out for this day, or leave both blank for the default shift.',true);return}
+    const v=off?(si&&so?`OFF@${si}-${so}`:'OFF'):(si&&so?`${si}-${so}`:null),cur=(e&&e.day_shifts&&e.day_shifts[r.work_date])||null;
     if(v!==cur)newShift=v;
   }
   if(role()==='DEPT_HEAD'&&!inMyDept(e)){toast('You can only review your own department.',true);return}
