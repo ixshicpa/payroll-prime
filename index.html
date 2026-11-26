@@ -778,7 +778,7 @@ function shiftOf(emp,d){const s=dayShift(emp,d);if(s&&s.in)return{in:s.in,out:s.
 function calcEntry(r,emp){
   const st=S.settings, hol=holidayMap();
   let dayClass=isRestDay(emp,r.work_date)?'RD':'REG';
-  if(hol[r.work_date])dayClass=hol[r.work_date];
+  if(hol[r.work_date]&&!r.hol_exempt)dayClass=hol[r.work_date]; // hol_exempt: this employee is not qualified for the holiday, the day is paid as an ordinary day (or rest day)
   const ti=toMin(r.time_in); let to=toMin(r.time_out);
   const status=r.status_override||((ti!=null)!==(to!=null)?'CHK':(ti!=null&&to!=null?'P':(dayClass==='RD'?'RD':(dayClass!=='REG'?'HOL':'A'))));
   const sh=shiftOf(emp,r.work_date);
@@ -891,7 +891,7 @@ function cutCalc(e,rows,cutoff){
   let missing=0;
   if(!sm)for(let d=cutoff.start;d<=cutoff.end&&d<=today;d=addDays(d,1)){
     const isRest=isRestDay(e,d);
-    if(!isMonthly&&hol[d]==='RH'&&!isRest){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++;cls.rhUnw+=1}}
+    if(!isMonthly&&hol[d]==='RH'&&!isRest&&!(byDate[d]&&byDate[d].hol_exempt)){const r=byDate[d];const c=r?calcEntry(r,e):null;if(!c||(c.status!=='P'&&c.status!=='HD')){t.hol+=daily;t.holDays++;cls.rhUnw+=1}}
     if(!isRest&&!hol[d]&&!byDate[d])missing++;
   }
   const absentNet=Math.max(0,t.absent-t.offset/(hpd*60));
@@ -3380,8 +3380,8 @@ function openSchedule(eid){
     const ds=dayShift(e,d),lk=lockedDate(d),dis=lk?'disabled':'',wk=weeklyRest(e)!=null&&dow(d)===weeklyRest(e);
     rows+=`<tr data-d="${d}" class="${lk?'unsel':''}"><td><b>${h(fmtD(d))}</b> <span class="muted small">${WD[dow(d)]}</span>${hol[d]?' <span class="chip acc">Holiday</span>':''}${lk?' <span class="chip">Locked</span>':''}</td>
       <td class="muted small">${wk?'Rest day':h(def)}</td>
-      <td><input type="text" class="t24 sch-in" autocomplete="off" maxlength="10" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.in):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
-      <td><input type="text" class="t24 sch-out" autocomplete="off" maxlength="10" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&!ds.off?h(ds.out):''}" ${dis||(ds&&ds.off?'disabled':'')}></td>
+      <td><input type="text" class="t24 sch-in" autocomplete="off" maxlength="10" name="si_${d}" placeholder="${wk?'—':'default'}" value="${ds&&ds.in?h(ds.in):''}" ${dis}></td>
+      <td><input type="text" class="t24 sch-out" autocomplete="off" maxlength="10" name="so_${d}" placeholder="${wk?'—':'default'}" value="${ds&&ds.out?h(ds.out):''}" ${dis}></td>
       <td><input type="checkbox" class="sch-off" name="off_${d}" ${ds&&ds.off?'checked':''} ${dis} aria-label="Rest day ${h(fmtD(d))}"></td></tr>`;
   }
   openDlg(`Daily schedule · ${empName(e)}`,`<form data-form="sched" data-id="${e.id}">
@@ -3418,8 +3418,8 @@ async function saveSchedule(form){
     const d=tr.dataset.d,i=tr.querySelector('.sch-in'),o=tr.querySelector('.sch-out'),off=tr.querySelector('.sch-off');
     if(off.disabled||lockedDate(d))continue;
     let v=null;
-    if(off.checked)v='OFF';
-    else if(i.value||o.value){if(!i.value||!o.value){toast(`${fmtD(d)}: enter both the shift in and shift out, or leave both blank.`,true);(i.value?o:i).focus();return}v=`${i.value}-${o.value}`}
+    if(i.value||o.value){if(!i.value||!o.value){toast(`${fmtD(d)}: enter both the shift in and shift out, or leave both blank.`,true);(i.value?o:i).focus();return}v=(off.checked?'OFF@':'')+`${i.value}-${o.value}`}
+    else if(off.checked)v='OFF';
     const cur=ds[d]||null;if(v===cur)continue;
     if(v)ds[d]=v;else delete ds[d];changes.push(`${d} ${v==='OFF'?'rest day':(v||'default')}`);
   }
@@ -3526,6 +3526,7 @@ function dtrEditor(o,canAppr){
         return `<label class="f">Shift in this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_in" placeholder="${h(def)}" value="${ds&&ds.in?h(ds.in):''}" ${sdis}></label>
       <label class="f">Shift out this day<input type="text" class="t24" autocomplete="off" maxlength="10" name="day_shift_out" placeholder="${h(defO)}" value="${ds&&ds.out?h(ds.out):''}" ${sdis}></label>
       <label class="chk small" style="align-self:end;min-height:40px"><input type="checkbox" name="day_off" ${ds&&ds.off?'checked':''} ${sdis}> Rest day this date</label>`})()}
+      ${holidayMap()[r.work_date]?`<label class="chk small" style="align-self:end;min-height:40px" title="Tick if this employee does not get holiday pay for this date. The day is then paid as an ordinary day (or rest day)."><input type="checkbox" name="hol_exempt" ${r.hol_exempt?'checked':''} ${tdis}> Hindi qualified sa holiday</label>`:''}
       <label class="f">Day status${`<select name="status_override" ${tdis}>${[['','Automatic'],['P','Present'],['A','Absent'],['HD','Half day'],['RD','Rest day']].map(([v,l])=>`<option value="${v}" ${(r.status_override||'')===v?'selected':''}>${l}</option>`).join('')}</select>`}</label>
       <label class="f">Overtime (${fmtMin(c.otActual)})${sel('ot_approval',[['PENDING','Pending'],['YES','Approve'],['NO','Don’t approve']],r.ot_approval||'PENDING')}</label>
       <label class="f">OT hours to approve <span class="muted small">(blank = all ${fmtHM(c.otActual)})</span><input type="text" name="ot_hours" inputmode="decimal" autocomplete="off" maxlength="6" placeholder="${fmtHM(c.otActual)}" value="${otCapMin(r)!=null?fmtHM(otCapMin(r)):''}" ${dis||(c.otActual<S.settings.min_ot?'disabled':'')} title="Hours of overtime to pay, e.g. 1, 1.5 or 1:30. Leave blank to pay all of the computed overtime."></label>
@@ -3583,6 +3584,7 @@ async function saveDtr(form){
     const ti=g('time_in')||null,to=g('time_out')||null,so=g('status_override')||null;
     if(ti!==(r.time_in||null)){changes.push(`time in ${r.time_in||'—'} → ${ti||'—'}`);patch.time_in=ti}
     if(to!==(r.time_out||null)){changes.push(`time out ${r.time_out||'—'} → ${to||'—'}`);patch.time_out=to}
+    if(form.querySelector('[name=hol_exempt]:not(:disabled)')){const ex=!!form.querySelector('[name=hol_exempt]').checked;if(ex!==!!r.hol_exempt){changes.push(ex?'not qualified for the holiday':'qualified for the holiday');patch.hol_exempt=ex}}
     if(so!==(r.status_override||null)){changes.push(`status → ${so||'automatic'}`);patch.status_override=so}
     if(changes.length&&!patch.remarks&&!(r.remarks)){toast('Add a remark explaining the time correction.',true);return}
     if(patch.time_in!==undefined||patch.time_out!==undefined)patch.corrected=true;
@@ -4667,7 +4669,7 @@ const mSaveBtn=()=>{const m=S.ui.multi,b=document.querySelector('[data-act="mSav
 document.addEventListener('input',e=>{if(mSync(e.target))mSaveBtn()});
 document.addEventListener('change',e=>{if(mSync(e.target)){mSaveBtn();if(e.target.dataset.m==='eid')render();else if(e.target.dataset.mr==='d')scheduleRender()}});
 document.addEventListener('focusout',e=>{const i=e.target;if(i&&i.classList&&i.classList.contains('t24'))setTimeout(()=>mSync(i),0)});
-document.addEventListener('change',e=>{const c=e.target;if(c&&c.classList&&c.classList.contains('sch-off')){const tr=c.closest('tr');for(const i of tr.querySelectorAll('.sch-in,.sch-out')){i.disabled=c.checked;if(c.checked)i.value=''}}
+document.addEventListener('change',e=>{const c=e.target;if(c&&c.classList&&c.classList.contains('sch-off')){/* a rest day keeps its shift boxes editable: rest day + shift = worked rest day on that shift */}
   /* day_off (editor): the shift boxes stay editable, a rest day can be worked on its own shift */});
 function mAdd(){
   const m=multiState();mSyncAll();
