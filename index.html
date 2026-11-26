@@ -793,8 +793,8 @@ function calcEntry(r,emp){
       late=Math.max(0,Math.round(ti2-sIn)-Number(st.grace_min));
       ut=Math.max(0,Math.round(sOut-to));
       otActual=Math.max(0,Math.round(to-sOut));
-    } else otActual=Math.max(0,worked-Number(st.hours_per_day)*60);
-    for(const base of[-1440,0,1440]){const a=Math.max(ti2,base+ndS),b=Math.min(to,base+1440+ndE);if(b>a)nd+=Math.round(b-a)}
+    } else otActual=Math.max(0,Math.min(worked-Number(st.hours_per_day)*60,Math.round(to-sOut))); // holiday / rest day: OT only after the shift ends, never from time worked before it starts
+    for(const base of[-1440,0,1440]){const a=Math.max(ti2,sIn,base+ndS),b=Math.min(to,base+1440+ndE);if(b>a)nd+=Math.round(b-a)}
   }
   else if(status==='CHK'&&tiA!=null&&dayClass==='REG')late=Math.max(0,Math.round(tiA-sIn)-Number(st.grace_min)); // time-out missing (not yet out, or forgot to punch): the late still counts from the time-in
   const otOk=emp?emp.ot_eligible!==false:true;
