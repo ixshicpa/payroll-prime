@@ -1951,8 +1951,27 @@ async function loadApprovedMonth(){
 }
 function applyApprovedMonth(list){
   const A=S.apprMonth;if(!A||!A.sig||A.sig!==apprMonthSig())return list;
-  for(const x of list){const mo=moFromApproved(A.a.get(String(x.e.id)),A.b.get(String(x.e.id)));if(mo){x.mo={...x.mo,...mo};x.birRow={...x.birRow,gross:mo.gross};x.moApproved=true}}
+  for(const x of list){const mo=moFromApproved(A.a.get(String(x.e.id)),A.b.get(String(x.e.id)));if(mo){x.mo={...x.mo,...mo};x.birRow=birFromMonth(x,mo);x.moApproved=true}}
   return list;
+}
+/* BIR Purposes of an approved month: built from the same approved amounts as the Monthly sheet (not from today's attendance),
+   so basic, late, holiday pay, overtime, night differential and the government bases always agree with Monthly. */
+function birFromMonth(x,mo){
+  const b=x.birRow,st=S.settings,e=x.e,bir=x.bir;
+  const taxAllow=r2(Math.min(Number(b.taxAllow)||0,Number(mo.allowance)||0)),ntAllow=r2((Number(mo.allowance)||0)-taxAllow);
+  const parts={basic:mo.basic,less:-r2((Number(mo.lateUt)||0)+(Number(mo.absence)||0)),hol:mo.hol,ot:mo.otPay,nd:mo.ndPay,allowTax:taxAllow,allowNon:ntAllow};
+  const comp=govBasisOf('sss',parts),phicBasis=govBasisOf('phic',parts),hdmfBasis=govBasisOf('hdmf',parts),taxComp=govBasisOf('tax',parts);
+  const sss=bir?sssCalc(comp):sssCalc(0);
+  const pb=Math.min(Math.max(phicBasis,st.phic_floor),st.phic_ceiling);
+  const phicEe=bir?r2(pb*st.phic_rate*st.phic_employee_share):0,phicEr=bir?r2(pb*st.phic_rate)-phicEe:0;
+  let hdmfEe=bir?Number(st.hdmf_ee):0,hdmfEr=bir?Number(st.hdmf_er):0;
+  if(bir&&st.hdmf_mode==='percent'){const bb=Math.min(hdmfBasis,Number(st.hdmf_max_salary)||10000);hdmfEe=r2(bb*(hdmfBasis<=1500?0.01:0.02));hdmfEr=r2(bb*0.02)}
+  if(e.hdmf_exempt){hdmfEe=0;hdmfEr=0}
+  const contribEe=r2(r2(sss.ee+sss.mpfEe)+phicEe+hdmfEe);
+  const taxable=bir&&!x.mwe?Math.max(0,r2(taxComp-contribEe)):0,tax=bir&&!x.mwe?monthlyTax(taxable):0;
+  const taxType=!bir?'':(x.mwe?'T1':(tax>0?'T3':'T2'));
+  return {...b,basic:mo.basic,lateAbs:r2((Number(mo.lateUt)||0)+(Number(mo.absence)||0)),netLA:mo.netLA,hol:mo.hol,taxAllow,ntAllow,otnd:r2((Number(mo.otPay)||0)+(Number(mo.ndPay)||0)),comp,phicBasis,hdmfBasis,taxComp,gross:mo.gross,parts,
+    msc:sss.msc,sssEr:sss.er,sssEe:sss.ee,ec:sss.ec,mpfEr:sss.mpfEr,mpfEe:sss.mpfEe,phicEr,phicEe,hdmfEr,hdmfEe,contribEe,netContrib:r2(taxComp-contribEe),taxable,tax,taxType};
 }
 async function saveRecord(n,all){
   const P=S.period,c=P.cuts[n-1],k=n===1?'k1':'k2',paid=all.filter(x=>!x[k].off),d=S.payDocs[n]||{};
