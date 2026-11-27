@@ -795,7 +795,10 @@ function calcEntry(r,emp){
       late=Math.max(0,Math.round(ti2-sIn)-Number(st.grace_min));
       ut=Math.max(0,Math.round(sOut-to));
       otActual=Math.max(0,Math.round(to-sOut));
-    } else otActual=Math.max(0,Math.min(worked-Number(st.hours_per_day)*60,Math.round(to-sOut))); // holiday / rest day: OT only after the shift ends, never from time worked before it starts
+    } else{
+      otActual=Math.max(0,Math.min(worked-Number(st.hours_per_day)*60,Math.round(to-sOut))); // holiday / rest day: OT only after the shift ends, never from time worked before it starts
+      if(r.work_date>=String(st.dole_from||'2026-10-11')){late=Math.max(0,Math.round(ti2-sIn)-Number(st.grace_min));ut=Math.max(0,Math.round(sOut-to))} // arriving late / leaving early on a holiday or rest day is a late / undertime deduction, the day is still paid in full
+    }
     for(const base of[-1440,0,1440]){const a=Math.max(ti2,sIn,base+ndS),b=Math.min(to,base+1440+ndE);if(b>a)nd+=Math.round(b-a)}
   }
   else if(status==='CHK'&&tiA!=null&&dayClass==='REG')late=Math.max(0,Math.round(tiA-sIn)-Number(st.grace_min)); // time-out missing (not yet out, or forgot to punch): the late still counts from the time-in
@@ -883,9 +886,8 @@ function cutCalc(e,rows,cutoff){
       // The monthly salary already pays regular holidays and special days (100%), but not rest days.
       t.hol+=hourly*hrs*(m-((kind==='RH'||kind==='SNW')?1:0));
     }else{
-      t.payDays+=frac; // the 100% part of the hours worked
+      t.payDays+=1; // the day is paid in full; late / undertime is deducted separately (Late / undertime), not by shortening the days
       t.hol+=hourly*hrs*(m-1);
-      if(kind==='RH'){t.hol+=daily*(1-frac);cls.rhUnw+=(1-frac)} // regular holiday pay for the hours not worked
     }
     t.holDays++;
   }
