@@ -6241,7 +6241,8 @@ function t24Fix(i){
   let t=parseTime(v);if(!t)return;
   // A time out typed without AM/PM (5:00) that falls before the time in (08:00) is read as PM (17:00).
   // A shift end earlier than its start is a night shift (16:00 → 04:00): only read as PM when the shift would be longer than 14 hours.
-  if(!/[AP]/i.test(v)){const p=t24Partner(i),pi=p&&parseTime(p.value),isShift=i.name!=='time_out'&&i.dataset.mr!=='o'&&i.dataset.m!=='fo';
+  // No more PM guessing: the time is kept exactly as typed (4:39 stays 04:39). Type 4:39 PM or 16:39 for the afternoon.
+  if(false&&!/[AP]/i.test(v)){const p=t24Partner(i),pi=p&&parseTime(p.value),isShift=i.name!=='time_out'&&i.dataset.mr!=='o'&&i.dataset.m!=='fo';
     // 00:xx is an explicit midnight (e.g. out at 00:00 after a night shift): never shifted to 12:xx.
     if(pi&&!/^0{1,2}\s*[:.]/.test(v)&&!/^0{3,4}$/.test(v)){const o=toMin(t),a=toMin(pi);if(o>=60&&o<720&&o<a&&o+720>a&&o+720<1440&&(!isShift||o-a+1440>840))t=pad(Math.floor((o+720)/60))+':'+pad(o%60)}}
   if(i.value!==t){i.value=t;i.classList.add('t24-conv');setTimeout(()=>i.classList.remove('t24-conv'),900);i.dispatchEvent(new Event('input',{bubbles:true}))}
